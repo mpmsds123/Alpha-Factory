@@ -13,10 +13,12 @@ def build_run_report(repository: Repository, run_id: str | UUID) -> str:
     attempts = repository.list_attempts(run_id)
     decisions = repository.list_decisions(run_id)
     platform_checks = repository.list_platform_checks(run_id)
+    llm_requests = repository.list_llm_requests(run_id)
     candidate_counts = Counter(candidate.status for candidate in candidates)
     attempt_counts = Counter(attempt.status for attempt in attempts)
     gate_counts = Counter(decision.outcome for decision in decisions)
     platform_counts = Counter(check.status for check in platform_checks)
+    llm_status_counts = Counter(request.validation_status for request in llm_requests)
     repair_counts = Counter(
         candidate.changed_dimension for candidate in candidates if candidate.changed_dimension
     )
@@ -33,6 +35,8 @@ def build_run_report(repository: Repository, run_id: str | UUID) -> str:
     unused_seconds = max(
         0, int(limits["maximum_wall_clock_seconds"] - repository.age_seconds(run_id))
     )
+    recorded_tokens = sum(request.total_tokens or 0 for request in llm_requests)
+    unused_llm_requests = max(0, limits["maximum_llm_requests"] - len(llm_requests))
 
     lines = [
         f"# Run report: {run.run_id}",
@@ -45,6 +49,8 @@ def build_run_report(repository: Repository, run_id: str | UUID) -> str:
         f"- Routing policy: `{run.routing_policy_version}`",
         f"- Limit policy: `{run.limit_policy_version}`",
         f"- Adapter mode: `{run.adapter_mode}`",
+        f"- Generator prompt: `{run.generator_prompt_version}`",
+        f"- Repair prompt: `{run.repair_prompt_version}`",
         "",
         "## Reconciliation",
         "",
@@ -73,7 +79,7 @@ def build_run_report(repository: Repository, run_id: str | UUID) -> str:
         lines.append(f"- {outcome}: {count}")
     lines.extend(["", "## Repair actions", ""])
     if not repair_counts:
-        lines.append("- None (repair planning is deferred to Milestone 2)")
+        lines.append("- None recorded")
     for dimension, count in sorted(repair_counts.items()):
         lines.append(f"- {dimension}: {count}")
     lines.extend(["", "## Platform checks", ""])
@@ -86,14 +92,20 @@ def build_run_report(repository: Repository, run_id: str | UUID) -> str:
             "",
             "## LLM ledger",
             "",
-            "- Requests: 0 (LLM behavior is unavailable in Milestone 1)",
-            "- Recorded tokens: 0",
+            f"- Requests: {len(llm_requests)}",
+            f"- Recorded tokens: {recorded_tokens}",
+        ]
+    )
+    for validation_status, count in sorted(llm_status_counts.items()):
+        lines.append(f"- LLM {validation_status}: {count}")
+    lines.extend(
+        [
             "",
             "## Unused limits",
             "",
             f"- Distinct candidates: {unused_candidates}",
             f"- Simulation attempt rows: {unused_attempts}",
-            f"- LLM requests: {limits['maximum_llm_requests']}",
+            f"- LLM requests: {unused_llm_requests}",
             f"- Approximate wall-clock seconds: {unused_seconds}",
         ]
     )

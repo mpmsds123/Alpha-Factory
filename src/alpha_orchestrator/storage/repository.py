@@ -5,21 +5,32 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from alpha_orchestrator.config import LimitPolicy, RoutingPolicy
 from alpha_orchestrator.domain.enums import (
     AttemptStatus,
     CandidateStatus,
+    DataType,
+    EvidenceLevel,
     GateOutcome,
+    LLMRole,
+    LLMValidationStatus,
+    MethodCardStatus,
     RunStatus,
 )
-from alpha_orchestrator.domain.errors import redact_text
+from alpha_orchestrator.domain.errors import assert_no_sensitive_data, redact_text
 from alpha_orchestrator.domain.identity import (
     candidate_fingerprint,
     canonicalize_expression,
     normalized_content_hash,
+)
+from alpha_orchestrator.domain.knowledge import (
+    MethodCard,
+    SourceDocument,
+    SourceReference,
+    SourceSection,
 )
 from alpha_orchestrator.domain.models import (
     CandidateProposal,
@@ -35,9 +46,14 @@ from alpha_orchestrator.storage.models import (
     DecisionORM,
     EventORM,
     LineageEdgeORM,
+    LLMRequestORM,
+    MethodCardORM,
     PlatformCheckORM,
+    PromptVersionORM,
     RunORM,
     SimulationAttemptORM,
+    SourceDocumentORM,
+    SourceSectionORM,
 )
 
 
@@ -125,7 +141,9 @@ class Repository:
         run_id: str | UUID,
         proposal: CandidateProposal,
         known_operators: set[str],
+        llm_request_id: str | None = None,
     ) -> CandidateInsertResult:
+        assert_no_sensitive_data(proposal.model_dump(mode="python"))
         run = self.get_run(run_id)
         canonical_expression = canonicalize_expression(proposal.expression, known_operators)
         fingerprint = candidate_fingerprint(
@@ -137,6 +155,11 @@ class Repository:
         )
         content_hash = normalized_content_hash(canonical_expression, proposal.settings)
         with self._sessions.begin() as session:
+            llm_request = None
+            if llm_request_id is not None:
+                llm_request = session.get(LLMRequestORM, llm_request_id)
+                if llm_request is None or llm_request.related_run_id != str(run_id):
+                    raise ValueError("LLM request must exist in the same run as the candidate")
             duplicate = session.scalar(
                 select(CandidateORM).where(
                     CandidateORM.run_id == str(run_id),
@@ -153,13 +176,19 @@ class Repository:
                     GateOutcome.REUSED,
                     ["DUPLICATE_REUSED"],
                     {},
+                    llm_request_id,
                 )
+                duplicate_payload: dict[str, Any] = {"candidate_fingerprint": fingerprint}
+                if proposal.uncertainty is not None:
+                    duplicate_payload["proposal_uncertainty"] = proposal.uncertainty
+                if llm_request is not None:
+                    duplicate_payload["llm_request_id"] = llm_request.request_id
                 self._add_event(
                     session,
                     str(run_id),
                     duplicate.candidate_id,
                     "DUPLICATE_REUSED",
-                    {"candidate_fingerprint": fingerprint},
+                    duplicate_payload,
                 )
                 return CandidateInsertResult(candidate=duplicate, created=False)
 
@@ -196,12 +225,17 @@ class Repository:
                         change_reason=proposal.change_reason or "",
                     )
                 )
+            proposal_payload: dict[str, Any] = {"candidate_fingerprint": fingerprint}
+            if proposal.uncertainty is not None:
+                proposal_payload["proposal_uncertainty"] = proposal.uncertainty
+            if llm_request is not None:
+                proposal_payload["llm_request_id"] = llm_request.request_id
             self._add_event(
                 session,
                 str(run_id),
                 candidate.candidate_id,
                 "CANDIDATE_PROPOSED",
-                {"candidate_fingerprint": fingerprint},
+                proposal_payload,
             )
             return CandidateInsertResult(candidate=candidate, created=True)
 
@@ -471,6 +505,19 @@ class Repository:
                 session.expunge(decision)
             return decisions
 
+    def list_events(self, run_id: str | UUID) -> list[EventORM]:
+        with self._sessions() as session:
+            events = list(
+                session.scalars(
+                    select(EventORM)
+                    .where(EventORM.run_id == str(run_id))
+                    .order_by(EventORM.created_at)
+                )
+            )
+            for event in events:
+                session.expunge(event)
+            return events
+
     def list_platform_checks(self, run_id: str | UUID) -> list[PlatformCheckORM]:
         with self._sessions() as session:
             checks = list(
@@ -485,6 +532,276 @@ class Repository:
                 session.expunge(check)
             return checks
 
+    def upsert_source_document(self, document: SourceDocument) -> None:
+        with self._sessions.begin() as session:
+            persisted = session.get(SourceDocumentORM, document.source_id)
+            values = document.model_dump(mode="json", exclude={"sections"})
+            if persisted is None:
+                persisted = SourceDocumentORM(**values)
+                session.add(persisted)
+                session.flush()
+            else:
+                for key, value in values.items():
+                    setattr(persisted, key, value)
+                persisted.inventoried_at = utc_now()
+                session.execute(
+                    delete(SourceSectionORM).where(SourceSectionORM.source_id == document.source_id)
+                )
+            for section in document.sections:
+                session.add(
+                    SourceSectionORM(
+                        **section.model_dump(mode="json"), source_id=document.source_id
+                    )
+                )
+
+    def get_source_document(self, source_id: str) -> SourceDocument:
+        with self._sessions() as session:
+            document = session.get(SourceDocumentORM, source_id)
+            if document is None:
+                raise MissingRecord(f"Source document not found: {source_id}")
+            sections = list(
+                session.scalars(
+                    select(SourceSectionORM)
+                    .where(SourceSectionORM.source_id == source_id)
+                    .order_by(SourceSectionORM.section_locator)
+                )
+            )
+            return SourceDocument(
+                source_id=document.source_id,
+                corpus_root_locator=document.corpus_root_locator,
+                relative_locator=document.relative_locator,
+                title=document.title,
+                source_type=EvidenceLevel(document.source_type),
+                content_hash=document.content_hash,
+                excluded=document.excluded,
+                exclusion_reason=document.exclusion_reason,
+                sections=[
+                    SourceSection(
+                        section_id=section.section_id,
+                        heading=section.heading,
+                        section_locator=section.section_locator,
+                        content_hash=section.content_hash,
+                    )
+                    for section in sections
+                ],
+            )
+
+    def list_source_documents(self) -> list[SourceDocument]:
+        with self._sessions() as session:
+            source_ids = list(
+                session.scalars(
+                    select(SourceDocumentORM.source_id).order_by(SourceDocumentORM.relative_locator)
+                )
+            )
+        return [self.get_source_document(source_id) for source_id in source_ids]
+
+    def upsert_method_card(self, card: MethodCard) -> MethodCard:
+        assert_no_sensitive_data(card.model_dump(mode="python"))
+        with self._sessions.begin() as session:
+            persisted = session.scalar(
+                select(MethodCardORM).where(
+                    MethodCardORM.card_id == card.card_id,
+                    MethodCardORM.version == card.version,
+                )
+            )
+            values = card.model_dump(mode="python")
+            if persisted is not None and persisted.status == MethodCardStatus.APPROVED:
+                immutable_existing = self._method_card_from_orm(persisted).model_dump(
+                    mode="json", exclude={"status", "reviewer", "approval_timestamp"}
+                )
+                immutable_incoming = card.model_dump(
+                    mode="json", exclude={"status", "reviewer", "approval_timestamp"}
+                )
+                if immutable_existing != immutable_incoming:
+                    raise ValueError("Approved method-card versions are immutable")
+                return self._method_card_from_orm(persisted)
+            if persisted is None:
+                session.add(MethodCardORM(row_id=str(uuid4()), **values))
+                return card
+            for key, value in values.items():
+                setattr(persisted, key, value)
+            persisted.updated_at = utc_now()
+            return card
+
+    def approve_method_card(self, card_id: str, reviewer: str) -> MethodCard:
+        if not reviewer.strip():
+            raise ValueError("Reviewer is required")
+        with self._sessions.begin() as session:
+            persisted = session.scalar(
+                select(MethodCardORM)
+                .where(MethodCardORM.card_id == card_id)
+                .order_by(MethodCardORM.version.desc())
+                .limit(1)
+            )
+            if persisted is None:
+                raise MissingRecord(f"Method card not found: {card_id}")
+            persisted.status = MethodCardStatus.APPROVED
+            persisted.reviewer = reviewer.strip()
+            persisted.approval_timestamp = utc_now()
+            persisted.updated_at = utc_now()
+            session.flush()
+            return self._method_card_from_orm(persisted)
+
+    def list_method_cards(self, status: MethodCardStatus | None = None) -> list[MethodCard]:
+        with self._sessions() as session:
+            statement = select(MethodCardORM)
+            if status is not None:
+                statement = statement.where(MethodCardORM.status == status)
+            cards = list(
+                session.scalars(statement.order_by(MethodCardORM.card_id, MethodCardORM.version))
+            )
+            return [self._method_card_from_orm(card) for card in cards]
+
+    def register_prompt_version(self, version: str, role: LLMRole, content: str) -> str:
+        from alpha_orchestrator.domain.identity import sha256_text
+
+        assert_no_sensitive_data(content)
+        content_hash = sha256_text(content)
+        with self._sessions.begin() as session:
+            persisted = session.get(PromptVersionORM, version)
+            if persisted is not None:
+                if persisted.content_hash != content_hash or persisted.role != role:
+                    raise ValueError(f"Prompt version is immutable: {version}")
+                return content_hash
+            session.add(
+                PromptVersionORM(
+                    version=version,
+                    role=role,
+                    content_hash=content_hash,
+                    content=content,
+                )
+            )
+        return content_hash
+
+    def get_prompt_version(self, version: str) -> PromptVersionORM:
+        with self._sessions() as session:
+            prompt = session.get(PromptVersionORM, version)
+            if prompt is None:
+                raise MissingRecord(f"Prompt version not found: {version}")
+            session.expunge(prompt)
+            return prompt
+
+    def start_llm_request(
+        self,
+        *,
+        prompt_version: str,
+        role: LLMRole,
+        model: str,
+        temperature: float,
+        input_hash: str,
+        context_manifest: dict[str, Any],
+        related_run_id: str | UUID,
+        related_candidate_id: str | UUID | None = None,
+    ) -> LLMRequestORM:
+        assert_no_sensitive_data(context_manifest)
+        request = LLMRequestORM(
+            request_id=str(uuid4()),
+            prompt_version=prompt_version,
+            role=role,
+            model=model,
+            temperature=temperature,
+            input_hash=input_hash,
+            context_manifest_json=context_manifest,
+            validation_status=LLMValidationStatus.PENDING,
+            related_run_id=str(related_run_id),
+            related_candidate_id=(
+                str(related_candidate_id) if related_candidate_id is not None else None
+            ),
+        )
+        with self._sessions.begin() as session:
+            if session.get(RunORM, str(related_run_id)) is None:
+                raise MissingRecord(f"Run not found: {related_run_id}")
+            if session.get(PromptVersionORM, prompt_version) is None:
+                raise MissingRecord(f"Prompt version not found: {prompt_version}")
+            if (
+                related_candidate_id is not None
+                and session.get(CandidateORM, str(related_candidate_id)) is None
+            ):
+                raise MissingRecord(f"Candidate not found: {related_candidate_id}")
+            session.add(request)
+        return request
+
+    def finish_llm_request(
+        self,
+        request_id: str,
+        *,
+        validation_status: LLMValidationStatus,
+        output_hash: str | None,
+        latency_ms: int,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        total_tokens: int | None = None,
+        actual_model: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        with self._sessions.begin() as session:
+            request = session.get(LLMRequestORM, request_id)
+            if request is None:
+                raise MissingRecord(f"LLM request not found: {request_id}")
+            request.validation_status = validation_status
+            request.output_hash = output_hash
+            request.latency_ms = latency_ms
+            request.prompt_tokens = prompt_tokens
+            request.completion_tokens = completion_tokens
+            request.total_tokens = total_tokens
+            if actual_model:
+                request.model = actual_model
+            request.error_message_redacted = redact_text(error_message)
+            request.completed_at = utc_now()
+
+    def list_llm_requests(self, run_id: str | UUID) -> list[LLMRequestORM]:
+        with self._sessions() as session:
+            requests = list(
+                session.scalars(
+                    select(LLMRequestORM)
+                    .where(LLMRequestORM.related_run_id == str(run_id))
+                    .order_by(LLMRequestORM.created_at)
+                )
+            )
+            for request in requests:
+                session.expunge(request)
+            return requests
+
+    def count_llm_requests(
+        self,
+        run_id: str | UUID,
+        role: LLMRole | None = None,
+        candidate_id: str | UUID | None = None,
+    ) -> int:
+        with self._sessions() as session:
+            statement = (
+                select(func.count())
+                .select_from(LLMRequestORM)
+                .where(LLMRequestORM.related_run_id == str(run_id))
+            )
+            if role is not None:
+                statement = statement.where(LLMRequestORM.role == role)
+            if candidate_id is not None:
+                statement = statement.where(LLMRequestORM.related_candidate_id == str(candidate_id))
+            return int(session.scalar(statement) or 0)
+
+    @staticmethod
+    def _method_card_from_orm(card: MethodCardORM) -> MethodCard:
+        return MethodCard(
+            card_id=card.card_id,
+            title=card.title,
+            version=card.version,
+            status=MethodCardStatus(card.status),
+            applicable_failure_codes=card.applicable_failure_codes,
+            applicable_data_types=[DataType(value) for value in card.applicable_data_types],
+            prerequisites=card.prerequisites,
+            diagnostic_signals=card.diagnostic_signals,
+            allowed_repair_actions=card.allowed_repair_actions,
+            prohibited_actions=card.prohibited_actions,
+            stop_condition=card.stop_condition,
+            evidence_level=EvidenceLevel(card.evidence_level),
+            source_references=[
+                SourceReference.model_validate(reference) for reference in card.source_references
+            ],
+            reviewer=card.reviewer,
+            approval_timestamp=card.approval_timestamp,
+        )
+
     @staticmethod
     def _add_decision(
         session: Session,
@@ -494,6 +811,7 @@ class Repository:
         outcome: GateOutcome,
         reason_codes: list[str],
         metric_snapshot: dict[str, Any],
+        llm_request_id: str | None = None,
     ) -> None:
         session.add(
             DecisionORM(
@@ -504,6 +822,7 @@ class Repository:
                 outcome=outcome,
                 reason_codes=reason_codes,
                 metric_snapshot=metric_snapshot,
+                llm_request_id=llm_request_id,
             )
         )
 

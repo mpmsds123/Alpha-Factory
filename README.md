@@ -10,7 +10,7 @@ read-only architectural evidence; this project does not import, vendor, modify, 
 either system. The frozen contracts and safety boundaries are user-authored design decisions,
 and all implementation code here is new.
 
-## Milestone 1 boundary
+## Implemented milestones
 
 Implemented:
 
@@ -23,10 +23,22 @@ Implemented:
 - deterministic structural validation, routing, backpressure, and stopping;
 - bounded retries with stable idempotency keys;
 - `FakeBrainAdapter` and sanitized `ReplayBrainAdapter`;
-- deterministic Markdown run reports and structured secret-redacting logs.
+- deterministic Markdown run reports and structured secret-redacting logs;
+- private Markdown inventory containing hashes and traceable section locators, not raw text;
+- explicit paraphrased `method-card` block extraction, human approval, and immutable approved
+  versions;
+- approved-card-only tag filtering with deterministic BM25-style lexical ranking;
+- versioned generator and repair prompts persisted with their content hashes;
+- proposal-only CandidateGenerator with explicit uncertainty and single-parent RepairPlanner
+  contracts;
+- OpenAI-compatible client configuration, strict Pydantic output validation, and an LLM request
+  ledger that stores hashes, frozen snapshot/MethodCard version manifests, and usage metadata
+  rather than raw inputs or outputs.
 
-Explicitly deferred: LLMs, corpus ingestion, live WorldQuant access, MCP, a Web dashboard, and
-automatic submission. A local routing result is never described as platform approval.
+Explicitly deferred: live WorldQuant access, live platform checks, MCP, a Web dashboard, and
+automatic submission. A local routing result is never described as platform approval. LLM calls
+occur only when the user explicitly supplies separate endpoint credentials; replay remains fully
+offline.
 
 ## Install and verify
 
@@ -55,6 +67,28 @@ alpha-lab report "$RUN_ID" --db alpha_lab.db
 
 `run stop` records an exact human stop reason. `run resume` reconstructs work from SQLite and
 does not repeat completed simulations. There is intentionally no `submit` command.
+
+## Private corpus and method cards
+
+```bash
+alpha-lab corpus inventory /path/to/private/markdown \
+  --source-type training --db alpha_lab.db
+alpha-lab corpus extract SRC-... --db alpha_lab.db
+alpha-lab cards list --status draft --db alpha_lab.db
+alpha-lab cards approve MC-... --reviewer "Reviewer Name" --db alpha_lab.db
+```
+
+Extraction recognizes only explicit `method-card` YAML fences whose content is already
+paraphrased. Drafts cannot influence retrieval until a human approval record exists. Forum
+experience can guide a proposal after approval, but deterministic gates never convert it into a
+platform rule.
+
+## Optional proposal LLM
+
+The library exposes `CandidateGenerator` and `RepairPlanner`; both validate complete output before
+inserting any candidate. Configure the client only through the `ALPHA_LAB_LLM_*` environment
+variables shown in `.env.example`. API keys are represented as secret values in memory and are not
+persisted. Automated tests intercept the HTTP boundary and never contact an external endpoint.
 
 ## Trust boundary
 

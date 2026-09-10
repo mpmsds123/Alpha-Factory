@@ -12,6 +12,10 @@ TOKEN_RE = re.compile(
 )
 
 
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
 def canonical_json(value: Mapping[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
@@ -40,13 +44,13 @@ def candidate_fingerprint(
     payload = "\x1f".join(
         (canonical_expression, canonical_json(settings), region, universe, str(delay))
     )
-    return hashlib.sha256(payload.encode()).hexdigest()
+    return sha256_text(payload)
 
 
 def normalized_content_hash(canonical_expression: str, settings: Mapping[str, Any]) -> str:
     payload = "\x1f".join((canonical_expression, canonical_json(settings)))
-    return hashlib.sha256(payload.encode()).hexdigest()
+    return sha256_text(payload)
 
 
 def stable_idempotency_key(candidate_id: str, operation: str = "simulation-create") -> str:
-    return hashlib.sha256(f"{operation}:{candidate_id}".encode()).hexdigest()
+    return sha256_text(f"{operation}:{candidate_id}")

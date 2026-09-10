@@ -1,6 +1,8 @@
 """Error semantics and secret redaction."""
 
 import re
+from collections.abc import Mapping
+from typing import Any
 
 from alpha_orchestrator.domain.enums import ErrorClass
 
@@ -12,6 +14,9 @@ RETRYABLE_ERRORS = frozenset(
         ErrorClass.TIMEOUT,
         ErrorClass.NETWORK,
     }
+)
+CREDENTIAL_KEYS = frozenset(
+    {"api_key", "apikey", "authorization", "cookie", "password", "session", "token"}
 )
 
 REDACTION_PATTERNS = (
@@ -34,3 +39,21 @@ def redact_text(value: str | None) -> str | None:
     for pattern in REDACTION_PATTERNS:
         redacted = pattern.sub("[REDACTED]", redacted)
     return redacted
+
+
+def contains_sensitive_data(value: Any) -> bool:
+    if isinstance(value, str):
+        return redact_text(value) != value
+    if isinstance(value, Mapping):
+        return any(
+            str(key).casefold() in CREDENTIAL_KEYS or contains_sensitive_data(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list | tuple | set):
+        return any(contains_sensitive_data(item) for item in value)
+    return False
+
+
+def assert_no_sensitive_data(value: Any) -> None:
+    if contains_sensitive_data(value):
+        raise ValueError("Credential-like content is forbidden in persisted research data")

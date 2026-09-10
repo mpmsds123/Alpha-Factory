@@ -88,3 +88,57 @@ def test_cli_refuses_live_or_missing_fixture(tmp_path: Path, monkeypatch: object
         ["run", "execute", run_id, "--adapter", "live", "--db", str(database)],
     )
     assert live.exit_code != 0
+
+
+def test_cli_corpus_and_card_approval_workflow(tmp_path: Path, monkeypatch: object) -> None:
+    database = tmp_path / "lab.db"
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "method.md").write_text(
+        """# Method\n\n```method-card
+card_id: MC-CLI-001
+title: CLI method card
+version: v1
+applicable_failure_codes: [LOW_COVERAGE]
+applicable_data_types: [MATRIX]
+prerequisites: [Confirm metadata]
+diagnostic_signals: [Coverage is low]
+allowed_repair_actions: [Change one field]
+prohibited_actions: [Do not change limits]
+stop_condition: Stop after one repair.
+evidence_level: training
+```\n""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(ROOT)
+    inventoried = runner.invoke(
+        app,
+        [
+            "corpus",
+            "inventory",
+            str(corpus),
+            "--source-type",
+            "training",
+            "--db",
+            str(database),
+        ],
+    )
+    assert inventoried.exit_code == 0
+    source_id = json.loads(inventoried.stdout)["source_ids"][0]
+    extracted = runner.invoke(app, ["corpus", "extract", source_id, "--db", str(database)])
+    assert json.loads(extracted.stdout) == ["MC-CLI-001"]
+    drafts = runner.invoke(app, ["cards", "list", "--status", "draft", "--db", str(database)])
+    assert json.loads(drafts.stdout)[0]["status"] == "draft"
+    approved = runner.invoke(
+        app,
+        [
+            "cards",
+            "approve",
+            "MC-CLI-001",
+            "--reviewer",
+            "CLI Reviewer",
+            "--db",
+            str(database),
+        ],
+    )
+    assert json.loads(approved.stdout)["status"] == "approved"

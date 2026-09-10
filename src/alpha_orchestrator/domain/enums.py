@@ -81,3 +81,33 @@ class PlatformCheckStatus(StrEnum):
     WARNING = "WARNING"
     PENDING = "PENDING"
     ERROR = "ERROR"
+
+
+class MethodCardStatus(StrEnum):
+    DRAFT = "draft"
+    APPROVED = "approved"
+    RETIRED = "retired"
+
+
+class EvidenceLevel(StrEnum):
+    OFFICIAL = "official"
+    TRAINING = "training"
+    FORUM_EXPERIENCE = "forum_experience"
+    UNVERIFIED = "unverified"
+
+
+class LLMRole(StrEnum):
+    GENERATOR = "generator"
+    REPAIR_PLANNER = "repair_planner"
+
+
+class LLMValidationStatus(StrEnum):
+    PENDING = "PENDING"
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+    ERROR = "ERROR"
+
+
+class RepairAction(StrEnum):
+    STOP = "STOP"
+    REPAIR = "REPAIR"

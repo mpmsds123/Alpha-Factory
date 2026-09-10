@@ -1,4 +1,4 @@
-"""Offline Milestone 1 command-line interface."""
+"""Offline-first command-line interface."""
 
 import json
 import os
@@ -9,8 +9,16 @@ import typer
 
 from alpha_orchestrator.adapters.replay import ReplayBrainAdapter
 from alpha_orchestrator.config import load_limit_policy, load_routing_policy
-from alpha_orchestrator.domain.enums import AdapterMode, DataType, RunStatus
+from alpha_orchestrator.domain.enums import (
+    AdapterMode,
+    DataType,
+    EvidenceLevel,
+    MethodCardStatus,
+    RunStatus,
+)
 from alpha_orchestrator.domain.models import RunSpecification
+from alpha_orchestrator.knowledge.corpus import CorpusInventory
+from alpha_orchestrator.llm.prompts import register_default_prompts
 from alpha_orchestrator.orchestration.engine import OfflineOrchestrator
 from alpha_orchestrator.reporting.report import build_run_report
 from alpha_orchestrator.storage.database import Database, sqlite_url
@@ -18,7 +26,11 @@ from alpha_orchestrator.storage.repository import MissingRecord, Repository
 
 app = typer.Typer(help="Evidence-gated alpha research orchestration.", no_args_is_help=True)
 run_app = typer.Typer(help="Create and operate bounded research runs.")
+corpus_app = typer.Typer(help="Inventory private Markdown without storing raw text.")
+cards_app = typer.Typer(help="Review and approve paraphrased method cards.")
 app.add_typer(run_app, name="run")
+app.add_typer(corpus_app, name="corpus")
+app.add_typer(cards_app, name="cards")
 
 
 def _database_path(path: Path | None) -> Path:
@@ -33,7 +45,9 @@ def _database_path(path: Path | None) -> Path:
 def _repository(path: Path | None) -> tuple[Database, Repository]:
     database = Database(sqlite_url(_database_path(path)))
     database.create_schema()
-    return database, Repository(database.session_factory)
+    repository = Repository(database.session_factory)
+    register_default_prompts(repository)
+    return database, repository
 
 
 def _policy_paths(routing_policy: Path | None, limit_policy: Path | None) -> tuple[Path, Path]:
@@ -86,8 +100,8 @@ def create_run(
         setting_snapshot_id=setting_snapshot,
         routing_policy_version=routing.version,
         limit_policy_version=limits.version,
-        generator_prompt_version="not-applicable-milestone-1",
-        repair_prompt_version="not-applicable-milestone-1",
+        generator_prompt_version="generator.v1",
+        repair_prompt_version="repair-planner.v1",
         adapter_mode=adapter,
     )
     db, repository = _repository(database)
@@ -105,7 +119,7 @@ def _execute(
     database: Path | None,
 ) -> None:
     if adapter_mode is AdapterMode.LIVE:
-        raise typer.BadParameter("Live execution is intentionally unavailable in Milestone 1")
+        raise typer.BadParameter("Live execution is intentionally unavailable before Milestone 3")
     if fixture is None:
         raise typer.BadParameter("Replay execution requires --fixture")
     routing_path, limit_path = _policy_paths(routing_policy, limit_policy)
@@ -196,6 +210,80 @@ def report(
         return
     output.write_text(content, encoding="utf-8")
     typer.echo(str(output.resolve()))
+
+
+@corpus_app.command("inventory")
+def inventory_corpus(
+    path: Path,
+    source_type: Annotated[EvidenceLevel, typer.Option("--source-type")] = EvidenceLevel.UNVERIFIED,
+    database: Annotated[Path | None, typer.Option("--db")] = None,
+) -> None:
+    """Record hashes and section locators, never raw Markdown text."""
+    db, repository = _repository(database)
+    result = CorpusInventory(repository).inventory(path, source_type)
+    db.dispose()
+    typer.echo(json.dumps(result.__dict__, sort_keys=True))
+
+
+@corpus_app.command("extract")
+def extract_cards(
+    source_id: str,
+    database: Annotated[Path | None, typer.Option("--db")] = None,
+) -> None:
+    """Extract explicit, paraphrased method-card blocks as drafts."""
+    db, repository = _repository(database)
+    cards = CorpusInventory(repository).extract_draft_cards(source_id)
+    db.dispose()
+    typer.echo(json.dumps([card.card_id for card in cards]))
+
+
+@cards_app.command("list")
+def list_cards(
+    status: Annotated[MethodCardStatus | None, typer.Option("--status")] = None,
+    database: Annotated[Path | None, typer.Option("--db")] = None,
+) -> None:
+    """List method cards and their human-review state."""
+    db, repository = _repository(database)
+    cards = repository.list_method_cards(status)
+    db.dispose()
+    typer.echo(
+        json.dumps(
+            [
+                {
+                    "card_id": card.card_id,
+                    "version": card.version,
+                    "status": card.status,
+                    "title": card.title,
+                    "reviewer": card.reviewer,
+                }
+                for card in cards
+            ],
+            sort_keys=True,
+        )
+    )
+
+
+@cards_app.command("approve")
+def approve_card(
+    card_id: str,
+    reviewer: Annotated[str, typer.Option("--reviewer")],
+    database: Annotated[Path | None, typer.Option("--db")] = None,
+) -> None:
+    """Record explicit human approval for the latest card version."""
+    db, repository = _repository(database)
+    card = repository.approve_method_card(card_id, reviewer)
+    db.dispose()
+    typer.echo(
+        json.dumps(
+            {
+                "card_id": card.card_id,
+                "version": card.version,
+                "status": card.status,
+                "reviewer": card.reviewer,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 if __name__ == "__main__":
