@@ -58,7 +58,18 @@ class OfflineOrchestrator:
 
     def execute(self, run_id: str | UUID, adapter: BrainAdapter) -> ExecutionSummary:
         run = self.repository.get_run(run_id)
-        if run.status == RunStatus.COMPLETED:
+        unfinished = self.repository.list_candidates(
+            run_id,
+            statuses={
+                CandidateStatus.PROPOSED,
+                CandidateStatus.VALIDATING,
+                CandidateStatus.READY,
+                CandidateStatus.QUEUED,
+                CandidateStatus.SIMULATING,
+                CandidateStatus.RETRYABLE_ERROR,
+            },
+        )
+        if run.status == RunStatus.COMPLETED and not unfinished:
             return ExecutionSummary(
                 run_id=str(run_id),
                 status=RunStatus.COMPLETED,
@@ -437,7 +448,7 @@ class OfflineOrchestrator:
                 distinct_candidates=self.repository.count_candidates(run_id),
                 simulation_result_rows=self.repository.count_attempts(run_id),
                 pending_candidates=self.repository.count_pending(run_id),
-                llm_requests=0,
+                llm_requests=self.repository.count_llm_requests(run_id),
                 elapsed_seconds=self.repository.age_seconds(run_id),
             )
         )

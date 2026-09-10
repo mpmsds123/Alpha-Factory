@@ -44,6 +44,7 @@ class CandidateProposal(StrictModel):
     expression: str = Field(min_length=1)
     settings: dict[str, Any]
     mechanism_claim: str = Field(min_length=1, max_length=1_000)
+    uncertainty: str | None = Field(default=None, min_length=1, max_length=1_000)
     source_method_card_ids: list[str] = Field(default_factory=list)
     parent_candidate_id: UUID | None = None
     generation_number: int = Field(default=0, ge=0)

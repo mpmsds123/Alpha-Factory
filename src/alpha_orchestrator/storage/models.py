@@ -169,3 +169,93 @@ class PlatformCheckORM(Base):
     message_redacted: Mapped[str | None] = mapped_column(Text)
     is_live_response: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class SourceDocumentORM(Base):
+    __tablename__ = "source_documents"
+
+    source_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    corpus_root_locator: Mapped[str] = mapped_column(Text, nullable=False)
+    relative_locator: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    excluded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    exclusion_reason: Mapped[str | None] = mapped_column(String(255))
+    inventoried_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class SourceSectionORM(Base):
+    __tablename__ = "source_sections"
+    __table_args__ = (
+        UniqueConstraint("source_id", "section_locator", name="uq_source_section_locator"),
+    )
+
+    section_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source_id: Mapped[str] = mapped_column(
+        ForeignKey("source_documents.source_id"), nullable=False, index=True
+    )
+    heading: Mapped[str] = mapped_column(String(255), nullable=False)
+    section_locator: Mapped[str] = mapped_column(String(128), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class MethodCardORM(Base):
+    __tablename__ = "method_cards"
+    __table_args__ = (UniqueConstraint("card_id", "version", name="uq_method_card_version"),)
+
+    row_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    card_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    applicable_failure_codes: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    applicable_data_types: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    prerequisites: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    diagnostic_signals: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    allowed_repair_actions: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    prohibited_actions: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    stop_condition: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_level: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_references: Mapped[list[dict[str, str]]] = mapped_column(JSON, nullable=False)
+    reviewer: Mapped[str | None] = mapped_column(String(255))
+    approval_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class PromptVersionORM(Base):
+    __tablename__ = "prompt_versions"
+
+    version: Mapped[str] = mapped_column(String(128), primary_key=True)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class LLMRequestORM(Base):
+    __tablename__ = "llm_requests"
+
+    request_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    prompt_version: Mapped[str] = mapped_column(
+        ForeignKey("prompt_versions.version"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    temperature: Mapped[float] = mapped_column(Float, nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    context_manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    output_hash: Mapped[str | None] = mapped_column(String(64))
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer)
+    total_tokens: Mapped[int | None] = mapped_column(Integer)
+    validation_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    related_run_id: Mapped[str] = mapped_column(ForeignKey("runs.run_id"), nullable=False)
+    related_candidate_id: Mapped[str | None] = mapped_column(ForeignKey("candidates.candidate_id"))
+    error_message_redacted: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -10,6 +11,8 @@ from alpha_orchestrator.storage.models import Base
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+if database_url := os.getenv("ALPHA_LAB_DATABASE_URL"):
+    config.set_main_option("sqlalchemy.url", database_url)
 
 target_metadata = Base.metadata
 

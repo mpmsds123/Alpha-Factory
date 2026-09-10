@@ -4,7 +4,12 @@ import pytest
 from pydantic import ValidationError
 
 from alpha_orchestrator.domain.enums import CandidateStatus, ErrorClass
-from alpha_orchestrator.domain.errors import is_retryable, redact_text
+from alpha_orchestrator.domain.errors import (
+    assert_no_sensitive_data,
+    contains_sensitive_data,
+    is_retryable,
+    redact_text,
+)
 from alpha_orchestrator.domain.models import CandidateProposal
 from alpha_orchestrator.domain.state_machine import InvalidTransition, validate_transition
 
@@ -72,3 +77,8 @@ def test_non_retryable_and_redaction() -> None:
     assert "secret" not in redacted
     assert "abc" not in redacted
     assert "xyz" not in redacted
+    assert contains_sensitive_data({"password": "EXAMPLE"})
+    assert contains_sensitive_data(["authorization=EXAMPLE"])
+    assert not contains_sensitive_data({"message": "token usage is recorded"})
+    with pytest.raises(ValueError, match="forbidden"):
+        assert_no_sensitive_data({"api_key": ""})
