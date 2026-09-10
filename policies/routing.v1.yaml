@@ -1,0 +1,9 @@
+version: routing.v1
+strong:
+  minimum_sharpe: 0.50
+  minimum_fitness: 0.30
+weak:
+  minimum_sharpe: 0.25
+  minimum_fitness: 0.15
+discard:
+  maximum_turnover: 0.90
