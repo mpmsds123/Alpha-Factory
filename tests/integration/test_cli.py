@@ -9,6 +9,15 @@ ROOT = Path(__file__).parents[2]
 runner = CliRunner()
 
 
+def test_cli_exposes_platform_check_but_no_submission_command() -> None:
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    assert "platform-check" in result.stdout
+    unavailable = runner.invoke(app, ["submit"])
+    assert unavailable.exit_code != 0
+    assert "No such command" in unavailable.stderr
+
+
 def test_cli_initializes_executes_reports_and_stops(tmp_path: Path, monkeypatch: object) -> None:
     database = tmp_path / "lab.db"
     monkeypatch.chdir(ROOT)

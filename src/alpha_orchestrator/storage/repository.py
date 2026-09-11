@@ -17,6 +17,7 @@ from alpha_orchestrator.domain.enums import (
     GateOutcome,
     LLMRole,
     LLMValidationStatus,
+    MetadataSnapshotKind,
     MethodCardStatus,
     RunStatus,
 )
@@ -24,6 +25,7 @@ from alpha_orchestrator.domain.errors import assert_no_sensitive_data, redact_te
 from alpha_orchestrator.domain.identity import (
     candidate_fingerprint,
     canonicalize_expression,
+    metadata_snapshot_identity,
     normalized_content_hash,
 )
 from alpha_orchestrator.domain.knowledge import (
@@ -34,6 +36,8 @@ from alpha_orchestrator.domain.knowledge import (
 )
 from alpha_orchestrator.domain.models import (
     CandidateProposal,
+    CapturedMetadata,
+    MetadataSnapshot,
     NormalizedSimulationResult,
     PlatformCheck,
     RunSpecification,
@@ -47,6 +51,7 @@ from alpha_orchestrator.storage.models import (
     EventORM,
     LineageEdgeORM,
     LLMRequestORM,
+    MetadataSnapshotORM,
     MethodCardORM,
     PlatformCheckORM,
     PromptVersionORM,
@@ -414,6 +419,42 @@ class Repository:
                 {"live": live, "statuses": [check.status for check in checks]},
             )
 
+    def record_candidate_decision(
+        self,
+        candidate_id: str | UUID,
+        gate_name: str,
+        gate_version: str,
+        outcome: GateOutcome,
+        reason_codes: list[str],
+        metric_snapshot: dict[str, Any] | None = None,
+    ) -> None:
+        assert_no_sensitive_data(metric_snapshot or {})
+        with self._sessions.begin() as session:
+            candidate = session.get(CandidateORM, str(candidate_id))
+            if candidate is None:
+                raise MissingRecord(f"Candidate not found: {candidate_id}")
+            self._add_decision(
+                session,
+                candidate.candidate_id,
+                gate_name,
+                gate_version,
+                outcome,
+                reason_codes,
+                metric_snapshot or {},
+            )
+            self._add_event(
+                session,
+                candidate.run_id,
+                candidate.candidate_id,
+                "CANDIDATE_DECISION",
+                {
+                    "gate_name": gate_name,
+                    "gate_version": gate_version,
+                    "outcome": outcome,
+                    "reason_codes": reason_codes,
+                },
+            )
+
     def count_candidates(self, run_id: str | UUID) -> int:
         with self._sessions() as session:
             return int(
@@ -779,6 +820,93 @@ class Repository:
             if candidate_id is not None:
                 statement = statement.where(LLMRequestORM.related_candidate_id == str(candidate_id))
             return int(session.scalar(statement) or 0)
+
+    def save_metadata_capture(self, capture: CapturedMetadata) -> None:
+        fields_payload = {
+            name: data_type.value for name, data_type in sorted(capture.metadata.fields.items())
+        }
+        operators_payload = sorted(capture.metadata.operators)
+        settings_payload = {
+            name: sorted(values, key=repr)
+            for name, values in sorted(capture.metadata.settings.items())
+        }
+        records = (
+            (MetadataSnapshotKind.FIELDS, capture.field_snapshot_id, fields_payload),
+            (MetadataSnapshotKind.OPERATORS, capture.operator_snapshot_id, operators_payload),
+            (MetadataSnapshotKind.SETTINGS, capture.setting_snapshot_id, settings_payload),
+        )
+        assert_no_sensitive_data([record[2] for record in records])
+        with self._sessions.begin() as session:
+            for kind, snapshot_id, payload in records:
+                expected_id, content_hash = metadata_snapshot_identity(
+                    kind,
+                    capture.metadata.dataset_id,
+                    capture.region,
+                    capture.universe,
+                    capture.delay,
+                    capture.data_type,
+                    payload,
+                )
+                if snapshot_id != expected_id:
+                    raise ValueError(f"Metadata snapshot ID does not match content: {kind}")
+                persisted = session.get(MetadataSnapshotORM, snapshot_id)
+                if persisted is not None:
+                    if persisted.content_hash != content_hash or persisted.payload_json != payload:
+                        raise ValueError(f"Metadata snapshot is immutable: {snapshot_id}")
+                    continue
+                session.add(
+                    MetadataSnapshotORM(
+                        snapshot_id=snapshot_id,
+                        kind=kind,
+                        dataset_id=capture.metadata.dataset_id,
+                        region=capture.region,
+                        universe=capture.universe,
+                        delay=capture.delay,
+                        data_type=capture.data_type,
+                        content_hash=content_hash,
+                        payload_json=payload,
+                        source=capture.source,
+                        captured_at=capture.captured_at,
+                    )
+                )
+
+    def load_run_metadata(self, run_id: str | UUID) -> MetadataSnapshot:
+        run = self.get_run(run_id)
+        requested = {
+            MetadataSnapshotKind.FIELDS: run.field_snapshot_id,
+            MetadataSnapshotKind.OPERATORS: run.operator_snapshot_id,
+            MetadataSnapshotKind.SETTINGS: run.setting_snapshot_id,
+        }
+        with self._sessions() as session:
+            records = {
+                kind: session.get(MetadataSnapshotORM, snapshot_id)
+                for kind, snapshot_id in requested.items()
+            }
+            if any(record is None for record in records.values()):
+                raise MissingRecord("The frozen run metadata snapshots are incomplete")
+            for kind, record in records.items():
+                assert record is not None
+                if (
+                    record.kind != kind
+                    or record.dataset_id != run.dataset_id
+                    or record.region != run.region
+                    or record.universe != run.universe
+                    or record.delay != run.delay
+                    or record.data_type != run.data_type
+                ):
+                    raise ValueError("Metadata snapshot does not match the frozen run cell")
+            fields = records[MetadataSnapshotKind.FIELDS]
+            operators = records[MetadataSnapshotKind.OPERATORS]
+            settings = records[MetadataSnapshotKind.SETTINGS]
+            assert fields is not None and operators is not None and settings is not None
+            return MetadataSnapshot(
+                dataset_id=run.dataset_id,
+                fields={name: DataType(value) for name, value in dict(fields.payload_json).items()},
+                operators=set(operators.payload_json),
+                settings={
+                    name: set(values) for name, values in dict(settings.payload_json).items()
+                },
+            )
 
     @staticmethod
     def _method_card_from_orm(card: MethodCardORM) -> MethodCard:

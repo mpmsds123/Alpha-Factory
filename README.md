@@ -33,12 +33,17 @@ Implemented:
   contracts;
 - OpenAI-compatible client configuration, strict Pydantic output validation, and an LLM request
   ledger that stores hashes, frozen snapshot/MethodCard version manifests, and usage metadata
-  rather than raw inputs or outputs.
+  rather than raw inputs or outputs;
+- explicitly configured live BRAIN access using a protected external session-cookie file;
+- content-addressed field, operator, and setting snapshots frozen to one research cell;
+- idempotent simulation creation, one-step polling, normalized metrics and error classes, and
+  bounded `Retry-After` handling;
+- live platform-check recording that preserves `PASS`, `FAIL`, `WARNING`, `PENDING`, and `ERROR`
+  and promotes only a confirmed all-pass response to human review.
 
-Explicitly deferred: live WorldQuant access, live platform checks, MCP, a Web dashboard, and
-automatic submission. A local routing result is never described as platform approval. LLM calls
-occur only when the user explicitly supplies separate endpoint credentials; replay remains fully
-offline.
+Explicitly deferred: MCP, a Web dashboard, and automatic submission. A local routing result is
+never described as platform approval. LLM and BRAIN calls occur only when the user explicitly
+supplies their separate configurations; replay remains fully offline.
 
 ## Install and verify
 
@@ -90,6 +95,33 @@ inserting any candidate. Configure the client only through the `ALPHA_LAB_LLM_*`
 variables shown in `.env.example`. API keys are represented as secret values in memory and are not
 persisted. Automated tests intercept the HTTP boundary and never contact an external endpoint.
 
+## Authorized live boundary
+
+Live mode is disabled unless `ALPHA_LAB_BRAIN_SESSION_FILE` points to an external JSON cookie
+mapping or browser-exported cookie list. On Unix, the file must have no group or other-user access
+(for example, `chmod 600 /outside/repository/brain-session.json`). The adapter probes
+`/authentication` before any protected request and classifies an inquiry challenge as
+`HUMAN_VERIFICATION_REQUIRED`; browser login alone is not treated as proof that the HTTP client is
+authenticated.
+
+```bash
+alpha-lab run create \
+  --dataset DATASET_ID --region USA --universe TOP1000 --delay 1 \
+  --adapter live --db alpha_lab.db
+alpha-lab run execute RUN_ID --adapter live --db alpha_lab.db
+alpha-lab platform-check CANDIDATE_ID --db alpha_lab.db
+```
+
+Each execution performs at most one poll of a pending simulation and persists the external ID, so
+`run resume` continues without creating the simulation again. `platform-check` requires a
+completed live simulation and never submits it. Before execution, proposals are inserted through
+the library's `CandidateGenerator`; the live adapter deliberately does not generate expressions.
+Endpoint paths can be overridden with the `ALPHA_LAB_BRAIN_*_PATH` variables in `.env.example`.
+
+Milestone 3 verification used intercepted HTTP responses only: no real WorldQuant login,
+simulation, or platform check was performed. The default endpoint contract therefore remains to
+be confirmed against an authorized account before first live use.
+
 ## Trust boundary
 
 - Policy thresholds allocate research effort; they are not evidence of tradability.
@@ -97,3 +129,4 @@ persisted. Automated tests intercept the HTTP boundary and never contact an exte
 - `PASS`, `FAIL`, `WARNING`, `PENDING`, and `ERROR` remain distinct platform-check values.
 - Credentials belong only in environment variables or user-owned session files. They are
   redacted from persisted errors and logs and are never included in fixtures.
+- The package has no submit method or CLI command; every surviving Alpha stops at human review.

@@ -276,7 +276,7 @@ def test_run_contract_rejects_wrong_dataset_and_policy(
             run.run_id, FakeBrainAdapter(metadata)
         )
     live_run = make_run(adapter_mode=AdapterMode.LIVE)
-    with pytest.raises(ValueError, match="replay runs only"):
+    with pytest.raises(ValueError, match="Adapter mode"):
         OfflineOrchestrator(repository, routing_policy, limit_policy).execute(
             live_run.run_id, FakeBrainAdapter(metadata)
         )

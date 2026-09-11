@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 
-from alpha_orchestrator.domain.enums import ErrorClass
+from alpha_orchestrator.domain.enums import AdapterMode, ErrorClass
 from alpha_orchestrator.domain.models import (
     AdapterFailure,
     CandidateProposal,
@@ -34,6 +34,10 @@ class FakeBrainAdapter:
     @property
     def metadata(self) -> MetadataSnapshot:
         return self._metadata
+
+    @property
+    def mode(self) -> AdapterMode:
+        return AdapterMode.REPLAY
 
     @property
     def create_call_count(self) -> int:
@@ -71,6 +75,6 @@ class FakeBrainAdapter:
             ),
         )
 
-    def request_platform_checks(self, candidate_id: str) -> list[PlatformCheck]:
-        del candidate_id
+    def request_platform_checks(self, external_alpha_id: str) -> list[PlatformCheck]:
+        del external_alpha_id
         return []

@@ -18,6 +18,12 @@ def build_run_report(repository: Repository, run_id: str | UUID) -> str:
     attempt_counts = Counter(attempt.status for attempt in attempts)
     gate_counts = Counter(decision.outcome for decision in decisions)
     platform_counts = Counter(check.status for check in platform_checks)
+    platform_all_pass_count = sum(
+        decision.gate_name == "G6_PLATFORM_READINESS"
+        and decision.outcome == "PASS"
+        and "PLATFORM_ALL_PASS_CONFIRMED" in decision.reason_codes
+        for decision in decisions
+    )
     llm_status_counts = Counter(request.validation_status for request in llm_requests)
     repair_counts = Counter(
         candidate.changed_dimension for candidate in candidates if candidate.changed_dimension
@@ -117,7 +123,11 @@ def build_run_report(repository: Repository, run_id: str | UUID) -> str:
             f"- Run status: `{run.status}`",
             f"- Stop reason: `{run.stop_reason or 'NONE'}`",
             "- Automatic submission: unavailable",
-            "- Live platform-all-pass claims: none",
+            (
+                f"- Confirmed live platform-all-pass decisions: {platform_all_pass_count}"
+                if platform_all_pass_count
+                else "- Live platform-all-pass claims: none"
+            ),
             "",
             "## Surviving lineage",
             "",

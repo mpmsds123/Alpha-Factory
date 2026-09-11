@@ -7,7 +7,6 @@ from alpha_orchestrator.adapters.base import BrainAdapter
 from alpha_orchestrator.audit_logging import AuditLogger
 from alpha_orchestrator.config import LimitPolicy, RoutingPolicy
 from alpha_orchestrator.domain.enums import (
-    AdapterMode,
     AttemptStatus,
     CandidateStatus,
     DataType,
@@ -38,8 +37,8 @@ class ExecutionSummary:
     simulation_attempts: int
 
 
-class OfflineOrchestrator:
-    """Runs bounded replay experiments without any live-network capability."""
+class ResearchOrchestrator:
+    """Runs bounded experiments through an explicitly selected adapter."""
 
     def __init__(
         self,
@@ -79,7 +78,7 @@ class OfflineOrchestrator:
             )
         self._validate_run_contract(run, adapter)
         self.repository.update_run_status(run_id, RunStatus.RUNNING)
-        self.audit.event("run_started", run_id=str(run_id), adapter="offline")
+        self.audit.event("run_started", run_id=str(run_id), adapter=adapter.mode)
 
         stop_reason = self._resume_existing(run_id, adapter)
         if stop_reason is None:
@@ -158,9 +157,9 @@ class OfflineOrchestrator:
         if any(not getattr(run, name, None) for name in required):
             raise ValueError("G0 run contract is not frozen")
         if run.dataset_id != adapter.metadata.dataset_id:
-            raise ValueError("Replay metadata does not match the frozen dataset")
-        if run.adapter_mode != AdapterMode.REPLAY:
-            raise ValueError("Milestone 1 executes replay runs only")
+            raise ValueError("Adapter metadata does not match the frozen dataset")
+        if run.adapter_mode != adapter.mode:
+            raise ValueError("Adapter mode does not match the frozen run")
         if run.routing_policy_version != self.routing_policy.version:
             raise ValueError("Routing policy does not match the frozen run")
         if run.limit_policy_version != self.limit_policy.version:
@@ -363,6 +362,12 @@ class OfflineOrchestrator:
                 candidate, attempt, error_class, result.error_message or "Simulation failed"
             )
 
+        if result.external_alpha_id and not attempt.external_alpha_id:
+            self.repository.attach_receipt(
+                attempt.attempt_id,
+                attempt.external_simulation_id,
+                result.external_alpha_id,
+            )
         self.repository.finish_attempt(attempt.attempt_id, AttemptStatus.COMPLETED, result)
         candidate = self.repository.transition_candidate(
             candidate.candidate_id,
@@ -463,3 +468,6 @@ class OfflineOrchestrator:
                 elapsed_seconds=self.repository.age_seconds(run_id),
             )
         )
+
+
+OfflineOrchestrator = ResearchOrchestrator

@@ -71,6 +71,19 @@ class MetadataSnapshot(StrictModel):
     settings: dict[str, set[str | int | float | bool]]
 
 
+class CapturedMetadata(StrictModel):
+    metadata: MetadataSnapshot
+    region: str = Field(min_length=1)
+    universe: str = Field(min_length=1)
+    delay: int = Field(ge=0)
+    data_type: DataType
+    field_snapshot_id: str = Field(min_length=1)
+    operator_snapshot_id: str = Field(min_length=1)
+    setting_snapshot_id: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    captured_at: datetime = Field(default_factory=utc_now)
+
+
 class SimulationMetrics(StrictModel):
     sharpe: float | None = None
     fitness: float | None = None
@@ -96,6 +109,7 @@ class CreateSimulationReceipt(StrictModel):
 class NormalizedSimulationResult(StrictModel):
     completed: bool
     metrics: SimulationMetrics = Field(default_factory=SimulationMetrics)
+    external_alpha_id: str | None = None
     error_class: ErrorClass | None = None
     error_message: str | None = None
     raw_artifact_ref: str | None = None
@@ -110,7 +124,13 @@ class PlatformCheck(StrictModel):
 class AdapterFailure(Exception):
     """A normalized adapter failure that deterministic code can classify."""
 
-    def __init__(self, error_class: ErrorClass, message: str) -> None:
+    def __init__(
+        self,
+        error_class: ErrorClass,
+        message: str,
+        retry_after_seconds: float | None = None,
+    ) -> None:
         super().__init__(message)
         self.error_class = error_class
         self.message = message
+        self.retry_after_seconds = retry_after_seconds

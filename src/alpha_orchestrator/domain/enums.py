@@ -111,3 +111,9 @@ class LLMValidationStatus(StrEnum):
 class RepairAction(StrEnum):
     STOP = "STOP"
     REPAIR = "REPAIR"
+
+
+class MetadataSnapshotKind(StrEnum):
+    FIELDS = "FIELDS"
+    OPERATORS = "OPERATORS"
+    SETTINGS = "SETTINGS"

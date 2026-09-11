@@ -16,8 +16,32 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def canonical_json(value: Mapping[str, Any]) -> str:
+def canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def metadata_snapshot_identity(
+    kind: str,
+    dataset_id: str,
+    region: str,
+    universe: str,
+    delay: int,
+    data_type: str,
+    payload: Any,
+) -> tuple[str, str]:
+    serialized = canonical_json(
+        {
+            "kind": kind,
+            "dataset_id": dataset_id,
+            "region": region,
+            "universe": universe,
+            "delay": delay,
+            "data_type": data_type,
+            "payload": payload,
+        }
+    )
+    content_hash = sha256_text(serialized)
+    return f"live-{kind.casefold()}-{content_hash[:20]}", content_hash
 
 
 def tokenize_expression(expression: str) -> list[str]:
