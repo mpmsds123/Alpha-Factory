@@ -39,11 +39,13 @@ Implemented:
 - idempotent simulation creation, one-step polling, normalized metrics and error classes, and
   bounded `Retry-After` handling;
 - live platform-check recording that preserves `PASS`, `FAIL`, `WARNING`, `PENDING`, and `ERROR`
-  and promotes only a confirmed all-pass response to human review.
+  and promotes only a confirmed all-pass response to human review;
+- a local stdio MCP 2.x server exposing five narrow ledger and replay tools with typed structured
+  output and explicit read/write annotations.
 
-Explicitly deferred: MCP, a Web dashboard, and automatic submission. A local routing result is
-never described as platform approval. LLM and BRAIN calls occur only when the user explicitly
-supplies their separate configurations; replay remains fully offline.
+Explicitly deferred: a Web dashboard and automatic submission. A local routing result is never
+described as platform approval. LLM and BRAIN calls occur only when the user explicitly supplies
+their separate configurations; replay remains fully offline.
 
 ## Install and verify
 
@@ -121,6 +123,24 @@ Endpoint paths can be overridden with the `ALPHA_LAB_BRAIN_*_PATH` variables in 
 Milestone 3 verification used intercepted HTTP responses only: no real WorldQuant login,
 simulation, or platform check was performed. The default endpoint contract therefore remains to
 be confirmed against an authorized account before first live use.
+
+## MCP interface
+
+`alpha-lab-mcp` runs the local server over stdio using the official MCP Python SDK 2.x. Configure
+the ledger and optional replay fixture in the host process; tool callers cannot replace either
+path:
+
+```bash
+export ALPHA_LAB_MCP_DATABASE_PATH=/absolute/path/alpha_lab.db
+export ALPHA_LAB_MCP_REPLAY_FIXTURE=/absolute/path/sanitized-replay.json
+alpha-lab-mcp
+```
+
+The exposed tools are `alpha_run_status`, `alpha_run_report`, `alpha_method_cards_list`,
+`alpha_replay_execute`, and `alpha_run_stop`. The first three are read-only. The two write tools
+can only advance/resume an existing replay run or record the fixed `MCP_REQUESTED_STOP` reason.
+There are no MCP tools for live BRAIN access, LLM invocation, corpus reads, card approval, arbitrary
+filesystem paths, or Alpha submission.
 
 ## Trust boundary
 
