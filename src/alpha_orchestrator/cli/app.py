@@ -7,6 +7,12 @@ from typing import Annotated
 
 import typer
 
+from alpha_orchestrator.adapters.base import BrainAdapter
+from alpha_orchestrator.adapters.live import (
+    LiveBrainAdapter,
+    LiveBrainClient,
+    LiveBrainSettings,
+)
 from alpha_orchestrator.adapters.replay import ReplayBrainAdapter
 from alpha_orchestrator.config import load_limit_policy, load_routing_policy
 from alpha_orchestrator.domain.enums import (
@@ -16,10 +22,11 @@ from alpha_orchestrator.domain.enums import (
     MethodCardStatus,
     RunStatus,
 )
-from alpha_orchestrator.domain.models import RunSpecification
+from alpha_orchestrator.domain.models import AdapterFailure, RunSpecification
 from alpha_orchestrator.knowledge.corpus import CorpusInventory
 from alpha_orchestrator.llm.prompts import register_default_prompts
-from alpha_orchestrator.orchestration.engine import OfflineOrchestrator
+from alpha_orchestrator.orchestration.engine import ResearchOrchestrator
+from alpha_orchestrator.orchestration.platform_checks import PlatformCheckService
 from alpha_orchestrator.reporting.report import build_run_report
 from alpha_orchestrator.storage.database import Database, sqlite_url
 from alpha_orchestrator.storage.repository import MissingRecord, Repository
@@ -60,6 +67,17 @@ def _policy_paths(routing_policy: Path | None, limit_policy: Path | None) -> tup
     )
 
 
+def _live_client() -> LiveBrainClient:
+    try:
+        return LiveBrainClient(LiveBrainSettings.from_environment())
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _live_failure(exc: AdapterFailure) -> typer.BadParameter:
+    return typer.BadParameter(f"{exc.error_class}: {exc.message}")
+
+
 @app.command("init")
 def initialize(
     database: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
@@ -89,24 +107,44 @@ def create_run(
     routing_path, limit_path = _policy_paths(routing_policy, limit_policy)
     routing = load_routing_policy(routing_path)
     limits = load_limit_policy(limit_path)
-    specification = RunSpecification(
-        dataset_id=dataset,
-        region=region,
-        universe=universe,
-        delay=delay,
-        data_type=data_type,
-        field_snapshot_id=field_snapshot,
-        operator_snapshot_id=operator_snapshot,
-        setting_snapshot_id=setting_snapshot,
-        routing_policy_version=routing.version,
-        limit_policy_version=limits.version,
-        generator_prompt_version="generator.v1",
-        repair_prompt_version="repair-planner.v1",
-        adapter_mode=adapter,
-    )
     db, repository = _repository(database)
-    repository.create_run(specification, routing, limits)
-    db.dispose()
+    try:
+        if adapter is AdapterMode.LIVE:
+            client = _live_client()
+            try:
+                capture = client.capture_metadata(
+                    dataset_id=dataset,
+                    region=region,
+                    universe=universe,
+                    delay=delay,
+                    data_type=data_type,
+                )
+                repository.save_metadata_capture(capture)
+                field_snapshot = capture.field_snapshot_id
+                operator_snapshot = capture.operator_snapshot_id
+                setting_snapshot = capture.setting_snapshot_id
+            except AdapterFailure as exc:
+                raise _live_failure(exc) from exc
+            finally:
+                client.close()
+        specification = RunSpecification(
+            dataset_id=dataset,
+            region=region,
+            universe=universe,
+            delay=delay,
+            data_type=data_type,
+            field_snapshot_id=field_snapshot,
+            operator_snapshot_id=operator_snapshot,
+            setting_snapshot_id=setting_snapshot,
+            routing_policy_version=routing.version,
+            limit_policy_version=limits.version,
+            generator_prompt_version="generator.v1",
+            repair_prompt_version="repair-planner.v1",
+            adapter_mode=adapter,
+        )
+        repository.create_run(specification, routing, limits)
+    finally:
+        db.dispose()
     typer.echo(str(specification.run_id))
 
 
@@ -118,22 +156,32 @@ def _execute(
     limit_policy: Path | None,
     database: Path | None,
 ) -> None:
-    if adapter_mode is AdapterMode.LIVE:
-        raise typer.BadParameter("Live execution is intentionally unavailable before Milestone 3")
-    if fixture is None:
+    if adapter_mode is AdapterMode.REPLAY and fixture is None:
         raise typer.BadParameter("Replay execution requires --fixture")
+    if adapter_mode is AdapterMode.LIVE and fixture is not None:
+        raise typer.BadParameter("Live execution does not accept a replay fixture")
     routing_path, limit_path = _policy_paths(routing_policy, limit_policy)
     routing = load_routing_policy(routing_path)
     limits = load_limit_policy(limit_path)
     db, repository = _repository(database)
+    live_client: LiveBrainClient | None = None
     try:
-        summary = OfflineOrchestrator(repository, routing, limits).execute(
-            run_id, ReplayBrainAdapter.from_path(fixture)
+        selected_adapter: BrainAdapter
+        if adapter_mode is AdapterMode.LIVE:
+            live_client = _live_client()
+            selected_adapter = LiveBrainAdapter(live_client, repository.load_run_metadata(run_id))
+        else:
+            assert fixture is not None
+            selected_adapter = ReplayBrainAdapter.from_path(fixture)
+        summary = ResearchOrchestrator(repository, routing, limits).execute(
+            run_id, selected_adapter
         )
     except MissingRecord as exc:
-        db.dispose()
         raise typer.BadParameter(str(exc)) from exc
-    db.dispose()
+    finally:
+        if live_client is not None:
+            live_client.close()
+        db.dispose()
     typer.echo(json.dumps(summary.__dict__, default=str, sort_keys=True))
 
 
@@ -146,7 +194,7 @@ def execute_run(
     limit_policy: Annotated[Path | None, typer.Option("--limit-policy")] = None,
     database: Annotated[Path | None, typer.Option("--db")] = None,
 ) -> None:
-    """Execute a run through the replay adapter."""
+    """Execute a run through the explicitly selected adapter."""
     _execute(run_id, adapter, fixture, routing_policy, limit_policy, database)
 
 
@@ -193,6 +241,41 @@ def resume_run(
 ) -> None:
     """Resume without repeating completed simulation attempts."""
     _execute(run_id, adapter, fixture, routing_policy, limit_policy, database)
+
+
+@app.command("platform-check")
+def platform_check(
+    candidate_id: str,
+    database: Annotated[Path | None, typer.Option("--db")] = None,
+) -> None:
+    """Request live checks for one ready candidate; never submit it."""
+    db, repository = _repository(database)
+    client: LiveBrainClient | None = None
+    try:
+        candidate = repository.get_candidate(candidate_id)
+        metadata = repository.load_run_metadata(candidate.run_id)
+        client = _live_client()
+        summary = PlatformCheckService(repository).check(
+            candidate_id, LiveBrainAdapter(client, metadata)
+        )
+    except MissingRecord as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        if client is not None:
+            client.close()
+        db.dispose()
+    typer.echo(
+        json.dumps(
+            {
+                "candidate_id": summary.candidate_id,
+                "candidate_status": summary.candidate_status,
+                "request_attempts": summary.request_attempts,
+                "checks": [check.model_dump(mode="json") for check in summary.checks],
+                "automatic_submission": False,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 @app.command("report")

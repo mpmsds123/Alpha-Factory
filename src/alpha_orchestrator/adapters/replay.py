@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pydantic import Field
 
-from alpha_orchestrator.domain.enums import ErrorClass
+from alpha_orchestrator.domain.enums import AdapterMode, ErrorClass
 from alpha_orchestrator.domain.models import (
     AdapterFailure,
     CandidateProposal,
@@ -61,6 +61,10 @@ class ReplayBrainAdapter:
         return self.fixture.metadata
 
     @property
+    def mode(self) -> AdapterMode:
+        return AdapterMode.REPLAY
+
+    @property
     def create_call_count(self) -> int:
         return sum(self._create_calls.values())
 
@@ -97,7 +101,7 @@ class ReplayBrainAdapter:
             raise AdapterFailure(ErrorClass.UNKNOWN, "Replay simulation ID is missing")
         return self._scenarios[expression].result
 
-    def request_platform_checks(self, candidate_id: str) -> list[PlatformCheck]:
-        expression = self._candidate_to_expression.get(candidate_id, candidate_id)
+    def request_platform_checks(self, external_alpha_id: str) -> list[PlatformCheck]:
+        expression = self._candidate_to_expression.get(external_alpha_id, external_alpha_id)
         scenario = self._scenarios.get(expression)
         return list(scenario.platform_checks) if scenario else []

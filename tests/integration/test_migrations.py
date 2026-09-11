@@ -22,6 +22,7 @@ MILESTONE_2_TABLES = {
     "source_documents",
     "source_sections",
 }
+MILESTONE_3_TABLES = {"metadata_snapshots"}
 
 
 def test_migrations_preserve_milestone_schema_boundaries(tmp_path: Path) -> None:
@@ -36,11 +37,19 @@ def test_migrations_preserve_milestone_schema_boundaries(tmp_path: Path) -> None
     engine = create_engine(database_url)
     assert set(inspect(engine).get_table_names()) == MILESTONE_1_TABLES
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "0002_knowledge_llm")
     assert set(inspect(engine).get_table_names()) == MILESTONE_1_TABLES | MILESTONE_2_TABLES
     assert "context_manifest_json" in {
         column["name"] for column in inspect(engine).get_columns("llm_requests")
     }
+
+    command.upgrade(config, "head")
+    assert set(inspect(engine).get_table_names()) == (
+        MILESTONE_1_TABLES | MILESTONE_2_TABLES | MILESTONE_3_TABLES
+    )
+
+    command.downgrade(config, "0002_knowledge_llm")
+    assert set(inspect(engine).get_table_names()) == MILESTONE_1_TABLES | MILESTONE_2_TABLES
 
     command.downgrade(config, "0001_milestone_1")
     assert set(inspect(engine).get_table_names()) == MILESTONE_1_TABLES

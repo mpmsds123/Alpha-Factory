@@ -259,3 +259,19 @@ class LLMRequestORM(Base):
     error_message_redacted: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MetadataSnapshotORM(Base):
+    __tablename__ = "metadata_snapshots"
+
+    snapshot_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    dataset_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    region: Mapped[str] = mapped_column(String(64), nullable=False)
+    universe: Mapped[str] = mapped_column(String(128), nullable=False)
+    delay: Mapped[int] = mapped_column(Integer, nullable=False)
+    data_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_json: Mapped[dict[str, Any] | list[Any]] = mapped_column(JSON, nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
