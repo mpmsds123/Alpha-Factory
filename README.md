@@ -10,6 +10,19 @@ read-only architectural evidence; this project does not import, vendor, modify, 
 either system. The frozen contracts and safety boundaries are user-authored design decisions,
 and all implementation code here is new.
 
+## Current package architecture
+
+A researcher starts the CLI or the narrow offline MCP interface. That interface borrows the
+deterministic orchestration services, which connect to a SQLite ledger and an explicitly selected
+adapter, and produces a reconstructable report that stops at human review. The LLM can propose;
+deterministic code owns identity, validation, limits, routing, lineage, and platform-state
+interpretation. The package contains no submission capability.
+
+See the detailed [architecture](docs/ARCHITECTURE.md), [sanitized replay case
+study](docs/case-studies/sanitized-replay.md), [test evidence](docs/TEST_EVIDENCE.md), [design
+tradeoffs](docs/DESIGN_TRADEOFFS.md), [known limits](docs/KNOWN_LIMITS.md), and [60-second technical
+explanation](docs/60_SECOND_EXPLANATION.md).
+
 ## Implemented milestones
 
 Implemented:
@@ -41,7 +54,9 @@ Implemented:
 - live platform-check recording that preserves `PASS`, `FAIL`, `WARNING`, `PENDING`, and `ERROR`
   and promotes only a confirmed all-pass response to human review;
 - a local stdio MCP 2.x server exposing five narrow ledger and replay tools with typed structured
-  output and explicit read/write annotations.
+  output and explicit read/write annotations;
+- a portfolio evidence set covering the current architecture, one executed sanitized replay,
+  verification evidence, tradeoffs, known limits, and a concise technical explanation.
 
 Explicitly deferred: a Web dashboard and automatic submission. A local routing result is never
 described as platform approval. LLM and BRAIN calls occur only when the user explicitly supplies
