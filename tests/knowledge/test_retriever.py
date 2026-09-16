@@ -65,6 +65,13 @@ def test_retriever_uses_only_approved_cards_and_deterministic_tags(
             data_type=DataType.VECTOR,
         )
     )
+    repository.upsert_method_card(
+        card(
+            "MC-GENERAL",
+            status=MethodCardStatus.APPROVED,
+            failure_codes=[],
+        )
+    )
     retriever = MethodCardRetriever(repository)
     first = retriever.retrieve(
         query="diagnose low coverage",

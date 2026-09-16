@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Any
 
-import yaml  # type: ignore[import-untyped]
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -29,12 +29,17 @@ class RoutingPolicy(PolicyModel):
     version: str
     strong: StrongThresholds
     weak: WeakThresholds
-    discard: DiscardThresholds
+    # Only ever present on routing.v1 (retained for that version's own historical
+    # loadability/audit trail). route_completed_result no longer reads this field
+    # regardless of whether a policy happens to carry it -- see routing.v2.yaml
+    # for why the turnover-based discard was removed rather than re-guessed.
+    discard: DiscardThresholds | None = None
 
 
 class LimitPolicy(PolicyModel):
     version: str
     initial_candidates: int = Field(gt=0)
+    maximum_concurrent_simulations: int = Field(gt=0, le=10)
     children_per_parent_per_generation: int = Field(gt=0)
     maximum_generations: int = Field(gt=0)
     maximum_distinct_candidates: int = Field(gt=0)
@@ -63,6 +68,11 @@ class ErrorTaxonomy(PolicyModel):
     unresolved: list[str]
 
 
+class CorrelationPolicy(PolicyModel):
+    version: str
+    maximum_correlation: float = Field(gt=0.0, lt=1.0)
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as stream:
         value = yaml.safe_load(stream)
@@ -81,3 +91,7 @@ def load_limit_policy(path: Path) -> LimitPolicy:
 
 def load_error_taxonomy(path: Path) -> ErrorTaxonomy:
     return ErrorTaxonomy.model_validate(_load_yaml(path))
+
+
+def load_correlation_policy(path: Path) -> CorrelationPolicy:
+    return CorrelationPolicy.model_validate(_load_yaml(path))

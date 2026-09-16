@@ -14,7 +14,11 @@ from alpha_orchestrator.adapters.live import (
     LiveBrainSettings,
 )
 from alpha_orchestrator.adapters.replay import ReplayBrainAdapter
-from alpha_orchestrator.config import load_limit_policy, load_routing_policy
+from alpha_orchestrator.config import (
+    load_correlation_policy,
+    load_limit_policy,
+    load_routing_policy,
+)
 from alpha_orchestrator.domain.enums import (
     AdapterMode,
     DataType,
@@ -22,12 +26,20 @@ from alpha_orchestrator.domain.enums import (
     MethodCardStatus,
     RunStatus,
 )
-from alpha_orchestrator.domain.models import AdapterFailure, RunSpecification
+from alpha_orchestrator.domain.models import (
+    AdapterFailure,
+    CandidateProposal,
+    RunSpecification,
+)
 from alpha_orchestrator.knowledge.corpus import CorpusInventory
+from alpha_orchestrator.knowledge.retriever import MethodCardRetriever
+from alpha_orchestrator.llm.openai_client import LLMSettings, OpenAICompatibleLLMClient
 from alpha_orchestrator.llm.prompts import register_default_prompts
+from alpha_orchestrator.llm.services import CandidateGenerator, RepairPlanner
 from alpha_orchestrator.orchestration.engine import ResearchOrchestrator
 from alpha_orchestrator.orchestration.platform_checks import PlatformCheckService
 from alpha_orchestrator.reporting.report import build_run_report
+from alpha_orchestrator.seeding import TemplateError, seed_from_file
 from alpha_orchestrator.storage.database import Database, sqlite_url
 from alpha_orchestrator.storage.repository import MissingRecord, Repository
 
@@ -62,9 +74,34 @@ def _policy_paths(routing_policy: Path | None, limit_policy: Path | None) -> tup
     if not directory.is_dir():
         directory = Path(__file__).parents[1] / "default_policies"
     return (
-        routing_policy or directory / "routing.v1.yaml",
-        limit_policy or directory / "limits.v1.yaml",
+        routing_policy or directory / "routing.v2.yaml",
+        limit_policy or directory / "limits.v2.yaml",
     )
+
+
+def _correlation_policy_path(correlation_policy: Path | None) -> Path:
+    if correlation_policy is not None:
+        return correlation_policy
+    directory = Path.cwd() / "policies"
+    if not (directory / "correlation.v1.yaml").is_file():
+        directory = Path(__file__).parents[1] / "default_policies"
+    return directory / "correlation.v1.yaml"
+
+
+def _simulation_settings(path: Path | None) -> dict[str, object]:
+    """Load the settings block a seeded candidate declares."""
+    if path is None:
+        directory = Path.cwd() / "policies"
+        if not (directory / "simulation-settings.v1.json").is_file():
+            directory = Path(__file__).parents[1] / "default_policies"
+        path = directory / "simulation-settings.v1.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(f"Simulation settings could not be read: {path}") from exc
+    if not isinstance(payload, dict):
+        raise typer.BadParameter(f"Simulation settings must be a JSON object: {path}")
+    return {key: value for key, value in payload.items() if not key.startswith("_")}
 
 
 def _live_client() -> LiveBrainClient:
@@ -76,6 +113,22 @@ def _live_client() -> LiveBrainClient:
 
 def _live_failure(exc: AdapterFailure) -> typer.BadParameter:
     return typer.BadParameter(f"{exc.error_class}: {exc.message}")
+
+
+def _llm_services(
+    repository: Repository,
+    *,
+    base_settings: dict[str, object] | None = None,
+) -> tuple[CandidateGenerator, RepairPlanner]:
+    try:
+        client = OpenAICompatibleLLMClient(LLMSettings.from_environment())
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    retriever = MethodCardRetriever(repository)
+    return (
+        CandidateGenerator(repository, retriever, client, base_settings=base_settings),
+        RepairPlanner(repository, retriever, client),
+    )
 
 
 @app.command("init")
@@ -155,27 +208,78 @@ def _execute(
     routing_policy: Path | None,
     limit_policy: Path | None,
     database: Path | None,
+    templates: Path | None = None,
+    simulation_settings: Path | None = None,
+    research_query: str | None = None,
+    correlation_policy: Path | None = None,
 ) -> None:
     if adapter_mode is AdapterMode.REPLAY and fixture is None:
         raise typer.BadParameter("Replay execution requires --fixture")
     if adapter_mode is AdapterMode.LIVE and fixture is not None:
         raise typer.BadParameter("Live execution does not accept a replay fixture")
+    if adapter_mode is not AdapterMode.LIVE and templates is not None:
+        raise typer.BadParameter("Seed templates apply to live execution only")
+    if templates is not None and research_query is not None:
+        raise typer.BadParameter("Use either --templates or --research-query, not both")
     routing_path, limit_path = _policy_paths(routing_policy, limit_policy)
     routing = load_routing_policy(routing_path)
     limits = load_limit_policy(limit_path)
+    # Loaded regardless of adapter mode, same as routing/limits: cheap, and the
+    # orchestrator itself only ever consults it for a live adapter (step ⑩'s
+    # platform-check + correlation gate has no meaning against a replay fixture).
+    correlation = load_correlation_policy(_correlation_policy_path(correlation_policy))
     db, repository = _repository(database)
     live_client: LiveBrainClient | None = None
     try:
         selected_adapter: BrainAdapter
         if adapter_mode is AdapterMode.LIVE:
             live_client = _live_client()
-            selected_adapter = LiveBrainAdapter(live_client, repository.load_run_metadata(run_id))
+            try:
+                # Check the session's remaining lifetime *before* any candidate spends
+                # this run's limit budget on requests a dying cookie cannot see through.
+                # Without this, a session that expires mid-run fails unpredictably deep
+                # inside per-candidate retry handling instead of stopping cleanly here.
+                live_client.authenticate()
+            except AdapterFailure as exc:
+                raise _live_failure(exc) from exc
+            metadata = repository.load_run_metadata(run_id)
+            seeds: list[CandidateProposal] = []
+            if templates is not None:
+                run = repository.get_run(run_id)
+                try:
+                    seeds = seed_from_file(
+                        templates,
+                        metadata,
+                        data_type=DataType(run.data_type),
+                        settings=_simulation_settings(simulation_settings),
+                        limit=limits.initial_candidates,
+                    )
+                except TemplateError as exc:
+                    raise typer.BadParameter(str(exc)) from exc
+            selected_adapter = LiveBrainAdapter(live_client, metadata, seed_candidates=seeds)
         else:
             assert fixture is not None
             selected_adapter = ReplayBrainAdapter.from_path(fixture)
-        summary = ResearchOrchestrator(repository, routing, limits).execute(
-            run_id, selected_adapter
-        )
+        generator: CandidateGenerator | None = None
+        planner: RepairPlanner | None = None
+        if research_query is not None:
+            generator, planner = _llm_services(
+                repository,
+                base_settings=(
+                    _simulation_settings(simulation_settings)
+                    if adapter_mode is AdapterMode.LIVE
+                    else None
+                ),
+            )
+        summary = ResearchOrchestrator(
+            repository,
+            routing,
+            limits,
+            candidate_generator=generator,
+            repair_planner=planner,
+            research_query=research_query,
+            correlation_policy=correlation,
+        ).execute(run_id, selected_adapter)
     except MissingRecord as exc:
         raise typer.BadParameter(str(exc)) from exc
     finally:
@@ -193,9 +297,28 @@ def execute_run(
     routing_policy: Annotated[Path | None, typer.Option("--routing-policy")] = None,
     limit_policy: Annotated[Path | None, typer.Option("--limit-policy")] = None,
     database: Annotated[Path | None, typer.Option("--db")] = None,
+    templates: Annotated[Path | None, typer.Option("--templates")] = None,
+    simulation_settings: Annotated[Path | None, typer.Option("--simulation-settings")] = None,
+    research_query: Annotated[str | None, typer.Option("--research-query")] = None,
+    correlation_policy: Annotated[Path | None, typer.Option("--correlation-policy")] = None,
 ) -> None:
-    """Execute a run through the explicitly selected adapter."""
-    _execute(run_id, adapter, fixture, routing_policy, limit_policy, database)
+    """Execute a run through the explicitly selected adapter.
+
+    Live runs have no candidates of their own. Pass --templates to seed them from a
+    researcher-authored template file, expanded deterministically and without a model.
+    """
+    _execute(
+        run_id,
+        adapter,
+        fixture,
+        routing_policy,
+        limit_policy,
+        database,
+        templates=templates,
+        simulation_settings=simulation_settings,
+        research_query=research_query,
+        correlation_policy=correlation_policy,
+    )
 
 
 @run_app.command("status")
@@ -238,25 +361,41 @@ def resume_run(
     routing_policy: Annotated[Path | None, typer.Option("--routing-policy")] = None,
     limit_policy: Annotated[Path | None, typer.Option("--limit-policy")] = None,
     database: Annotated[Path | None, typer.Option("--db")] = None,
+    research_query: Annotated[str | None, typer.Option("--research-query")] = None,
+    correlation_policy: Annotated[Path | None, typer.Option("--correlation-policy")] = None,
 ) -> None:
     """Resume without repeating completed simulation attempts."""
-    _execute(run_id, adapter, fixture, routing_policy, limit_policy, database)
+    _execute(
+        run_id,
+        adapter,
+        fixture,
+        routing_policy,
+        limit_policy,
+        database,
+        research_query=research_query,
+        correlation_policy=correlation_policy,
+    )
 
 
 @app.command("platform-check")
 def platform_check(
     candidate_id: str,
+    correlation_policy: Annotated[Path | None, typer.Option("--correlation-policy")] = None,
     database: Annotated[Path | None, typer.Option("--db")] = None,
+    repair_failures: Annotated[bool, typer.Option("--repair-failures")] = False,
 ) -> None:
-    """Request live checks for one ready candidate; never submit it."""
+    """Request live checks and the platform's own correlation numbers for one ready
+    candidate; never submit it."""
     db, repository = _repository(database)
     client: LiveBrainClient | None = None
     try:
         candidate = repository.get_candidate(candidate_id)
         metadata = repository.load_run_metadata(candidate.run_id)
         client = _live_client()
-        summary = PlatformCheckService(repository).check(
-            candidate_id, LiveBrainAdapter(client, metadata)
+        policy = load_correlation_policy(_correlation_policy_path(correlation_policy))
+        planner = _llm_services(repository)[1] if repair_failures else None
+        summary = PlatformCheckService(repository, planner).check(
+            candidate_id, LiveBrainAdapter(client, metadata), policy
         )
     except MissingRecord as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -271,6 +410,9 @@ def platform_check(
                 "candidate_status": summary.candidate_status,
                 "request_attempts": summary.request_attempts,
                 "checks": [check.model_dump(mode="json") for check in summary.checks],
+                "repair_request_ids": summary.repair_request_ids,
+                "repair_candidate_ids": summary.repair_candidate_ids,
+                "repair_stop_reason": summary.repair_stop_reason,
                 "automatic_submission": False,
             },
             sort_keys=True,
@@ -301,7 +443,7 @@ def inventory_corpus(
     source_type: Annotated[EvidenceLevel, typer.Option("--source-type")] = EvidenceLevel.UNVERIFIED,
     database: Annotated[Path | None, typer.Option("--db")] = None,
 ) -> None:
-    """Record hashes and section locators, never raw Markdown text."""
+    """Record hashes and section locators for one file or a directory, never raw text."""
     db, repository = _repository(database)
     result = CorpusInventory(repository).inventory(path, source_type)
     db.dispose()
@@ -313,9 +455,14 @@ def extract_cards(
     source_id: str,
     database: Annotated[Path | None, typer.Option("--db")] = None,
 ) -> None:
-    """Extract explicit, paraphrased method-card blocks as drafts."""
+    """Extract explicit cards from a source ID or an authored Markdown file as drafts."""
     db, repository = _repository(database)
-    cards = CorpusInventory(repository).extract_draft_cards(source_id)
+    inventory = CorpusInventory(repository)
+    source_path = Path(source_id).expanduser()
+    if source_path.is_file():
+        cards = inventory.extract_authored_draft_cards(source_path)
+    else:
+        cards = inventory.extract_draft_cards(source_id)
     db.dispose()
     typer.echo(json.dumps([card.card_id for card in cards]))
 
@@ -355,6 +502,38 @@ def approve_card(
     """Record explicit human approval for the latest card version."""
     db, repository = _repository(database)
     card = repository.approve_method_card(card_id, reviewer)
+    db.dispose()
+    typer.echo(
+        json.dumps(
+            {
+                "card_id": card.card_id,
+                "version": card.version,
+                "status": card.status,
+                "reviewer": card.reviewer,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+@cards_app.command("retire")
+def retire_card(
+    card_id: str,
+    version: Annotated[str, typer.Option("--version")],
+    reviewer: Annotated[str, typer.Option("--reviewer")],
+    database: Annotated[Path | None, typer.Option("--db")] = None,
+) -> None:
+    """Retire one approved card version, e.g. the v1 a newly approved v2 replaces.
+
+    Retrieval reads every APPROVED row for a card_id, not just the newest one, so an
+    old version left approved keeps being handed to the LLM alongside its
+    replacement -- including whatever the replacement was written to remove.
+    """
+    db, repository = _repository(database)
+    try:
+        card = repository.retire_method_card(card_id, version, reviewer)
+    except MissingRecord as exc:
+        raise typer.BadParameter(str(exc)) from exc
     db.dispose()
     typer.echo(
         json.dumps(

@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import httpx
+import respx
 from typer.testing import CliRunner
 
 from alpha_orchestrator.cli.app import app
@@ -99,6 +101,55 @@ def test_cli_refuses_live_or_missing_fixture(tmp_path: Path, monkeypatch: object
     assert live.exit_code != 0
 
 
+@respx.mock
+def test_cli_stops_cleanly_before_spending_budget_on_a_near_expiry_session(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    """A session too close to expiry must abort `run execute` before it ever reaches
+    /simulations -- not fail unpredictably partway through a candidate's retries."""
+    database = tmp_path / "lab.db"
+    monkeypatch.chdir(ROOT)
+    session_file = tmp_path / "brain-session.json"
+    session_file.write_text(json.dumps({"cookies": {"t": "test-only"}}))
+    session_file.chmod(0o600)
+    monkeypatch.setenv("ALPHA_LAB_BRAIN_SESSION_FILE", str(session_file))
+
+    created = runner.invoke(
+        app,
+        [
+            "run",
+            "create",
+            "--dataset",
+            "demo-dataset",
+            "--region",
+            "USA",
+            "--universe",
+            "TOP1000",
+            "--delay",
+            "1",
+            "--db",
+            str(database),
+        ],
+    )
+    run_id = created.stdout.strip()
+
+    authentication = respx.get("https://api.worldquantbrain.com/authentication").mock(
+        return_value=httpx.Response(200, json={"token": {"expiry": 30.0}})
+    )
+    simulations = respx.post("https://api.worldquantbrain.com/simulations")
+
+    live = runner.invoke(
+        app,
+        ["run", "execute", run_id, "--adapter", "live", "--db", str(database)],
+    )
+    assert live.exit_code != 0
+    assert "expires in 30s" in live.output
+    assert authentication.called
+    assert not simulations.called
+    status = runner.invoke(app, ["run", "status", run_id, "--db", str(database)])
+    assert json.loads(status.stdout)["simulation_attempts"] == 0
+
+
 def test_cli_corpus_and_card_approval_workflow(tmp_path: Path, monkeypatch: object) -> None:
     database = tmp_path / "lab.db"
     corpus = tmp_path / "corpus"
@@ -151,3 +202,22 @@ evidence_level: training
         ],
     )
     assert json.loads(approved.stdout)["status"] == "approved"
+    retired = runner.invoke(
+        app,
+        [
+            "cards",
+            "retire",
+            "MC-CLI-001",
+            "--version",
+            "v1",
+            "--reviewer",
+            "CLI Reviewer",
+            "--db",
+            str(database),
+        ],
+    )
+    assert json.loads(retired.stdout)["status"] == "retired"
+    assert (
+        runner.invoke(app, ["cards", "list", "--status", "approved", "--db", str(database)]).stdout
+        == "[]\n"
+    )

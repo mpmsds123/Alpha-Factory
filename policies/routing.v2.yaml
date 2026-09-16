@@ -1,0 +1,19 @@
+version: routing.v2
+# v1 had a fourth threshold here -- discard.maximum_turnover: 0.90 -- checked
+# BEFORE sharpe/fitness, so a candidate with turnover just over 0.90 was
+# discarded without its sharpe or fitness ever being looked at. Unlike
+# correlation.v1's 0.70 (sourced to ace_lib.py and a real community post), this
+# number had no source: nobody had run it against real data, it just sat there
+# as the most decisive rule in the whole pipeline. Removed rather than replaced
+# with another guess. Turnover is still recorded on every result (nothing here
+# stops it from being seen); high turnover is now handled where this project
+# already has real, cited method cards for it (MC-HIGH-TURNOVER-DECAY-013,
+# MC-HIGH-TURNOVER-HUMP-014, and the two 2026-09-15 additions) -- via a real
+# platform-check HIGH_TURNOVER result feeding RepairPlanner, not a local guess
+# that discarded the candidate before repair ever got a chance to look at it.
+strong:
+  minimum_sharpe: 0.50
+  minimum_fitness: 0.30
+weak:
+  minimum_sharpe: 0.25
+  minimum_fitness: 0.15

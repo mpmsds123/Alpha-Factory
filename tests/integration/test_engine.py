@@ -1,5 +1,7 @@
 from collections.abc import Callable
 from pathlib import Path
+from threading import Lock
+from time import sleep
 
 import pytest
 
@@ -42,6 +44,139 @@ def completed(
         completed=True,
         metrics=SimulationMetrics(sharpe=sharpe, fitness=fitness, turnover=turnover),
     )
+
+
+class ConcurrencyTrackingAdapter(FakeBrainAdapter):
+    def __init__(self, metadata: MetadataSnapshot, candidates: list[CandidateProposal]) -> None:
+        super().__init__(
+            metadata,
+            candidates,
+            results={item.expression: completed() for item in candidates},
+        )
+        self.active = 0
+        self.maximum_active = 0
+        self.lock = Lock()
+
+    def create_simulation(self, request):  # type: ignore[no-untyped-def]
+        with self.lock:
+            self.active += 1
+            self.maximum_active = max(self.maximum_active, self.active)
+        try:
+            sleep(0.02)
+            return super().create_simulation(request)
+        finally:
+            with self.lock:
+                self.active -= 1
+
+
+def test_simulation_io_respects_frozen_concurrency_limit(
+    repository: Repository,
+    make_run: Callable[..., RunSpecification],
+    routing_policy: RoutingPolicy,
+    limit_policy: LimitPolicy,
+    metadata: MetadataSnapshot,
+) -> None:
+    limits = limit_policy.model_copy(update={"initial_candidates": 10})
+    run = make_run(_limit_policy=limits)
+    proposals = [candidate(f"rank(ts_mean(close, {window}))") for window in range(1, 11)]
+    adapter = ConcurrencyTrackingAdapter(metadata, proposals)
+
+    OfflineOrchestrator(repository, routing_policy, limits).execute(run.run_id, adapter)
+
+    assert adapter.maximum_active == 10
+    assert repository.count_attempts(run.run_id) == 10
+
+
+class DyingSessionAdapter(FakeBrainAdapter):
+    """A session past the reuse cutoff must stop the run before any new candidate
+    spends its budget on a request the session cannot see through -- not fail deep
+    inside per-candidate retry handling after a doomed request already went out."""
+
+    def __init__(self, metadata: MetadataSnapshot, candidates: list[CandidateProposal]) -> None:
+        super().__init__(
+            metadata, candidates, results={item.expression: completed() for item in candidates}
+        )
+
+    def session_seconds_remaining(self) -> float | None:
+        return 1.0
+
+
+def test_run_stops_cleanly_when_the_session_is_about_to_expire(
+    repository: Repository,
+    make_run: Callable[..., RunSpecification],
+    routing_policy: RoutingPolicy,
+    limit_policy: LimitPolicy,
+    metadata: MetadataSnapshot,
+) -> None:
+    run = make_run()
+    adapter = DyingSessionAdapter(metadata, [candidate("rank(close)")])
+
+    summary = OfflineOrchestrator(repository, routing_policy, limit_policy).execute(
+        run.run_id, adapter
+    )
+
+    assert summary.status is RunStatus.STOPPED
+    assert summary.stop_reason == "SESSION_EXPIRING_SOON"
+    # Nothing was spent chasing a dying cookie: no attempt was ever created, and the
+    # candidate is left resumable rather than marked as any kind of error.
+    assert repository.count_attempts(run.run_id) == 0
+    only = repository.list_candidates(run.run_id)[0]
+    assert only.status == CandidateStatus.SIMULATING
+
+
+def test_one_concurrent_failure_does_not_cancel_siblings(
+    repository: Repository,
+    make_run: Callable[..., RunSpecification],
+    routing_policy: RoutingPolicy,
+    limit_policy: LimitPolicy,
+    metadata: MetadataSnapshot,
+) -> None:
+    run = make_run()
+    proposals = [candidate("rank(close)"), candidate("rank(volume)")]
+    adapter = FakeBrainAdapter(
+        metadata,
+        proposals,
+        results={"rank(volume)": completed()},
+        create_failures={"rank(close)": [ErrorClass.AUTHORIZATION]},
+    )
+
+    OfflineOrchestrator(repository, routing_policy, limit_policy).execute(run.run_id, adapter)
+
+    states = {item.expression: item.status for item in repository.list_candidates(run.run_id)}
+    assert states["rank(close)"] == CandidateStatus.TERMINAL_ERROR
+    assert states["rank(volume)"] == CandidateStatus.READY_FOR_PLATFORM_CHECK
+
+
+def test_concurrent_and_serial_execution_persist_the_same_outcomes(
+    repository: Repository,
+    make_run: Callable[..., RunSpecification],
+    routing_policy: RoutingPolicy,
+    limit_policy: LimitPolicy,
+    metadata: MetadataSnapshot,
+) -> None:
+    proposals = [candidate("rank(close)"), candidate("rank(volume)")]
+    serial = limit_policy.model_copy(update={"maximum_concurrent_simulations": 1})
+    parallel = limit_policy.model_copy(update={"maximum_concurrent_simulations": 10})
+    serial_run = make_run(_limit_policy=serial)
+    parallel_run = make_run(_limit_policy=parallel, region="EUR")
+    results = {item.expression: completed() for item in proposals}
+
+    OfflineOrchestrator(repository, routing_policy, serial).execute(
+        serial_run.run_id, FakeBrainAdapter(metadata, proposals, results=results)
+    )
+    OfflineOrchestrator(repository, routing_policy, parallel).execute(
+        parallel_run.run_id, FakeBrainAdapter(metadata, proposals, results=results)
+    )
+
+    serial_states = [
+        (item.expression, item.status)
+        for item in repository.list_candidates(serial_run.run_id)
+    ]
+    parallel_states = [
+        (item.expression, item.status)
+        for item in repository.list_candidates(parallel_run.run_id)
+    ]
+    assert serial_states == parallel_states
 
 
 def test_basic_replay_is_deterministic_and_report_is_conservative(

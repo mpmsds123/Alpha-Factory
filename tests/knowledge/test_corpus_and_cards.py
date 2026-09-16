@@ -5,6 +5,7 @@ import pytest
 from alpha_orchestrator.domain.enums import DataType, EvidenceLevel, MethodCardStatus
 from alpha_orchestrator.domain.knowledge import MethodCard, SourceReference
 from alpha_orchestrator.knowledge.corpus import CorpusInventory
+from alpha_orchestrator.knowledge.retriever import MethodCardRetriever
 from alpha_orchestrator.storage.repository import MissingRecord, Repository
 
 
@@ -108,6 +109,51 @@ def test_approval_is_explicit_and_approved_versions_are_immutable(
     assert persisted.reviewer == "Research Reviewer"
 
 
+def test_retiring_a_superseded_version_stops_it_being_retrieved_as_approved(
+    tmp_path: Path, repository: Repository
+) -> None:
+    """Approving a v2 replacement must not leave v1 sitting in the APPROVED set:
+    MethodCardRetriever reads every row with that status, not just the newest one,
+    so a forgotten retire would hand the LLM both versions -- including whatever
+    the replacement was written to remove."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "card.md").write_text(card_block(), encoding="utf-8")
+    inventory = CorpusInventory(repository)
+    source_id = inventory.inventory(corpus, EvidenceLevel.TRAINING).source_ids[0]
+    v1 = inventory.extract_draft_cards(source_id)[0]
+    repository.approve_method_card(v1.card_id, "Research Reviewer")
+
+    v2 = v1.model_copy(
+        update={
+            "version": "v2",
+            "status": MethodCardStatus.DRAFT,
+            "reviewer": None,
+            "approval_timestamp": None,
+        }
+    )
+    repository.upsert_method_card(v2)
+    with pytest.raises(ValueError, match="Only an approved card"):
+        # v2 is still a draft -- there is nothing superseded to retire yet.
+        repository.retire_method_card(v2.card_id, "v2", "Research Reviewer")
+    repository.approve_method_card(v2.card_id, "Research Reviewer")
+    approved_versions = {
+        card.version for card in repository.list_method_cards(MethodCardStatus.APPROVED)
+    }
+    assert approved_versions == {"v1", "v2"}  # both approved until v1 is explicitly retired
+
+    retired = repository.retire_method_card(v1.card_id, "v1", "Research Reviewer")
+    assert retired.status is MethodCardStatus.RETIRED
+    approved_versions = {
+        card.version for card in repository.list_method_cards(MethodCardStatus.APPROVED)
+    }
+    assert approved_versions == {"v2"}
+    with pytest.raises(ValueError, match="Only an approved card"):
+        repository.retire_method_card(v1.card_id, "v1", "Research Reviewer")
+    with pytest.raises(MissingRecord):
+        repository.retire_method_card("MC-MISSING", "v1", "Research Reviewer")
+
+
 def test_same_relative_locator_in_distinct_roots_has_distinct_stable_source_ids(
     tmp_path: Path, repository: Repository
 ) -> None:
@@ -178,3 +224,54 @@ def test_method_card_contract_requires_complete_approval() -> None:
             status=MethodCardStatus.APPROVED,
             reviewer="Reviewer",
         )
+
+
+def test_inventoried_sources_feed_authored_drafts_then_approved_retrieval(
+    tmp_path: Path, repository: Repository
+) -> None:
+    source = tmp_path / "training.md"
+    source.write_text("# Training\nObserve coverage.\nStop when absent.\n", encoding="utf-8")
+    authored = tmp_path / "cards.md"
+    authored.write_text(
+        """```method-card
+card_id: MC-DB-RETRIEVAL-001
+title: Database retrieval contract
+version: v1
+applicable_failure_codes: [LOW_COVERAGE]
+applicable_data_types: [MATRIX]
+prerequisites:
+  - "Observe coverage. [source: training.md:2]"
+diagnostic_signals:
+  - "Coverage is the diagnostic. [source: training.md:2]"
+allowed_repair_actions:
+  - "Use the stated coverage observation. [source: training.md:2]"
+prohibited_actions:
+  - "Do not proceed without coverage. [source: training.md:2-3]"
+stop_condition: "Stop when absent. [source: training.md:3]"
+evidence_level: training
+```\n""",
+        encoding="utf-8",
+    )
+    inventory = CorpusInventory(repository)
+    inventory.inventory(source, EvidenceLevel.TRAINING)
+    drafts = inventory.extract_authored_draft_cards(authored)
+
+    assert [card.card_id for card in drafts] == ["MC-DB-RETRIEVAL-001"]
+    assert drafts[0].status is MethodCardStatus.DRAFT
+    assert len(repository.list_source_documents()) == 1
+    assert len(repository.list_method_cards(MethodCardStatus.DRAFT)) == 1
+    retriever = MethodCardRetriever(repository)
+    assert retriever.retrieve(
+        query="coverage",
+        data_type=DataType.MATRIX,
+        failure_codes={"LOW_COVERAGE"},
+    ) == []
+
+    # Approval is explicit even in the test: production extraction never performs it.
+    repository.approve_method_card("MC-DB-RETRIEVAL-001", "Test Reviewer")
+    retrieved = retriever.retrieve(
+        query="coverage",
+        data_type=DataType.MATRIX,
+        failure_codes={"LOW_COVERAGE"},
+    )
+    assert [item.card.card_id for item in retrieved] == ["MC-DB-RETRIEVAL-001"]

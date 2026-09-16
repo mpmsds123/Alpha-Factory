@@ -1,0 +1,14 @@
+{
+  "_comment": "Settings block a seeded live candidate declares, excluding region/universe/delay which the run pins. Every value here was used by 1,115 accepted BRAIN simulations on this account (BrainMachine 库.sqlite, 2026-08-25 to 2026-08-27), so the block is known to be accepted by the platform rather than inferred. Each value is still checked against the OPTIONS /simulations snapshot before a candidate is queued. testPeriod is deliberately left out: OPTIONS /simulations marks it optional (required: false) and publishes it as a free-form string range (minValue/maxValue), which the structural gate has no ladder for -- unlike the other fields here, it cannot yet be checked against the platform's own schema, so it is omitted rather than declared unchecked.",
+  "_version": "simulation-settings.v1",
+  "instrumentType": "EQUITY",
+  "language": "FASTEXPR",
+  "neutralization": "MARKET",
+  "decay": 0,
+  "truncation": 0.08,
+  "pasteurization": "ON",
+  "unitHandling": "VERIFY",
+  "nanHandling": "OFF",
+  "maxTrade": "OFF",
+  "visualization": false
+}

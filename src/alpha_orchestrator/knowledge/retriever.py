@@ -39,7 +39,6 @@ class MethodCardRetriever:
             if data_type in card.applicable_data_types
             and (
                 not requested_failures
-                or not card.applicable_failure_codes
                 or requested_failures & {code.casefold() for code in card.applicable_failure_codes}
             )
         ]

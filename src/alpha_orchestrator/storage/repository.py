@@ -683,6 +683,35 @@ class Repository:
             session.flush()
             return self._method_card_from_orm(persisted)
 
+    def retire_method_card(self, card_id: str, version: str, reviewer: str) -> MethodCard:
+        """Retire one specific approved version -- typically the one a newly
+        approved replacement supersedes. `list_method_cards(APPROVED)` (and so
+        MethodCardRetriever) returns every row with that status; leaving a
+        superseded version approved would hand the LLM both versions at once,
+        including whatever the replacement was written to remove.
+        """
+        if not reviewer.strip():
+            raise ValueError("Reviewer is required")
+        with self._sessions.begin() as session:
+            persisted = session.scalar(
+                select(MethodCardORM).where(
+                    MethodCardORM.card_id == card_id,
+                    MethodCardORM.version == version,
+                )
+            )
+            if persisted is None:
+                raise MissingRecord(f"Method card version not found: {card_id} {version}")
+            if persisted.status != MethodCardStatus.APPROVED:
+                raise ValueError(
+                    f"Only an approved card can be retired (current status: {persisted.status})"
+                )
+            persisted.status = MethodCardStatus.RETIRED
+            persisted.reviewer = reviewer.strip()
+            persisted.approval_timestamp = utc_now()
+            persisted.updated_at = utc_now()
+            session.flush()
+            return self._method_card_from_orm(persisted)
+
     def list_method_cards(self, status: MethodCardStatus | None = None) -> list[MethodCard]:
         with self._sessions() as session:
             statement = select(MethodCardORM)
@@ -830,12 +859,14 @@ class Repository:
             name: sorted(values, key=repr)
             for name, values in sorted(capture.metadata.settings.items())
         }
+        operator_definitions = dict(sorted(capture.metadata.operator_definitions.items()))
         records = (
             (MetadataSnapshotKind.FIELDS, capture.field_snapshot_id, fields_payload),
             (MetadataSnapshotKind.OPERATORS, capture.operator_snapshot_id, operators_payload),
             (MetadataSnapshotKind.SETTINGS, capture.setting_snapshot_id, settings_payload),
         )
         assert_no_sensitive_data([record[2] for record in records])
+        assert_no_sensitive_data(operator_definitions)
         with self._sessions.begin() as session:
             for kind, snapshot_id, payload in records:
                 expected_id, content_hash = metadata_snapshot_identity(
@@ -849,10 +880,19 @@ class Repository:
                 )
                 if snapshot_id != expected_id:
                     raise ValueError(f"Metadata snapshot ID does not match content: {kind}")
+                # Enrichment, not identity: BRAIN can add or reword a `definition`
+                # string between captures of the exact same name set without that
+                # being a change to what this frozen snapshot IS, so it is not
+                # covered by the immutability check below.
+                definitions = (
+                    operator_definitions if kind is MetadataSnapshotKind.OPERATORS else None
+                )
                 persisted = session.get(MetadataSnapshotORM, snapshot_id)
                 if persisted is not None:
                     if persisted.content_hash != content_hash or persisted.payload_json != payload:
                         raise ValueError(f"Metadata snapshot is immutable: {snapshot_id}")
+                    if definitions is not None and not persisted.operator_definitions_json:
+                        persisted.operator_definitions_json = definitions
                     continue
                 session.add(
                     MetadataSnapshotORM(
@@ -865,6 +905,7 @@ class Repository:
                         data_type=capture.data_type,
                         content_hash=content_hash,
                         payload_json=payload,
+                        operator_definitions_json=definitions,
                         source=capture.source,
                         captured_at=capture.captured_at,
                     )
@@ -903,6 +944,7 @@ class Repository:
                 dataset_id=run.dataset_id,
                 fields={name: DataType(value) for name, value in dict(fields.payload_json).items()},
                 operators=set(operators.payload_json),
+                operator_definitions=dict(operators.operator_definitions_json or {}),
                 settings={
                     name: set(values) for name, values in dict(settings.payload_json).items()
                 },

@@ -7,6 +7,7 @@ import pytest
 import respx
 
 from alpha_orchestrator.adapters.live import (
+    RATE_LIMIT_DEFAULT_PAUSE_SECONDS,
     LiveBrainAdapter,
     LiveBrainClient,
     LiveBrainSettings,
@@ -34,6 +35,7 @@ def settings(tmp_path: Path, **overrides: object) -> LiveBrainSettings:
         "session_file": session_file(tmp_path),
         "base_url": "https://test.worldquantbrain.com",
         "maximum_retry_after_seconds": 10,
+        "maximum_rate_limit_attempts": 2,
     }
     values.update(overrides)
     return LiveBrainSettings.model_validate(values)
@@ -117,10 +119,28 @@ def test_intercepted_low_volume_live_smoke_flow(tmp_path: Path) -> None:
     operators = respx.get("https://test.worldquantbrain.com/operators").mock(
         return_value=httpx.Response(200, json={"results": [{"name": "rank"}]})
     )
-    setting_route = respx.get("https://test.worldquantbrain.com/settings").mock(
+    setting_route = respx.request("OPTIONS", "https://test.worldquantbrain.com/simulations").mock(
         return_value=httpx.Response(
             200,
-            json={"settings": {"neutralization": ["SUBINDUSTRY"], "truncation": [0.08]}},
+            json={
+                "actions": {
+                    "POST": {
+                        "settings": {
+                            "children": {
+                                "neutralization": {
+                                    "type": "choice",
+                                    "choices": [{"value": "SUBINDUSTRY"}],
+                                },
+                                "truncation": {
+                                    "type": "decimal",
+                                    "min_value": 0.0,
+                                    "max_value": 0.08,
+                                },
+                            }
+                        }
+                    }
+                }
+            },
         )
     )
     create = respx.post("https://test.worldquantbrain.com/simulations").mock(
@@ -196,11 +216,16 @@ def test_intercepted_low_volume_live_smoke_flow(tmp_path: Path) -> None:
 
 
 @respx.mock
-def test_rate_limit_is_classified_and_wait_is_capped(tmp_path: Path) -> None:
+def test_rate_limit_waits_to_the_configured_attempt_limit_then_stops(tmp_path: Path) -> None:
+    """A 429 is a pacing signal, not a research result.
+
+    The adapter honours Retry-After (capped by maximum_retry_after_seconds), retries the
+    request up to the configured bounded attempt count, and only then reports the failure.
+    """
     respx.get("https://test.worldquantbrain.com/authentication").mock(
         return_value=httpx.Response(200, json={})
     )
-    respx.get("https://test.worldquantbrain.com/data-sets").mock(
+    datasets = respx.get("https://test.worldquantbrain.com/data-sets").mock(
         return_value=httpx.Response(429, headers={"Retry-After": "120"}, json={"detail": "slow"})
     )
     waits: list[float] = []
@@ -209,7 +234,86 @@ def test_rate_limit_is_classified_and_wait_is_capped(tmp_path: Path) -> None:
         client.list_datasets(region="USA", universe="TOP1000", delay=1)
     assert caught.value.error_class is ErrorClass.RATE_LIMIT
     assert caught.value.retry_after_seconds == 120
-    assert waits == [10]
+    assert datasets.call_count == 2
+    # 120 seconds requested, capped to the configured 10 by each of the two responses.
+    assert waits == [10, 10]
+
+
+@respx.mock
+def test_rate_limit_without_retry_after_still_paces_before_retrying(tmp_path: Path) -> None:
+    """BRAIN does not always send Retry-After with a 429.
+
+    Without a header there is nothing to honour, so the adapter falls back to a fixed
+    floor instead of retrying immediately.
+    """
+    respx.get("https://test.worldquantbrain.com/authentication").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    datasets = respx.get("https://test.worldquantbrain.com/data-sets").mock(
+        return_value=httpx.Response(429, json={"detail": "slow"})
+    )
+    waits: list[float] = []
+    client = LiveBrainClient(settings(tmp_path), sleeper=waits.append)
+    with pytest.raises(AdapterFailure) as caught:
+        client.list_datasets(region="USA", universe="TOP1000", delay=1)
+    assert caught.value.error_class is ErrorClass.RATE_LIMIT
+    assert caught.value.retry_after_seconds is None
+    assert datasets.call_count == 2
+    assert waits == [RATE_LIMIT_DEFAULT_PAUSE_SECONDS, RATE_LIMIT_DEFAULT_PAUSE_SECONDS]
+
+
+@respx.mock
+def test_rate_limit_recovers_when_the_retry_succeeds(tmp_path: Path) -> None:
+    """The point of the retry: one 429 must not end a run that would otherwise work."""
+    respx.get("https://test.worldquantbrain.com/authentication").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    respx.get("https://test.worldquantbrain.com/data-sets").mock(
+        side_effect=[
+            httpx.Response(429, headers={"Retry-After": "1"}, json={"detail": "slow"}),
+            httpx.Response(200, json={"results": [{"id": "fundamental6"}]}),
+        ]
+    )
+    waits: list[float] = []
+    client = LiveBrainClient(settings(tmp_path), sleeper=waits.append)
+    datasets = client.list_datasets(region="USA", universe="TOP1000", delay=1)
+    assert [item["id"] for item in datasets] == ["fundamental6"]
+    assert waits == [1]
+
+
+@respx.mock
+def test_field_pages_are_paced_so_a_wide_dataset_does_not_trip_the_limiter(
+    tmp_path: Path,
+) -> None:
+    """Paging /data-fields is the one place this adapter issues many requests in a row.
+
+    A dataset wide enough to need several pages must pause between them; without the
+    pause a 600-field dataset is a dozen back-to-back GETs and BRAIN answers 429.
+    """
+    respx.get("https://test.worldquantbrain.com/authentication").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    pages = [
+        httpx.Response(
+            200,
+            json={
+                "count": 3,
+                "results": [{"id": f"field-{index}", "type": "MATRIX"}],
+            },
+        )
+        for index in range(3)
+    ]
+    fields = respx.get("https://test.worldquantbrain.com/data-fields").mock(side_effect=pages)
+    waits: list[float] = []
+    client = LiveBrainClient(settings(tmp_path), sleeper=waits.append)
+    records = client._fetch_all_fields({"dataset.id": "fundamental6"})
+    assert [record["id"] for record in records] == ["field-0", "field-1", "field-2"]
+    assert fields.call_count == 3
+    # Three pages, two gaps between them -- and no pause before the first request.
+    assert waits == [
+        client.settings.fields_page_pause_seconds,
+        client.settings.fields_page_pause_seconds,
+    ]
 
 
 @respx.mock
@@ -262,6 +366,30 @@ def test_pending_terminal_and_unknown_results_remain_distinct(tmp_path: Path) ->
     assert pending.error_class is ErrorClass.PENDING
     assert failed.error_class is ErrorClass.INVALID_FIELD
     assert unknown.error_class is ErrorClass.UNKNOWN
+
+
+@respx.mock
+def test_wrong_argument_count_classifies_as_invalid_operator(tmp_path: Path) -> None:
+    """Real text from a live 2026-09-15 run: `group_rank(x)` called with one
+    argument (it takes two) came back with no "operator" substring at all, so it
+    used to fall through to PLATFORM_TERMINAL_FAILURE and never reach RepairPlanner
+    even though wrong-arity operator use is exactly what MC-INVALID-OPERATOR-017
+    is for."""
+    respx.get("https://test.worldquantbrain.com/authentication").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    respx.get("https://test.worldquantbrain.com/simulations/sim-1").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": "FAILED",
+                "message": "Invalid number of inputs : 1, should be exactly 2 input(s).",
+            },
+        )
+    )
+    client = LiveBrainClient(settings(tmp_path))
+    result = client.poll_simulation("sim-1")
+    assert result.error_class is ErrorClass.INVALID_OPERATOR
 
 
 def test_unsafe_external_identifiers_are_rejected(tmp_path: Path) -> None:

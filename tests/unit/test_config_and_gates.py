@@ -27,6 +27,14 @@ def test_versioned_policies_load() -> None:
     assert "PENDING" in taxonomy.unresolved
 
 
+def test_routing_v2_drops_the_unsourced_turnover_discard() -> None:
+    v1 = load_routing_policy(ROOT / "policies" / "routing.v1.yaml")
+    v2 = load_routing_policy(ROOT / "policies" / "routing.v2.yaml")
+    assert v1.discard is not None and v1.discard.maximum_turnover == 0.90
+    assert v2.version == "routing.v2"
+    assert v2.discard is None
+
+
 def test_invalid_yaml_and_unsafe_limit_policy_are_rejected(tmp_path: Path) -> None:
     path = tmp_path / "policy.yaml"
     path.write_text("- not\n- a\n- mapping\n", encoding="utf-8")
@@ -36,6 +44,7 @@ def test_invalid_yaml_and_unsafe_limit_policy_are_rejected(tmp_path: Path) -> No
         LimitPolicy(
             version="unsafe",
             initial_candidates=1,
+            maximum_concurrent_simulations=10,
             children_per_parent_per_generation=1,
             maximum_generations=1,
             maximum_distinct_candidates=1,
@@ -87,12 +96,15 @@ def test_structural_validator_rejects_known_failure_classes(
     assert expected in {issue.code for issue in result.issues}
 
 
-def test_routing_is_deterministic_and_turnover_first(routing_policy: object) -> None:
+def test_routing_ignores_turnover_and_is_otherwise_deterministic(routing_policy: object) -> None:
+    """v2 dropped the turnover-based discard (routing.v1's discard.maximum_turnover
+    had no source and was checked before sharpe/fitness were even read); a high
+    turnover with strong sharpe/fitness must now route STRONG, not be discarded."""
     policy = routing_policy
     assert route_completed_result(None, policy)[0] is GateOutcome.DISCARD
     assert (
         route_completed_result(SimulationMetrics(sharpe=2.0, fitness=1.0, turnover=0.91), policy)[0]
-        is GateOutcome.DISCARD
+        is GateOutcome.STRONG
     )
     assert (
         route_completed_result(SimulationMetrics(sharpe=0.5, fitness=0.3, turnover=0.2), policy)[0]

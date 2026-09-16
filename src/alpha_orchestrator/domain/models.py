@@ -69,6 +69,14 @@ class MetadataSnapshot(StrictModel):
     fields: dict[str, DataType]
     operators: set[str]
     settings: dict[str, set[str | int | float | bool]]
+    # BRAIN's own `/operators` response includes a `definition` string (e.g.
+    # "group_rank(x, group)") for each operator, but frozen operator-snapshot
+    # identity only ever hashed the bare name set -- adding the call signatures
+    # here is purely additive so it does not change `operator_snapshot_id` for
+    # any existing run. Without this, the generator's only source for an
+    # operator's argument count was the LLM's own guess (see the 2026-09-15
+    # incident: `group_rank(x)` called with 1 argument when it takes 2).
+    operator_definitions: dict[str, str] = Field(default_factory=dict)
 
 
 class CapturedMetadata(StrictModel):

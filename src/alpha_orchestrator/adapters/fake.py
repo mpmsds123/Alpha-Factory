@@ -78,3 +78,10 @@ class FakeBrainAdapter:
     def request_platform_checks(self, external_alpha_id: str) -> list[PlatformCheck]:
         del external_alpha_id
         return []
+
+    def fetch_correlations(self, external_alpha_id: str) -> dict[str, float | None]:
+        del external_alpha_id
+        return {}
+
+    def session_seconds_remaining(self) -> float | None:
+        return None

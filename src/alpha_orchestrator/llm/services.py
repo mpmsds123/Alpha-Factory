@@ -58,7 +58,7 @@ class CandidateGenerationResult:
 
 @dataclass(frozen=True)
 class RepairPlanningResult:
-    request_id: str
+    request_id: str | None
     plan: RepairPlan
     candidates: tuple[CandidateInsertResult, ...]
 
@@ -157,10 +157,12 @@ class CandidateGenerator:
         repository: Repository,
         retriever: MethodCardRetriever,
         client: LLMClient,
+        base_settings: dict[str, object] | None = None,
     ) -> None:
         self.repository = repository
         self.retriever = retriever
         self.invoker = LedgeredLLMInvoker(repository, client)
+        self.base_settings = dict(base_settings or {})
 
     def generate(
         self,
@@ -214,6 +216,12 @@ class CandidateGenerator:
             response_model=CandidateProposalBatch,
             deterministic_validation=validate,
         )
+        normalized_proposals = (
+            proposal.model_copy(
+                update={"settings": {**proposal.settings, **self.base_settings}}
+            )
+            for proposal in batch.proposals
+        )
         inserted = tuple(
             self.repository.add_candidate(
                 run.run_id,
@@ -221,7 +229,7 @@ class CandidateGenerator:
                 metadata.operators,
                 llm_request_id=request_id,
             )
-            for proposal in batch.proposals
+            for proposal in normalized_proposals
         )
         return CandidateGenerationResult(request_id=request_id, candidates=inserted)
 
@@ -282,6 +290,19 @@ class RepairPlanner:
                 limit=retrieval_limit,
             )
         ]
+        if not cards:
+            return RepairPlanningResult(
+                request_id=None,
+                plan=RepairPlan(
+                    action=RepairAction.STOP,
+                    reason=(
+                        "No approved method card matches this failure code; "
+                        "repair planning must not improvise."
+                    ),
+                    proposals=[],
+                ),
+                candidates=(),
+            )
         existing_children = self.repository.count_children(
             parent.candidate_id, parent.generation_number + 1
         )
@@ -450,6 +471,11 @@ def _metadata_context(metadata: MetadataSnapshot) -> dict[str, object]:
         "dataset_id": metadata.dataset_id,
         "fields": {name: value for name, value in sorted(metadata.fields.items())},
         "operators": sorted(metadata.operators),
+        # BRAIN's own call signature per operator (e.g. "group_rank(x, group)"),
+        # not just its name -- without this the model has to guess argument
+        # counts from its own training data. A name absent here has no signature
+        # on record; that is not a green light to guess it either.
+        "operator_definitions": dict(sorted(metadata.operator_definitions.items())),
         "settings": {
             name: sorted(values, key=repr) for name, values in sorted(metadata.settings.items())
         },

@@ -32,9 +32,16 @@ class MethodCard(StrictModel):
 
     @model_validator(mode="after")
     def approval_is_complete(self) -> "MethodCard":
-        approved = self.status is MethodCardStatus.APPROVED
-        if approved != bool(self.reviewer and self.approval_timestamp):
-            raise ValueError("Approved cards require reviewer and approval timestamp")
+        # A draft has had no human decision yet, so it must carry neither field.
+        # Approved and retired both record an explicit human decision -- retiring
+        # a superseded version is as much a reviewer action as approving its
+        # replacement, and losing who-did-it-when there would be its own small
+        # loss of auditability.
+        has_reviewer_record = bool(self.reviewer and self.approval_timestamp)
+        if self.status is MethodCardStatus.DRAFT and has_reviewer_record:
+            raise ValueError("Draft cards must not carry a reviewer or approval timestamp")
+        if self.status is not MethodCardStatus.DRAFT and not has_reviewer_record:
+            raise ValueError(f"{self.status.title()} cards require reviewer and approval timestamp")
         return self
 
     def prompt_summary(self) -> dict[str, object]:
