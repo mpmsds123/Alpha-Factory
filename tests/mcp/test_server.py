@@ -33,8 +33,8 @@ def create_run(
     database = Database(sqlite_url(database_path))
     database.create_schema()
     repository = Repository(database.session_factory)
-    routing = load_routing_policy(ROOT / "policies" / "routing.v1.yaml")
-    limits = load_limit_policy(ROOT / "policies" / "limits.v1.yaml")
+    routing = load_routing_policy(ROOT / "policies" / "routing.v2.yaml")
+    limits = load_limit_policy(ROOT / "policies" / "limits.v2.yaml")
     specification = RunSpecification(
         dataset_id="demo-dataset",
         region="USA",

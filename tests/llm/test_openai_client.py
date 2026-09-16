@@ -1,17 +1,18 @@
 import json
 
-import httpx
+import httpx2 as httpx
 import pytest
-import respx
 from pydantic import SecretStr
 
 from alpha_orchestrator.llm.openai_client import LLMSettings, OpenAICompatibleLLMClient
 
 
-@respx.mock
 def test_openai_compatible_client_uses_json_mode_and_normalizes_usage() -> None:
-    route = respx.post("https://llm.invalid/v1/chat/completions").mock(
-        return_value=httpx.Response(
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
             200,
             json={
                 "id": "chatcmpl-fixture",
@@ -32,14 +33,15 @@ def test_openai_compatible_client_uses_json_mode_and_normalizes_usage() -> None:
                 },
             },
         )
-    )
     settings = LLMSettings(
         model="fixture-model",
         api_key=SecretStr("EXAMPLE_NOT_A_REAL_KEY"),
         base_url="https://llm.invalid/v1",
         temperature=0.1,
     )
-    client = OpenAICompatibleLLMClient(settings)
+    client = OpenAICompatibleLLMClient(
+        settings, http_client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
     completion = client.complete(
         system_prompt="Return JSON.",
         user_prompt='{"input":1}',
@@ -50,8 +52,8 @@ def test_openai_compatible_client_uses_json_mode_and_normalizes_usage() -> None:
     assert completion.raw_text == '{"value":1}'
     assert completion.model == "fixture-model-response"
     assert completion.total_tokens == 15
-    assert route.called
-    captured = json.loads(route.calls[0].request.content)
+    assert requests
+    captured = json.loads(requests[0].content)
     assert captured["response_format"] == {"type": "json_object"}
     messages = captured["messages"]
     assert isinstance(messages, list)

@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from alpha_orchestrator.adapters.base import MINIMUM_SESSION_REMAINING_SECONDS
 from alpha_orchestrator.domain.enums import (
     AdapterMode,
     DataType,
@@ -40,6 +41,45 @@ PENDING_STATES = frozenset({"CREATED", "PENDING", "QUEUED", "RUNNING", "IN_PROGR
 COMPLETE_STATES = frozenset({"COMPLETE", "COMPLETED", "DONE", "SUCCESS", "SUCCEEDED"})
 ERROR_STATES = frozenset({"ERROR", "FAILED", "FAILURE", "CANCELLED", "CANCELED"})
 
+# BRAIN exposes valid simulation settings through `OPTIONS /simulations`, not through a
+# `GET /settings` collection. Choice values for Region, Universe, Delay and Neutralization
+# are nested per instrument type and region, so they must be resolved against the research
+# cell before they can be frozen into a MetadataSnapshot.
+SETTING_OPTIONS_METHOD = "OPTIONS"
+CHOICE_DIMENSIONS = ("instrumentType", "region", "delay")
+
+# GET /data-fields is a query BRAIN validates strictly: instrumentType, region, delay,
+# universe, type, dataset.id, limit and offset must all be present or it answers
+# 400 "Invalid query" with no further detail. limit/offset also paginate -- a dataset
+# can hold more fields than one page, and the reference client walks every page.
+FIELDS_PAGE_SIZE = 50
+
+# Paging /data-fields is the one place this adapter issues many requests back to back:
+# a dataset with 600+ fields is 13+ consecutive GETs. BRAIN answers 429 for that burst.
+# The official API session states the pause between pages explicitly -- five seconds --
+# so it is recorded here as a default rather than tuned by trial.
+# [source: WQ官方课程字幕全文.md:125] (锚点: 避免咱们平台报429的错误)
+FIELDS_PAGE_PAUSE_SECONDS = 5.0
+
+# A 429 is a pacing signal, not a research result, so one paced retry is attempted before
+# the run is stopped. When BRAIN sends no Retry-After with the 429 there is nothing to
+# honour, so this floor is used instead of retrying immediately.
+RATE_LIMIT_DEFAULT_PAUSE_SECONDS = 5.0
+
+# MINIMUM_SESSION_REMAINING_SECONDS lives in adapters.base (shared with the
+# orchestrator, which re-checks freshness mid-run without an extra network call).
+
+# Numeric settings are published as bounded ranges rather than choice lists, so a snapshot
+# cannot enumerate them from the platform alone. These ladders are the discrete values this
+# project is willing to search; every value is intersected with the platform's own min/max
+# before it enters the snapshot, so the platform still has the final say.
+# Source: BRAIN community post HQ17963 (decay ladder) and the truncation range documented
+# in the same thread. Recorded here so the choice is explicit and versionable.
+DEFAULT_NUMERIC_LADDERS: dict[str, tuple[float, ...]] = {
+    "decay": (0, 1, 4, 16, 64, 128, 256, 512),
+    "truncation": (0.01, 0.02, 0.04, 0.06, 0.08),
+}
+
 
 class LiveBrainSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -48,6 +88,8 @@ class LiveBrainSettings(BaseModel):
     base_url: str = DEFAULT_BRAIN_BASE_URL
     timeout_seconds: float = Field(default=60.0, gt=0.0, le=900.0)
     maximum_retry_after_seconds: float = Field(default=60.0, ge=0.0, le=300.0)
+    maximum_rate_limit_attempts: int = Field(default=5, ge=1, le=5)
+    fields_page_pause_seconds: float = Field(default=FIELDS_PAGE_PAUSE_SECONDS, ge=0.0, le=60.0)
     authentication_path: str = "/authentication"
     datasets_path: str = "/data-sets"
     fields_path: str = "/data-fields"
@@ -95,6 +137,12 @@ class LiveBrainSettings(BaseModel):
             timeout_seconds=float(os.getenv("ALPHA_LAB_BRAIN_TIMEOUT_SECONDS", "60")),
             maximum_retry_after_seconds=float(
                 os.getenv("ALPHA_LAB_BRAIN_MAX_RETRY_AFTER_SECONDS", "60")
+            ),
+            fields_page_pause_seconds=float(
+                os.getenv(
+                    "ALPHA_LAB_BRAIN_FIELDS_PAGE_PAUSE_SECONDS",
+                    str(FIELDS_PAGE_PAUSE_SECONDS),
+                )
             ),
             authentication_path=os.getenv("ALPHA_LAB_BRAIN_AUTHENTICATION_PATH", "/authentication"),
             datasets_path=os.getenv("ALPHA_LAB_BRAIN_DATASETS_PATH", "/data-sets"),
@@ -164,20 +212,68 @@ class LiveBrainClient:
         )
         self._client.cookies.update(cookies)
         self._authenticated = False
+        self._session_deadline_monotonic: float | None = None
 
     def close(self) -> None:
         if self._owns_client:
             self._client.close()
 
     def authenticate(self) -> None:
-        response = self._send("GET", self.settings.authentication_path, authenticate=False)
+        # A fresh BRAIN login is POST with Basic Auth credentials -- but this adapter
+        # never holds credentials (that is the whole point: it only ever receives a
+        # session file someone else produced with a human biometric step already done).
+        # Given only cookies, POST /authentication is a bare login attempt with no
+        # credentials attached and BRAIN always answers 401, regardless of whether the
+        # cookies are still good. Checking an *existing* session is a GET instead, the
+        # same call the reference client uses to read remaining token lifetime. A 401
+        # here means the session file is genuinely stale: get a new one, it does not
+        # mean a persona challenge is in progress (that only happens on a POST login).
+        response = self._request("GET", self.settings.authentication_path)
+        if response.status_code == 401:
+            scheme = response.headers.get("WWW-Authenticate", "").strip().casefold()
+            body = _optional_json(response)
+            challenged = scheme.startswith("persona") or (
+                isinstance(body, Mapping) and bool(body.get("inquiry"))
+            )
+            if challenged:
+                raise AdapterFailure(
+                    ErrorClass.HUMAN_VERIFICATION_REQUIRED,
+                    "BRAIN requires biometric verification: complete it in a browser, "
+                    "then export a fresh session cookie file",
+                )
+            raise AdapterFailure(
+                ErrorClass.AUTHENTICATION,
+                "BRAIN rejected the supplied session cookies",
+            )
+        if not response.is_success:
+            raise self._failure_for(response)
         payload = _optional_json(response)
         if isinstance(payload, Mapping) and payload.get("inquiry"):
             raise AdapterFailure(
                 ErrorClass.HUMAN_VERIFICATION_REQUIRED,
                 "BRAIN authentication requires human verification",
             )
+        remaining = _session_remaining_seconds(payload)
+        if remaining is not None and remaining < MINIMUM_SESSION_REMAINING_SECONDS:
+            raise AdapterFailure(
+                ErrorClass.AUTHENTICATION,
+                f"BRAIN session expires in {int(remaining)}s, below the "
+                f"{int(MINIMUM_SESSION_REMAINING_SECONDS)}s minimum: stopping cleanly "
+                "instead of risking a mid-run expiry. Run tools/取会话.py for a fresh one.",
+            )
+        # Recorded as a deadline on the monotonic clock, not the raw `remaining`
+        # value, so later callers (mid-run, no new request) can tell how much is
+        # left without re-asking BRAIN. Unknown (BRAIN reported no expiry) stays
+        # unknown rather than being treated as "plenty of time".
+        self._session_deadline_monotonic = (
+            time.monotonic() + remaining if remaining is not None else None
+        )
         self._authenticated = True
+
+    def session_seconds_remaining(self) -> float | None:
+        if self._session_deadline_monotonic is None:
+            return None
+        return self._session_deadline_monotonic - time.monotonic()
 
     def list_datasets(self, *, region: str, universe: str, delay: int) -> list[dict[str, object]]:
         response = self._send(
@@ -187,6 +283,30 @@ class LiveBrainClient:
         )
         return [dict(item) for item in _record_items(_required_json(response))]
 
+    def _fetch_all_fields(self, params: dict[str, object]) -> list[dict[str, Any]]:
+        page_params = dict(params)
+        offset = 0
+        records: list[dict[str, Any]] = []
+        page_index = 0
+        while True:
+            if page_index:
+                self._sleeper(self.settings.fields_page_pause_seconds)
+            page_index += 1
+            page_params["limit"] = FIELDS_PAGE_SIZE
+            page_params["offset"] = offset
+            response = self._send("GET", self.settings.fields_path, params=page_params)
+            payload = _required_mapping(response)
+            results = payload.get("results")
+            if not isinstance(results, list):
+                raise AdapterFailure(
+                    ErrorClass.UNKNOWN, "BRAIN data-fields response has no record list"
+                )
+            records.extend(dict(item) for item in results if isinstance(item, Mapping))
+            offset += len(results)
+            total = payload.get("count")
+            if not results or not isinstance(total, int) or offset >= total:
+                return records
+
     def capture_metadata(
         self,
         *,
@@ -195,23 +315,34 @@ class LiveBrainClient:
         universe: str,
         delay: int,
         data_type: DataType,
+        instrument_type: str = "EQUITY",
     ) -> CapturedMetadata:
-        params = {
-            "dataset.id": dataset_id,
+        params: dict[str, object] = {
+            "instrumentType": instrument_type,
             "region": region,
             "universe": universe,
             "delay": delay,
+            "type": data_type.value,
+            "dataset.id": dataset_id,
         }
-        fields_response = self._send("GET", self.settings.fields_path, params=params)
+        field_records = self._fetch_all_fields(params)
         operators_response = self._send("GET", self.settings.operators_path)
-        settings_response = self._send("GET", self.settings.settings_path, params=params)
-        fields = _parse_fields(_required_json(fields_response))
-        operators = _parse_operators(_required_json(operators_response))
-        valid_settings = _parse_settings(_required_json(settings_response))
+        settings_response = self._send(SETTING_OPTIONS_METHOD, self.settings.simulations_path)
+        fields = _parse_fields(field_records)
+        operators_json = _required_json(operators_response)
+        operators = _parse_operators(operators_json)
+        operator_definitions = _parse_operator_definitions(operators_json)
+        valid_settings = _parse_setting_options(
+            _required_json(settings_response),
+            instrument_type=instrument_type,
+            region=region,
+            delay=delay,
+        )
         metadata = MetadataSnapshot(
             dataset_id=dataset_id,
             fields=fields,
             operators=operators,
+            operator_definitions=operator_definitions,
             settings=valid_settings,
         )
         fields_payload = {name: value.value for name, value in sorted(fields.items())}
@@ -287,7 +418,13 @@ class LiveBrainClient:
         simulation_id = _validate_identifier(external_simulation_id, "simulation")
         response = self._send("GET", f"{self.settings.simulations_path}/{simulation_id}")
         body = _required_mapping(response)
-        state = str(body.get("status") or body.get("state") or "UNKNOWN").upper()
+        raw_state = body.get("status") or body.get("state")
+        if raw_state is None:
+            # A running simulation reports only `{"progress": <0..1>}` with no status
+            # field at all -- BRAIN's silence here means "still running", not "unknown".
+            # Retry-After on this same response says how soon to poll again.
+            return NormalizedSimulationResult(completed=False, error_class=ErrorClass.PENDING)
+        state = str(raw_state).upper()
         if state in PENDING_STATES:
             return NormalizedSimulationResult(completed=False, error_class=ErrorClass.PENDING)
         if state in ERROR_STATES:
@@ -329,6 +466,52 @@ class LiveBrainClient:
         payload = _required_json(response)
         return _parse_platform_checks(payload)
 
+    def fetch_correlations(self, external_alpha_id: str) -> dict[str, float | None]:
+        """Read `/correlations/self` and `/correlations/prod` for one alpha.
+
+        Expression fingerprints cannot tell two spellings of one signal apart; these are the
+        platform's own answers about redundancy. A correlation the platform has not computed
+        yet comes back as None rather than as a zero.
+        """
+        alpha_id = _validate_identifier(external_alpha_id, "alpha")
+        correlations: dict[str, float | None] = {}
+        for kind in ("self", "prod"):
+            response = self._send(
+                "GET", f"{self.settings.alphas_path}/{alpha_id}/correlations/{kind}"
+            )
+            correlations[kind] = _parse_max_correlation(_optional_json(response))
+        return correlations
+
+    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """Send one request and return the response, successful or not."""
+        url = f"{self.settings.base_url}{path}"
+        try:
+            return self._client.request(method, url, **kwargs)
+        except httpx.TimeoutException as exc:
+            raise AdapterFailure(ErrorClass.TIMEOUT, "BRAIN request timed out") from exc
+        except httpx.TransportError as exc:
+            # Every transport-layer failure is infrastructure, never a research result.
+            # Catching the whole TransportError family (proxy errors, protocol errors,
+            # unsupported schemes) keeps them classified instead of escaping as a traceback.
+            raise AdapterFailure(
+                ErrorClass.NETWORK,
+                f"BRAIN request failed at the transport layer: {type(exc).__name__}",
+            ) from exc
+
+    def _failure_for(self, response: httpx.Response) -> AdapterFailure:
+        error_class = _classify_http_error(response)
+        if response.status_code == 401:
+            self._authenticated = False
+        retry_after = _retry_after_seconds(response)
+        if error_class is ErrorClass.RATE_LIMIT:
+            pause = retry_after if retry_after else RATE_LIMIT_DEFAULT_PAUSE_SECONDS
+            self._sleeper(min(pause, self.settings.maximum_retry_after_seconds))
+        return AdapterFailure(
+            error_class,
+            _safe_http_message(response, error_class),
+            retry_after_seconds=retry_after,
+        )
+
     def _send(
         self,
         method: str,
@@ -339,32 +522,31 @@ class LiveBrainClient:
     ) -> httpx.Response:
         if authenticate and not self._authenticated:
             self.authenticate()
-        url = f"{self.settings.base_url}{path}"
-        try:
-            response = self._client.request(method, url, **kwargs)
-        except httpx.TimeoutException as exc:
-            raise AdapterFailure(ErrorClass.TIMEOUT, "BRAIN request timed out") from exc
-        except httpx.NetworkError as exc:
-            raise AdapterFailure(ErrorClass.NETWORK, "BRAIN network request failed") from exc
-        if response.is_success:
-            return response
-        error_class = _classify_http_error(response)
-        if response.status_code == 401:
-            self._authenticated = False
-        retry_after = _retry_after_seconds(response)
-        if error_class is ErrorClass.RATE_LIMIT and retry_after:
-            self._sleeper(min(retry_after, self.settings.maximum_retry_after_seconds))
-        raise AdapterFailure(
-            error_class,
-            _safe_http_message(response, error_class),
-            retry_after_seconds=retry_after,
-        )
+        for attempt in range(self.settings.maximum_rate_limit_attempts):
+            response = self._request(method, path, **kwargs)
+            if response.is_success:
+                return response
+            failure = self._failure_for(response)
+            if failure.error_class is not ErrorClass.RATE_LIMIT:
+                raise failure
+            if attempt + 1 == self.settings.maximum_rate_limit_attempts:
+                raise failure
+        raise AssertionError("rate-limit loop must return or raise")
 
 
 class LiveBrainAdapter:
-    def __init__(self, client: LiveBrainClient, metadata: MetadataSnapshot) -> None:
+    def __init__(
+        self,
+        client: LiveBrainClient,
+        metadata: MetadataSnapshot,
+        seed_candidates: list[CandidateProposal] | None = None,
+    ) -> None:
         self.client = client
         self._metadata = metadata
+        # Live runs have no candidates of their own: the platform supplies data, never
+        # ideas. Seeds come from an explicit template file so a first run can be executed
+        # and audited without involving a model.
+        self._seed_candidates = list(seed_candidates or [])
 
     @property
     def mode(self) -> AdapterMode:
@@ -375,7 +557,11 @@ class LiveBrainAdapter:
         return self._metadata
 
     def initial_candidates(self) -> list[CandidateProposal]:
-        return []
+        return list(self._seed_candidates)
+
+    def fetch_correlations(self, external_alpha_id: str) -> dict[str, float | None]:
+        """Read the platform's own self and production correlation for one alpha."""
+        return self.client.fetch_correlations(external_alpha_id)
 
     def create_simulation(self, request: CreateSimulationRequest) -> CreateSimulationReceipt:
         return self.client.create_simulation(request)
@@ -385,6 +571,9 @@ class LiveBrainAdapter:
 
     def request_platform_checks(self, external_alpha_id: str) -> list[PlatformCheck]:
         return self.client.request_platform_checks(external_alpha_id)
+
+    def session_seconds_remaining(self) -> float | None:
+        return self.client.session_seconds_remaining()
 
 
 def _required_json(response: httpx.Response) -> object:
@@ -398,6 +587,19 @@ def _optional_json(response: httpx.Response) -> object | None:
     if not response.content:
         return None
     return _required_json(response)
+
+
+def _session_remaining_seconds(payload: object) -> float | None:
+    """Seconds left on the session, per `GET /authentication`'s own `token.expiry`."""
+    if not isinstance(payload, Mapping):
+        return None
+    token = payload.get("token")
+    if not isinstance(token, Mapping):
+        return None
+    expiry = token.get("expiry")
+    if isinstance(expiry, int | float) and not isinstance(expiry, bool):
+        return float(expiry)
+    return None
 
 
 def _required_mapping(response: httpx.Response) -> Mapping[str, Any]:
@@ -445,6 +647,157 @@ def _parse_operators(payload: object) -> set[str]:
     if not operators:
         raise AdapterFailure(ErrorClass.UNKNOWN, "BRAIN returned no operators")
     return operators
+
+
+def _parse_operator_definitions(payload: object) -> dict[str, str]:
+    """Read each operator's call signature (e.g. "group_rank(x, group)") straight
+    from BRAIN's own `/operators` response -- the one place this information
+    exists. A name missing its own `definition` is just omitted, not fatal: the
+    name set itself is still validated separately by `_parse_operators`.
+    """
+    definitions: dict[str, str] = {}
+    for item in _record_items(payload):
+        name = item.get("name") or item.get("id")
+        definition = item.get("definition")
+        if isinstance(name, str) and name and isinstance(definition, str) and definition:
+            definitions[name] = definition
+    return definitions
+
+
+def _parse_max_correlation(payload: object) -> float | None:
+    """Read the highest correlation BRAIN reports, or None when it reports none.
+
+    The endpoint answers `{"schema": {...}, "records": [...], "max": ..., "min": ...}` and
+    publishes `max` either at the top level or inside `schema`. An empty `records` list means
+    the platform has not computed a correlation yet, which is not the same as zero.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    for holder in (payload.get("schema"), payload):
+        if isinstance(holder, Mapping):
+            value = holder.get("max")
+            if isinstance(value, int | float) and not isinstance(value, bool):
+                return float(value)
+    records = payload.get("records")
+    if not isinstance(records, list) or not records:
+        return None
+    columns = []
+    schema = payload.get("schema")
+    if isinstance(schema, Mapping):
+        properties = schema.get("properties")
+        if isinstance(properties, list):
+            columns = [item.get("name") for item in properties if isinstance(item, Mapping)]
+    try:
+        index = columns.index("max")
+    except ValueError:
+        return None
+    observed = [
+        float(row[index])
+        for row in records
+        if isinstance(row, list)
+        and len(row) > index
+        and isinstance(row[index], int | float)
+        and not isinstance(row[index], bool)
+    ]
+    return max(observed) if observed else None
+
+
+def _choice_values(node: object, context: Mapping[str, object]) -> set[str | int | float | bool]:
+    """Collect `value` entries from a BRAIN choice tree, narrowed by the research cell.
+
+    Region, Universe, Delay and Neutralization publish their choices nested by instrument
+    type and then by region. When the cell pins one of those dimensions the matching branch
+    is followed; otherwise every branch is unioned so nothing is silently dropped.
+    """
+    if isinstance(node, list):
+        values: set[str | int | float | bool] = set()
+        for item in node:
+            if isinstance(item, Mapping):
+                value = item.get("value")
+                if isinstance(value, str | int | float | bool):
+                    values.add(value)
+        return values
+    if isinstance(node, Mapping):
+        values = set()
+        for key, branch in node.items():
+            selected: object | None = None
+            if key in CHOICE_DIMENSIONS and key in context and isinstance(branch, Mapping):
+                pinned = context[key]
+                for lookup in (pinned, str(pinned)):
+                    if lookup in branch:
+                        selected = branch[lookup]
+                        break
+            values |= _choice_values(selected if selected is not None else branch, context)
+        return values
+    return set()
+
+
+def _numeric_bounds(child: Mapping[str, Any]) -> tuple[float | None, float | None]:
+    minimum = child.get("min_value", child.get("minValue", child.get("min")))
+    maximum = child.get("max_value", child.get("maxValue", child.get("max")))
+    lower = float(minimum) if isinstance(minimum, int | float) else None
+    upper = float(maximum) if isinstance(maximum, int | float) else None
+    return lower, upper
+
+
+def _parse_setting_options(
+    payload: object,
+    *,
+    instrument_type: str,
+    region: str,
+    delay: int,
+    numeric_ladders: Mapping[str, tuple[float, ...]] | None = None,
+) -> dict[str, set[str | int | float | bool]]:
+    """Read `OPTIONS /simulations` into the settings a candidate may legally declare."""
+    ladders = DEFAULT_NUMERIC_LADDERS if numeric_ladders is None else numeric_ladders
+    children: object = None
+    if isinstance(payload, Mapping):
+        actions = payload.get("actions")
+        if isinstance(actions, Mapping):
+            post = actions.get("POST")
+            if isinstance(post, Mapping):
+                block = post.get("settings")
+                if isinstance(block, Mapping):
+                    children = block.get("children")
+    if not isinstance(children, Mapping):
+        raise AdapterFailure(
+            ErrorClass.UNKNOWN,
+            "BRAIN simulation options contained no settings schema",
+        )
+    context: dict[str, object] = {
+        "instrumentType": instrument_type,
+        "region": region,
+        "delay": delay,
+    }
+    settings: dict[str, set[str | int | float | bool]] = {}
+    for name, child in children.items():
+        if not isinstance(child, Mapping):
+            continue
+        kind = str(child.get("type", "")).casefold()
+        if "choices" in child:
+            values = _choice_values(child["choices"], context)
+            if values:
+                settings[str(name)] = values
+            continue
+        if kind == "boolean":
+            settings[str(name)] = {True, False}
+            continue
+        ladder = ladders.get(str(name))
+        if ladder is None:
+            continue
+        lower, upper = _numeric_bounds(child)
+        allowed = {
+            value
+            for value in ladder
+            if (lower is None or value >= lower) and (upper is None or value <= upper)
+        }
+        if allowed:
+            settings[str(name)] = {
+                int(value) if float(value).is_integer() else float(value) for value in allowed
+            }
+    if not settings:
+        raise AdapterFailure(ErrorClass.UNKNOWN, "BRAIN returned no valid settings")
+    return settings
 
 
 def _parse_settings(payload: object) -> dict[str, set[str | int | float | bool]]:
@@ -594,6 +947,16 @@ def _classify_payload_error(payload: Mapping[str, Any]) -> ErrorClass:
 
 def _classify_error_text(message: str) -> ErrorClass:
     lowered = message.casefold()
+    if "required attribute" in lowered or "must have a value" in lowered:
+        return ErrorClass.INVALID_OPERATOR
+    # First real evidence for this branch: a live 2026-09-15 run's `group_rank(x)`
+    # (called with 1 argument; it takes 2) came back as "Invalid number of inputs :
+    # 1, should be exactly 2 input(s)." -- no "operator" substring, so it fell
+    # through to PLATFORM_TERMINAL_FAILURE and never reached RepairPlanner even
+    # though a wrong-arity operator call is exactly what MC-INVALID-OPERATOR-017
+    # is for.
+    if "number of input" in lowered:
+        return ErrorClass.INVALID_OPERATOR
     if "operator" in lowered:
         return ErrorClass.INVALID_OPERATOR
     if "data field" in lowered or "field" in lowered:

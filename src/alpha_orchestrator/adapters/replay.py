@@ -25,6 +25,7 @@ class ReplayScenario(StrictModel):
     create_errors: list[ErrorClass] = Field(default_factory=list)
     result: NormalizedSimulationResult
     platform_checks: list[PlatformCheck] = Field(default_factory=list)
+    correlations: dict[str, float | None] = Field(default_factory=dict)
 
 
 class ReplayFixture(StrictModel):
@@ -105,3 +106,11 @@ class ReplayBrainAdapter:
         expression = self._candidate_to_expression.get(external_alpha_id, external_alpha_id)
         scenario = self._scenarios.get(expression)
         return list(scenario.platform_checks) if scenario else []
+
+    def fetch_correlations(self, external_alpha_id: str) -> dict[str, float | None]:
+        expression = self._candidate_to_expression.get(external_alpha_id, external_alpha_id)
+        scenario = self._scenarios.get(expression)
+        return dict(scenario.correlations) if scenario else {}
+
+    def session_seconds_remaining(self) -> float | None:
+        return None

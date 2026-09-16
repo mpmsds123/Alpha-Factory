@@ -13,3 +13,17 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+诊断日志.txt
+_to_delete/
+
+# private research corpus / personal notes / credential-adjacent tooling — never public
+method_cards/*
+!method_cards/README.md
+CLAUDE.md
+workflow_learning.canvas
+*.command
+templates/
+tools/
+tests/tools/
+brain-session.json
+platform-brain.json

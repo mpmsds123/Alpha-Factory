@@ -1,6 +1,6 @@
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import pytest
@@ -14,7 +14,9 @@ from alpha_orchestrator.domain.enums import (
     EvidenceLevel,
     LLMRole,
     LLMValidationStatus,
+    MethodCardStatus,
     RepairAction,
+    RunStatus,
 )
 from alpha_orchestrator.domain.knowledge import MethodCard, SourceReference
 from alpha_orchestrator.domain.llm import RepairPlan
@@ -46,6 +48,7 @@ class FakeLLMClient:
     temperature: float = 0.0
     raises: Exception | None = None
     calls: int = 0
+    user_prompts: list[str] = field(default_factory=list)
 
     def complete(
         self,
@@ -58,6 +61,7 @@ class FakeLLMClient:
         assert json.loads(user_prompt)["run"]["dataset_id"] == "demo-dataset"
         assert json_schema["type"] == "object"
         self.calls += 1
+        self.user_prompts.append(user_prompt)
         if self.raises:
             raise self.raises
         return LLMCompletion(
@@ -129,6 +133,30 @@ def prepare_run(
     )
 
 
+def add_approved_repair_card(repository: Repository, failure_code: str) -> None:
+    repository.upsert_method_card(
+        MethodCard(
+            card_id=f"MC-TEST-{failure_code}",
+            title=f"Test-only repair for {failure_code}",
+            version="v1",
+            status=MethodCardStatus.APPROVED,
+            applicable_failure_codes=[failure_code],
+            applicable_data_types=[DataType.MATRIX],
+            prerequisites=["A test failure exists"],
+            diagnostic_signals=["The test supplies deterministic evidence"],
+            allowed_repair_actions=["Change one test dimension"],
+            prohibited_actions=["Do not change limits"],
+            stop_condition="Stop after the bounded test repair",
+            evidence_level=EvidenceLevel.TRAINING,
+            source_references=[
+                SourceReference(source_id="SRC-TEST", section_locator="line:1")
+            ],
+            reviewer="Test Reviewer",
+            approval_timestamp=datetime.now(UTC),
+        )
+    )
+
+
 def test_valid_generator_output_is_ledgered_then_inserted(
     repository: Repository,
     make_run: Callable[..., RunSpecification],
@@ -166,6 +194,26 @@ def test_valid_generator_output_is_ledgered_then_inserted(
     assert "- Requests: 1" in report
     assert "- Recorded tokens: 15" in report
     assert "LLM ACCEPTED: 1" in report
+
+
+def test_generator_overlays_frozen_platform_settings(
+    repository: Repository,
+    make_run: Callable[..., RunSpecification],
+    metadata: MetadataSnapshot,
+) -> None:
+    run = prepare_run(repository, make_run)
+    client = FakeLLMClient(generator_json())
+    result = CandidateGenerator(
+        repository,
+        MethodCardRetriever(repository),
+        client,
+        base_settings={"instrumentType": "EQUITY", "language": "FASTEXPR"},
+    ).generate(run.run_id, metadata, query="price persistence")
+
+    candidate = repository.get_candidate(result.candidates[0].candidate.candidate_id)
+    assert candidate.settings_json["instrumentType"] == "EQUITY"
+    assert candidate.settings_json["language"] == "FASTEXPR"
+    assert candidate.settings_json["neutralization"] == "SUBINDUSTRY"
 
 
 def test_generator_ledger_records_exact_approved_method_card_version(
@@ -290,6 +338,7 @@ def test_repair_planner_creates_only_single_parent_children(
     metadata: MetadataSnapshot,
 ) -> None:
     run = prepare_run(repository, make_run)
+    add_approved_repair_card(repository, str(ErrorClass.INVALID_FIELD))
     parent = repository.add_candidate(
         run.run_id,
         CandidateProposal(
@@ -336,10 +385,11 @@ def test_repair_planner_can_stop_without_creating_a_child(
         CandidateProposal(expression="rank(close)", settings={}, mechanism_claim="Test claim"),
         metadata.operators,
     ).candidate
+    client = FakeLLMClient(repair_json(RepairAction.STOP))
     result = RepairPlanner(
         repository,
         MethodCardRetriever(repository),
-        FakeLLMClient(repair_json(RepairAction.STOP)),
+        client,
     ).plan(
         parent.candidate_id,
         failure_code="LOW_COVERAGE",
@@ -348,6 +398,8 @@ def test_repair_planner_can_stop_without_creating_a_child(
     )
     assert result.plan.action is RepairAction.STOP
     assert result.candidates == ()
+    assert result.request_id is None
+    assert client.calls == 0
     assert repository.count_candidates(run.run_id) == 1
 
 
@@ -359,6 +411,7 @@ def test_generated_candidate_can_be_repaired_and_replayed_after_run_completion(
     limit_policy: LimitPolicy,
 ) -> None:
     run = prepare_run(repository, make_run)
+    add_approved_repair_card(repository, "LOW_COVERAGE")
     generated = CandidateGenerator(
         repository,
         MethodCardRetriever(repository),
@@ -408,6 +461,56 @@ def test_generated_candidate_can_be_repaired_and_replayed_after_run_completion(
     assert second_summary.status == "COMPLETED"
     assert second_summary.simulation_attempts == 2
     assert repository.get_candidate(child.candidate_id).status == "READY_FOR_PLATFORM_CHECK"
+
+
+def test_engine_invokes_generator_then_repairs_a_structural_failure(
+    repository: Repository,
+    make_run: Callable[..., RunSpecification],
+    metadata: MetadataSnapshot,
+    routing_policy: RoutingPolicy,
+    limit_policy: LimitPolicy,
+) -> None:
+    run = prepare_run(repository, make_run)
+    add_approved_repair_card(repository, str(ErrorClass.INVALID_FIELD))
+    generator_client = FakeLLMClient(generator_json("rank(missing_field)"))
+    repair_client = FakeLLMClient(repair_json())
+    generator = CandidateGenerator(
+        repository, MethodCardRetriever(repository), generator_client
+    )
+    planner = RepairPlanner(repository, MethodCardRetriever(repository), repair_client)
+    adapter = FakeBrainAdapter(
+        metadata,
+        results={
+            "rank(volume)": NormalizedSimulationResult(
+                completed=True,
+                metrics=SimulationMetrics(sharpe=0.8, fitness=0.5, turnover=0.2),
+            )
+        },
+    )
+
+    summary = OfflineOrchestrator(
+        repository,
+        routing_policy,
+        limit_policy,
+        candidate_generator=generator,
+        repair_planner=planner,
+        research_query="price persistence",
+    ).execute(run.run_id, adapter)
+
+    assert summary.status is RunStatus.COMPLETED
+    assert generator_client.calls == 1
+    assert repair_client.calls == 1
+    repair_context = json.loads(repair_client.user_prompts[0])
+    assert repair_context["failure_code"] == "INVALID_FIELD"
+    assert repair_context["evidence_snapshot"]["validation_issues"][0]["code"] == (
+        "INVALID_FIELD"
+    )
+    parent, child = repository.list_candidates(run.run_id)
+    assert parent.status == CandidateStatus.INVALID
+    assert child.parent_candidate_id == parent.candidate_id
+    assert child.generation_number == 1
+    assert child.status == CandidateStatus.READY_FOR_PLATFORM_CHECK
+    assert repository.count_attempts(run.run_id) == 1
 
 
 def test_llm_request_ceiling_stops_before_another_call(

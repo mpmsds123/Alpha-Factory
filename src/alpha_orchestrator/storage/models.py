@@ -273,5 +273,10 @@ class MetadataSnapshotORM(Base):
     data_type: Mapped[str] = mapped_column(String(16), nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     payload_json: Mapped[dict[str, Any] | list[Any]] = mapped_column(JSON, nullable=False)
+    # Only ever populated for an OPERATORS-kind row, from BRAIN's own `/operators`
+    # `definition` field (e.g. "group_rank(x, group)"). Deliberately kept out of
+    # `payload_json`/`content_hash` -- those are the frozen snapshot identity, and
+    # this is enrichment the generator reads, not part of what a snapshot IS.
+    operator_definitions_json: Mapped[dict[str, str] | None] = mapped_column(JSON, nullable=True)
     source: Mapped[str] = mapped_column(String(64), nullable=False)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

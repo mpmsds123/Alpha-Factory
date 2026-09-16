@@ -5,7 +5,7 @@ import os
 from time import monotonic
 from typing import Any, cast
 
-import httpx
+import httpx2 as httpx
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 

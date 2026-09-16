@@ -33,9 +33,11 @@ def test_sanitized_historical_failure_fixture_is_contained(
     states = {item.status for item in repository.list_candidates(run.run_id)}
     assert CandidateStatus.READY_FOR_PLATFORM_CHECK in states
     assert CandidateStatus.SIMULATING in states
-    assert (
-        len({attempt.idempotency_key for attempt in repository.list_attempts(run.run_id)[:3]}) == 1
-    )
+    attempts = repository.list_attempts(run.run_id)
+    keys_by_candidate: dict[str, set[str]] = {}
+    for attempt in attempts:
+        keys_by_candidate.setdefault(attempt.candidate_id, set()).add(attempt.idempotency_key)
+    assert all(len(keys) == 1 for keys in keys_by_candidate.values())
     report = build_run_report(repository, run.run_id)
     assert "Live platform-all-pass claims: none" in report
     assert "submittable" not in report.lower()

@@ -8,10 +8,14 @@ from alpha_orchestrator.domain.models import SimulationMetrics
 def route_completed_result(
     metrics: SimulationMetrics | None, policy: RoutingPolicy
 ) -> tuple[GateOutcome, tuple[str, ...]]:
+    # No turnover gate here: routing.v1 discarded on turnover before sharpe/fitness
+    # were even read, using a ceiling (0.90) nobody had validated against real
+    # data. Turnover is still recorded on every result -- it is just not this
+    # gate's job to act on it. High turnover is diagnosed and repaired downstream,
+    # where this project has real, cited method cards for it, once a live
+    # platform-check actually reports HIGH_TURNOVER.
     if metrics is None:
         return GateOutcome.DISCARD, ("NO_COMPLETED_RESULT",)
-    if metrics.turnover is not None and metrics.turnover > policy.discard.maximum_turnover:
-        return GateOutcome.DISCARD, ("TURNOVER_ABOVE_ROUTING_CEILING",)
     sharpe = metrics.sharpe
     fitness = metrics.fitness
     if (
