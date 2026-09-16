@@ -8,8 +8,12 @@ version: limits.v2
 # cutting LLM-calls-per-1000-simulations roughly 5x. The model still self-limits to
 # defensible ideas per its own prompt ("empty list when no defensible hypothesis
 # remains") -- this raises the ceiling, it does not force more ideas to appear.
+# Confirmed by a live batch on 2026-09-16: at 10, most simulation submissions
+# collided and died with CONCURRENT_SIMULATION_LIMIT_EXCEEDED (a real account's
+# concurrent-slot quota is well below 10). Lowered to a conservative default;
+# raise it only if the account is confirmed to hold more concurrent slots.
 initial_candidates: 50
-maximum_concurrent_simulations: 10
+maximum_concurrent_simulations: 3
 children_per_parent_per_generation: 2
 maximum_generations: 3
 maximum_distinct_candidates: 50

@@ -13,6 +13,14 @@ from alpha_orchestrator.domain.models import MetadataSnapshot
 IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 PLACEHOLDER_RE = re.compile(r"\{\{.*?\}\}|<[^>]+>|\b(?:TODO|PLACEHOLDER)\b", re.IGNORECASE)
 
+# BRAIN's group operators (group_neutralize, group_rank, ...) take a built-in
+# classification keyword as their group argument, e.g. group_neutralize(x, industry).
+# That keyword is never a dataset field or an operator, so without this allowlist the
+# validator flags every such call as an unknown field even though BRAIN accepts it.
+GROUP_CLASSIFICATION_IDENTIFIERS = frozenset(
+    {"market", "sector", "industry", "subindustry", "country", "exchange"}
+)
+
 
 class ValidationIssue(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -84,7 +92,11 @@ class StructuralValidator:
                             message=f"Unknown operator: {token}",
                         )
                     )
-            elif key not in known_fields and key not in {"true", "false"}:
+            elif (
+                key not in known_fields
+                and key not in {"true", "false"}
+                and key not in GROUP_CLASSIFICATION_IDENTIFIERS
+            ):
                 issues.append(
                     ValidationIssue(
                         code=ErrorClass.INVALID_FIELD,
