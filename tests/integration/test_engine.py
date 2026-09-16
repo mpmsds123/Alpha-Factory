@@ -76,7 +76,9 @@ def test_simulation_io_respects_frozen_concurrency_limit(
     limit_policy: LimitPolicy,
     metadata: MetadataSnapshot,
 ) -> None:
-    limits = limit_policy.model_copy(update={"initial_candidates": 10})
+    limits = limit_policy.model_copy(
+        update={"initial_candidates": 10, "maximum_concurrent_simulations": 10}
+    )
     run = make_run(_limit_policy=limits)
     proposals = [candidate(f"rank(ts_mean(close, {window}))") for window in range(1, 11)]
     adapter = ConcurrencyTrackingAdapter(metadata, proposals)

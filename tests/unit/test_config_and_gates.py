@@ -72,6 +72,26 @@ def test_structural_validator_accepts_snapshot_compatible_expression(
     assert result.issues == []
 
 
+def test_structural_validator_accepts_group_classification_keyword(
+    metadata: MetadataSnapshot,
+) -> None:
+    """group_neutralize's second argument is a built-in classification keyword
+    (industry, sector, ...), never a dataset field -- it must not be flagged as an
+    unknown field. A live batch on 2026-09-16 rejected six otherwise-valid candidates
+    on exactly this false positive before this allowlist existed."""
+    snapshot = metadata.model_copy(
+        update={"operators": metadata.operators | {"group_neutralize"}}
+    )
+    result = StructuralValidator().validate(
+        "group_neutralize(rank(close), industry)",
+        {"neutralization": "SUBINDUSTRY", "truncation": 0.08},
+        snapshot,
+        DataType.MATRIX,
+    )
+    assert result.valid
+    assert result.issues == []
+
+
 @pytest.mark.parametrize(
     ("expression", "settings", "data_type", "expected"),
     [
