@@ -393,7 +393,31 @@ class ResearchOrchestrator:
             candidate = self.repository.get_candidate(original.candidate_id)
             latest = self.repository.latest_attempt(candidate.candidate_id)
             retry_attempt_number: int | None = None
-            if latest is not None and latest.status == AttemptStatus.RETRYABLE_ERROR:
+            current_status = CandidateStatus(candidate.status)
+            if (
+                latest is not None
+                and latest.status == AttemptStatus.RETRYABLE_ERROR
+                and (
+                    current_status is CandidateStatus.RETRYABLE_ERROR
+                    or current_status is CandidateStatus.SIMULATING
+                )
+            ):
+                if current_status is CandidateStatus.SIMULATING:
+                    # A prior run was interrupted (killed process, SESSION_EXPIRING_SOON)
+                    # between finish_attempt(RETRYABLE_ERROR) and the matching
+                    # transition_candidate call in _record_failure, leaving the
+                    # candidate stuck in SIMULATING while its latest attempt already
+                    # says RETRYABLE_ERROR -- SIMULATING -> QUEUED is not a valid
+                    # transition, so resuming this candidate crashed here before this
+                    # fix. Reconcile to the true last-known state first.
+                    candidate = self.repository.transition_candidate(
+                        candidate.candidate_id,
+                        CandidateStatus.RETRYABLE_ERROR,
+                        "G3_EXECUTION_VALIDITY",
+                        "error-taxonomy.v1",
+                        GateOutcome.ERROR,
+                        ["RECONCILED_AFTER_INTERRUPTED_RUN"],
+                    )
                 if latest.attempt_number >= maximum_attempts:
                     self.repository.transition_candidate(
                         candidate.candidate_id,
