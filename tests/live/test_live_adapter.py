@@ -282,6 +282,49 @@ def test_rate_limit_recovers_when_the_retry_succeeds(tmp_path: Path) -> None:
 
 
 @respx.mock
+def test_a_successful_response_self_throttles_before_the_budget_is_exhausted(
+    tmp_path: Path,
+) -> None:
+    """A 429 is reactive -- it means the budget is already gone. BRAIN also reports
+    the remaining budget on every successful response (x-ratelimit-remaining-*), so
+    pacing off that is proactive: slow down before hitting the wall, not after.
+    Ported from `ace_lib.py`'s `_check_rate_limit` -- the same account has hit a
+    runaway-retry lockout before from not doing this.
+    """
+    respx.get("https://test.worldquantbrain.com/authentication").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    respx.get("https://test.worldquantbrain.com/data-sets").mock(
+        return_value=httpx.Response(
+            200,
+            json={"results": [{"id": "fundamental6"}]},
+            headers={
+                "x-ratelimit-remaining-second": "0",
+                "x-ratelimit-remaining-minute": "1",
+            },
+        )
+    )
+    waits: list[float] = []
+    client = LiveBrainClient(settings(tmp_path), sleeper=waits.append)
+    client.list_datasets(region="USA", universe="TOP1000", delay=1)
+    assert waits == [1.0, 60.0]
+
+
+@respx.mock
+def test_throttle_is_silent_when_brain_sends_no_rate_limit_headers(tmp_path: Path) -> None:
+    respx.get("https://test.worldquantbrain.com/authentication").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    respx.get("https://test.worldquantbrain.com/data-sets").mock(
+        return_value=httpx.Response(200, json={"results": [{"id": "fundamental6"}]})
+    )
+    waits: list[float] = []
+    client = LiveBrainClient(settings(tmp_path), sleeper=waits.append)
+    client.list_datasets(region="USA", universe="TOP1000", delay=1)
+    assert waits == []
+
+
+@respx.mock
 def test_field_pages_are_paced_so_a_wide_dataset_does_not_trip_the_limiter(
     tmp_path: Path,
 ) -> None:

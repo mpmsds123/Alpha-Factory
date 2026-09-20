@@ -23,7 +23,9 @@ CLAUDE.md
 workflow_learning.canvas
 *.command
 templates/
-tools/
+tools/*
+!tools/daily_run.sh
+!tools/取会话.py
 tests/tools/
 brain-session.json
 platform-brain.json
