@@ -1,6 +1,7 @@
 """刷新 BRAIN 会话 cookie 文件，供 ALPHA_LAB_BRAIN_SESSION_FILE 使用。
 
-这个脚本只在本机跑，不进 git（tools/ 整个目录在 .gitignore 里）。核心包
+这个脚本本身进 git（.gitignore 里只单独排除了同目录的 tools/brain_credentials.txt
+和生成出来的会话文件本身，不是整个 tools/）。核心包
 （src/alpha_orchestrator）故意不碰账号密码，只吃一个别人已经登录好的 cookie
 文件——这个脚本就是"别人"：用你的账号密码换 cookie，同时正确处理 BRAIN 的
 persona 生物识别挑战，而不是让你每次手动从浏览器里抠 cookie。
@@ -21,6 +22,7 @@ IQC 的格式，可以直接从那边复制一份过来）。这个文件同样�
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import stat
@@ -84,19 +86,16 @@ def authenticate(client: httpx.Client, user: str, password: str) -> None:
     if response.status_code in (200, 201):
         return
 
-    if response.status_code == 401 and response.headers.get("WWW-Authenticate", "").casefold().startswith(
-        "persona"
-    ):
+    challenge_scheme = response.headers.get("WWW-Authenticate", "").casefold()
+    if response.status_code == 401 and challenge_scheme.startswith("persona"):
         location = response.headers.get("Location")
         if not location:
             raise SystemExit("BRAIN 要求 persona 验证但响应里没有 Location，无法继续。")
         challenge_url = urljoin(str(response.url), location)
         print("需要生物识别验证，正在打开浏览器完成一次人脸验证：")
         print(f"  {challenge_url}")
-        try:
+        with contextlib.suppress(Exception):
             webbrowser.open(challenge_url)
-        except Exception:
-            pass
         input("在浏览器里完成验证后，回来按 Enter 继续…")
         challenge_response = client.post(challenge_url)
         while challenge_response.status_code != 201:
@@ -109,9 +108,7 @@ def authenticate(client: httpx.Client, user: str, password: str) -> None:
 
 def write_session_file(client: httpx.Client, output_path: Path) -> None:
     cookies = [
-        {"name": name, "value": value}
-        for name, value in client.cookies.items()
-        if name and value
+        {"name": name, "value": value} for name, value in client.cookies.items() if name and value
     ]
     if not cookies:
         raise SystemExit("认证看起来成功了，但没有拿到任何 cookie，无法写出会话文件。")
