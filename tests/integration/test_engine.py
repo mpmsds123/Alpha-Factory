@@ -10,6 +10,7 @@ from alpha_orchestrator.adapters.replay import ReplayBrainAdapter
 from alpha_orchestrator.config import LimitPolicy, RoutingPolicy
 from alpha_orchestrator.domain.enums import (
     AdapterMode,
+    AttemptStatus,
     CandidateStatus,
     ErrorClass,
     GateOutcome,
@@ -315,6 +316,73 @@ def test_retry_exhaustion_and_terminal_error_are_execution_outcomes(
         for reason in decision.reason_codes
     ]
     assert "EXECUTION_FAILURE_NOT_RESEARCH_VERDICT" in reasons
+
+
+def test_resume_reconciles_a_candidate_left_simulating_after_an_interrupted_retry(
+    repository: Repository,
+    make_run: Callable[..., RunSpecification],
+    routing_policy: RoutingPolicy,
+    limit_policy: LimitPolicy,
+    metadata: MetadataSnapshot,
+) -> None:
+    """A process killed between finish_attempt(RETRYABLE_ERROR) and the matching
+    transition_candidate call in _record_failure (a real run-interruption case:
+    SESSION_EXPIRING_SOON, a killed process, a machine sleeping mid-run) can leave
+    a candidate in SIMULATING while its latest attempt already reads RETRYABLE_ERROR.
+    Resuming that run used to crash with InvalidTransition("SIMULATING -> QUEUED")
+    because _process_candidate_batch assumed a RETRYABLE_ERROR attempt always meant
+    the candidate itself was already in RETRYABLE_ERROR.
+
+    Reproduce the desync with the same two repository calls _record_failure makes,
+    stopping after the first one -- exactly what a kill between them would leave
+    behind -- rather than corrupting the row directly, then assert resume
+    reconciles it and finishes the retry instead of raising.
+    """
+    run = make_run()
+    proposal = candidate()
+    first_adapter = FakeBrainAdapter(
+        metadata,
+        [proposal],
+        results={
+            proposal.expression: NormalizedSimulationResult(
+                completed=False, error_class=ErrorClass.PENDING
+            )
+        },
+    )
+    first = OfflineOrchestrator(repository, routing_policy, limit_policy).execute(
+        run.run_id, first_adapter
+    )
+    assert first.stop_reason == "UNRESOLVED_PENDING_SIMULATION"
+    stuck = repository.list_candidates(run.run_id)[0]
+    assert stuck.status == CandidateStatus.SIMULATING
+    pending_attempt = repository.latest_attempt(stuck.candidate_id)
+    assert pending_attempt is not None
+
+    # The next poll would have come back a retryable transport error; record only
+    # the attempt half of that outcome, as a kill right after finish_attempt (and
+    # before _record_failure's transition_candidate call) would.
+    repository.finish_attempt(
+        pending_attempt.attempt_id,
+        AttemptStatus.RETRYABLE_ERROR,
+        NormalizedSimulationResult(completed=False, error_class=ErrorClass.TIMEOUT),
+    )
+    assert repository.get_candidate(stuck.candidate_id).status == CandidateStatus.SIMULATING
+
+    second_adapter = FakeBrainAdapter(
+        metadata, [proposal], results={proposal.expression: completed()}
+    )
+    resumed = OfflineOrchestrator(repository, routing_policy, limit_policy).execute(
+        run.run_id, second_adapter
+    )
+    assert resumed.status is RunStatus.COMPLETED
+    final = repository.get_candidate(stuck.candidate_id)
+    assert final.status == CandidateStatus.READY_FOR_PLATFORM_CHECK
+    reasons = [
+        reason
+        for decision in repository.list_decisions(run.run_id)
+        for reason in decision.reason_codes
+    ]
+    assert "RECONCILED_AFTER_INTERRUPTED_RUN" in reasons
 
 
 def test_invalid_candidate_never_enters_simulation_queue(
