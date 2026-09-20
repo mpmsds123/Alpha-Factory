@@ -229,6 +229,8 @@ class LiveBrainClient:
         # here means the session file is genuinely stale: get a new one, it does not
         # mean a persona challenge is in progress (that only happens on a POST login).
         response = self._request("GET", self.settings.authentication_path)
+        if response.is_success:
+            self._throttle_for_remaining_budget(response)
         if response.status_code == 401:
             scheme = response.headers.get("WWW-Authenticate", "").strip().casefold()
             body = _optional_json(response)
@@ -498,6 +500,26 @@ class LiveBrainClient:
                 f"BRAIN request failed at the transport layer: {type(exc).__name__}",
             ) from exc
 
+    def _throttle_for_remaining_budget(self, response: httpx.Response) -> None:
+        """Pace ourselves when BRAIN's own rate-limit headers say we are close to
+        the edge, instead of waiting to actually draw a 429.
+
+        Ported from `ace_lib.py`'s `_check_rate_limit` (the reference client this
+        account's own lockout incident led to hardening) -- our own retry-after-429
+        handling in `_failure_for` is reactive; this is proactive, checked on every
+        successful response, not just failed ones. Silently does nothing if BRAIN
+        does not send these headers on a given response.
+        """
+        try:
+            remaining_second = int(response.headers["x-ratelimit-remaining-second"])
+            remaining_minute = int(response.headers["x-ratelimit-remaining-minute"])
+        except (KeyError, TypeError, ValueError):
+            return
+        if remaining_second < 1:
+            self._sleeper(1.0)
+        if remaining_minute <= 1:
+            self._sleeper(60.0)
+
     def _failure_for(self, response: httpx.Response) -> AdapterFailure:
         error_class = _classify_http_error(response)
         if response.status_code == 401:
@@ -525,6 +547,7 @@ class LiveBrainClient:
         for attempt in range(self.settings.maximum_rate_limit_attempts):
             response = self._request(method, path, **kwargs)
             if response.is_success:
+                self._throttle_for_remaining_budget(response)
                 return response
             failure = self._failure_for(response)
             if failure.error_class is not ErrorClass.RATE_LIMIT:
