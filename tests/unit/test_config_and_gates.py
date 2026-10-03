@@ -79,9 +79,7 @@ def test_structural_validator_accepts_group_classification_keyword(
     (industry, sector, ...), never a dataset field -- it must not be flagged as an
     unknown field. A live batch on 2026-09-16 rejected six otherwise-valid candidates
     on exactly this false positive before this allowlist existed."""
-    snapshot = metadata.model_copy(
-        update={"operators": metadata.operators | {"group_neutralize"}}
-    )
+    snapshot = metadata.model_copy(update={"operators": metadata.operators | {"group_neutralize"}})
     result = StructuralValidator().validate(
         "group_neutralize(rank(close), industry)",
         {"neutralization": "SUBINDUSTRY", "truncation": 0.08},

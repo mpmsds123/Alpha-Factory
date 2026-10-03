@@ -33,6 +33,7 @@ def test_openai_compatible_client_uses_json_mode_and_normalizes_usage() -> None:
                 },
             },
         )
+
     settings = LLMSettings(
         model="fixture-model",
         api_key=SecretStr("EXAMPLE_NOT_A_REAL_KEY"),

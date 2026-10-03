@@ -12,6 +12,7 @@ from alpha_orchestrator.adapters.live import (
     LiveBrainAdapter,
     LiveBrainClient,
     LiveBrainSettings,
+    load_session_cookies,
 )
 from alpha_orchestrator.adapters.replay import ReplayBrainAdapter
 from alpha_orchestrator.config import (
@@ -50,6 +51,54 @@ cards_app = typer.Typer(help="Review and approve paraphrased method cards.")
 app.add_typer(run_app, name="run")
 app.add_typer(corpus_app, name="corpus")
 app.add_typer(cards_app, name="cards")
+
+
+@app.command("doctor")
+def doctor(
+    database: Annotated[Path | None, typer.Option("--db", help="SQLite database path.")] = None,
+) -> None:
+    """Check local readiness without contacting an external service."""
+    database_path = _database_path(database).expanduser().resolve()
+    replay_fixture = Path(__file__).parents[3] / "tests" / "fixtures" / "basic_replay.json"
+    routing_path, limit_path = _policy_paths(None, None)
+    correlation_path = _correlation_policy_path(None)
+
+    policy_errors: list[str] = []
+    for label, loader, path in (
+        ("routing", load_routing_policy, routing_path),
+        ("limits", load_limit_policy, limit_path),
+        ("correlation", load_correlation_policy, correlation_path),
+    ):
+        try:
+            loader(path)
+        except (OSError, ValueError) as exc:
+            policy_errors.append(f"{label}: {exc}")
+
+    llm_variables = ("ALPHA_LAB_LLM_API_KEY", "ALPHA_LAB_LLM_MODEL")
+    missing_llm = [name for name in llm_variables if not os.getenv(name)]
+
+    session_status = "not configured"
+    try:
+        settings = LiveBrainSettings.from_environment()
+        load_session_cookies(settings.session_file)
+        session_status = "configured"
+    except (OSError, ValueError) as exc:
+        if os.getenv("ALPHA_LAB_BRAIN_SESSION_FILE"):
+            session_status = f"invalid: {exc}"
+
+    result = {
+        "offline_replay_ready": replay_fixture.is_file() and not policy_errors,
+        "database": {
+            "path": str(database_path),
+            "initialized": database_path.is_file(),
+        },
+        "policies": policy_errors if policy_errors else "valid",
+        "llm": "configured" if not missing_llm else {"missing": missing_llm},
+        "brain_session": session_status,
+        "live_research_ready": not missing_llm and session_status == "configured",
+        "external_requests_made": False,
+    }
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
 
 
 def _database_path(path: Path | None) -> Path:

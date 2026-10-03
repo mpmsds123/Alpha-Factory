@@ -18,6 +18,7 @@ def test_packaged_default_policies_match_repository_versions() -> None:
         "routing.v2.yaml",
         "limits.v1.yaml",
         "limits.v2.yaml",
+        "limits.v3.yaml",
         "error-taxonomy.v1.yaml",
         "correlation.v1.yaml",
     ):

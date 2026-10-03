@@ -244,8 +244,22 @@ class ResearchOrchestrator:
         (dedup/check/queue) is supposed to be code's decision, not something a human
         has to remember to trigger separately for every completed candidate.
         """
+        # A survivor is more valuable than clearing the tail of the queue. Check any
+        # already-ready candidate first, so stale pending work or a time limit cannot
+        # strand it before G6/G7.
+        if adapter.mode is AdapterMode.LIVE:
+            stop_reason = self._check_platform_readiness(run_id, adapter)
+            if stop_reason is not None:
+                return stop_reason
         stop_reason = self._drain_existing(run_id, adapter)
-        if stop_reason is not None or adapter.mode is not AdapterMode.LIVE:
+        if adapter.mode is not AdapterMode.LIVE:
+            return stop_reason
+        # A batch may have produced a survivor and a deferred pending/error reason at
+        # the same time. Preserve the reason, but never skip the survivor's check.
+        platform_reason = self._check_platform_readiness(run_id, adapter)
+        if platform_reason is not None:
+            return platform_reason
+        if stop_reason is not None:
             return stop_reason
         for _ in range(self.limit_policy.maximum_generations + 2):
             before = self._candidate_snapshot(run_id)
@@ -484,19 +498,51 @@ class ResearchOrchestrator:
 
         if not prepared:
             return None
-        worker_count = min(self.limit_policy.maximum_concurrent_simulations, len(prepared))
-        with ThreadPoolExecutor(max_workers=worker_count) as pool:
-            outcomes = list(
-                pool.map(
-                    lambda item: self._external_create_and_poll(item[1], item[2], adapter),
-                    prepared,
-                )
-            )
         first_reason: str | None = None
-        for (candidate, attempt, _), outcome in zip(prepared, outcomes, strict=True):
-            reason = self._persist_external_outcome(candidate, attempt, outcome, adapter)
-            if first_reason is None and reason is not None:
-                first_reason = reason
+        cursor = 0
+        while cursor < len(prepared):
+            worker_count = min(
+                self.limit_policy.maximum_concurrent_simulations,
+                len(prepared) - cursor,
+            )
+            if adapter.mode is AdapterMode.LIVE:
+                worker_count = min(
+                    worker_count,
+                    self.repository.learned_live_concurrency(
+                        self.limit_policy.maximum_concurrent_simulations
+                    ),
+                )
+            batch = prepared[cursor : cursor + worker_count]
+            with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                outcomes = list(
+                    pool.map(
+                        lambda item: self._external_create_and_poll(item[1], item[2], adapter),
+                        batch,
+                    )
+                )
+            for (candidate, attempt, _), outcome in zip(batch, outcomes, strict=True):
+                reason = self._persist_external_outcome(candidate, attempt, outcome, adapter)
+                if first_reason is None and reason is not None:
+                    first_reason = reason
+            if adapter.mode is AdapterMode.LIVE:
+                rate_limited = any(
+                    outcome.failure is not None
+                    and outcome.failure.error_class is ErrorClass.RATE_LIMIT
+                    for outcome in outcomes
+                )
+                if rate_limited:
+                    learned = max(1, worker_count - 1)
+                    adaptation_reason = "RATE_LIMIT"
+                else:
+                    learned = min(
+                        self.limit_policy.maximum_concurrent_simulations,
+                        worker_count + 1,
+                    )
+                    adaptation_reason = "CLEAN_BATCH"
+                self.repository.record_live_concurrency(
+                    batch[0][0].run_id, learned, adaptation_reason
+                )
+            cursor += len(batch)
         return first_reason
 
     def _external_create_and_poll(

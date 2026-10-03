@@ -20,6 +20,26 @@ def test_cli_exposes_platform_check_but_no_submission_command() -> None:
     assert "No such command" in unavailable.stderr
 
 
+def test_doctor_reports_readiness_without_creating_database(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    database = tmp_path / "missing.db"
+    monkeypatch.chdir(ROOT)
+    monkeypatch.delenv("ALPHA_LAB_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("ALPHA_LAB_LLM_MODEL", raising=False)
+    monkeypatch.delenv("ALPHA_LAB_BRAIN_SESSION_FILE", raising=False)
+
+    result = runner.invoke(app, ["doctor", "--db", str(database)])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["offline_replay_ready"] is True
+    assert payload["database"]["initialized"] is False
+    assert payload["live_research_ready"] is False
+    assert payload["external_requests_made"] is False
+    assert not database.exists()
+
+
 def test_cli_initializes_executes_reports_and_stops(tmp_path: Path, monkeypatch: object) -> None:
     database = tmp_path / "lab.db"
     monkeypatch.chdir(ROOT)
