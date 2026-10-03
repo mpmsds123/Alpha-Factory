@@ -34,6 +34,24 @@ read-only architectural evidence; this project does not import, vendor, modify, 
 either system. The frozen contracts and safety boundaries are user-authored design decisions,
 and all implementation code here is new.
 
+## Mining strategy
+
+Two generators feed the same gated engine:
+
+- **Deterministic (default, no LLM):** `seeds/first_order.txt` expands a one-degree-of-freedom
+  sweep, `group_rank(<ts_op>(ts_backfill(<field>, 66), 66), industry)` over six time-series
+  operators, across every MATRIX field of the frozen dataset snapshot.
+- **LLM-assisted (optional):** with `ALPHA_LAB_LLM_API_KEY`/`ALPHA_LAB_LLM_MODEL` set, the
+  generator and repair planner draw only on human-approved method cards.
+
+Strongly negative results are mirrored, not archived: when `-sharpe` and `-fitness` would clear
+the strong routing floor, the engine queues `multiply(-1, parent)` as a lineage-tracked child and
+simulates it (`gates/sign_flip.py`; CHN excluded because its short side is asymmetric). In the
+project's first live runs, the strongest completed results were sharpe −1.22/−1.21 and were
+archived; this rule exists to recover exactly those signals.
+
+`tools/daily_run.sh` selects the generator automatically from the environment.
+
 ## Current package architecture
 
 A researcher starts the CLI or the narrow offline MCP interface. That interface borrows the
