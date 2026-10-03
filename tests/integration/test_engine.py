@@ -523,3 +523,51 @@ def test_initial_candidate_and_generation_limits_record_exact_reasons(
         generation_run.run_id, generation_adapter
     )
     assert generation_summary.stop_reason == "MAXIMUM_GENERATIONS_REACHED"
+
+
+def test_strong_negative_result_spawns_simulated_sign_flip_child(
+    repository: Repository,
+    make_run: Callable[..., RunSpecification],
+    routing_policy: RoutingPolicy,
+    limit_policy: LimitPolicy,
+    metadata: MetadataSnapshot,
+) -> None:
+    run = make_run()
+    flipped = "multiply(-1, rank(close))"
+    adapter = FakeBrainAdapter(
+        metadata.model_copy(update={"operators": metadata.operators | {"multiply"}}),
+        [candidate("rank(close)")],
+        results={
+            "rank(close)": completed(sharpe=-1.2, fitness=-0.6),
+            flipped: completed(sharpe=1.2, fitness=0.6),
+        },
+    )
+
+    OfflineOrchestrator(repository, routing_policy, limit_policy).execute(run.run_id, adapter)
+
+    by_expression = {c.expression: c for c in repository.list_candidates(run.run_id)}
+    parent, child = by_expression["rank(close)"], by_expression[flipped]
+    assert parent.status == CandidateStatus.ARCHIVED
+    assert child.parent_candidate_id == parent.candidate_id
+    assert child.changed_dimension == "sign"
+    assert child.status == CandidateStatus.READY_FOR_PLATFORM_CHECK
+    assert repository.count_attempts(run.run_id) == 2
+
+
+def test_sign_flip_is_skipped_when_multiply_is_not_an_available_operator(
+    repository: Repository,
+    make_run: Callable[..., RunSpecification],
+    routing_policy: RoutingPolicy,
+    limit_policy: LimitPolicy,
+    metadata: MetadataSnapshot,
+) -> None:
+    run = make_run()
+    adapter = FakeBrainAdapter(
+        metadata,
+        [candidate("rank(close)")],
+        results={"rank(close)": completed(sharpe=-1.2, fitness=-0.6)},
+    )
+
+    OfflineOrchestrator(repository, routing_policy, limit_policy).execute(run.run_id, adapter)
+
+    assert len(repository.list_candidates(run.run_id)) == 1

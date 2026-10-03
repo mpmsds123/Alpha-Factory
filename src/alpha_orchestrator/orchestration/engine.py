@@ -21,11 +21,13 @@ from alpha_orchestrator.domain.errors import is_retryable
 from alpha_orchestrator.domain.identity import stable_idempotency_key
 from alpha_orchestrator.domain.models import (
     AdapterFailure,
+    CandidateProposal,
     CreateSimulationRequest,
     NormalizedSimulationResult,
 )
 from alpha_orchestrator.gates.limits import LimitController, UsageSnapshot
 from alpha_orchestrator.gates.routing import route_completed_result
+from alpha_orchestrator.gates.sign_flip import SIGN_FLIP_DIMENSION, negate, should_flip
 from alpha_orchestrator.gates.structural import StructuralValidator
 from alpha_orchestrator.llm.services import (
     STRUCTURAL_FAILURES,
@@ -646,7 +648,49 @@ class ResearchOrchestrator:
             list(reasons),
             result.metrics.model_dump(mode="json"),
         )
+        if target is CandidateStatus.ARCHIVED:
+            self._propose_sign_flip(candidate, result, adapter)
         return None
+
+    def _propose_sign_flip(
+        self,
+        candidate: CandidateORM,
+        result: NormalizedSimulationResult,
+        adapter: BrainAdapter,
+    ) -> None:
+        """Queue `multiply(-1, parent)` when the mirror image clears the strong floor.
+
+        The child is an ordinary candidate: it is deduplicated, structurally validated and
+        simulated like any other, and `_drain_existing` picks it up in the same execute call.
+        """
+        run = self.repository.get_run(candidate.run_id)
+        if not should_flip(result.metrics, self.routing_policy, run.region):
+            return
+        expression = negate(candidate.expression)
+        if expression is None or "multiply" not in adapter.metadata.operators:
+            return
+        if candidate.generation_number + 1 > self.limit_policy.maximum_generations:
+            return
+        if (
+            self.repository.count_candidates(run.run_id)
+            >= self.limit_policy.maximum_distinct_candidates
+        ):
+            return
+        sharpe = result.metrics.sharpe or 0.0
+        self.repository.add_candidate(
+            run.run_id,
+            CandidateProposal(
+                expression=expression,
+                settings=candidate.settings_json,
+                mechanism_claim=candidate.mechanism_claim,
+                source_method_card_ids=list(candidate.source_method_card_ids),
+                parent_candidate_id=UUID(candidate.candidate_id),
+                generation_number=candidate.generation_number + 1,
+                changed_dimension=SIGN_FLIP_DIMENSION,
+                change_reason=f"Parent sharpe {sharpe:.2f}; negation mirrors the measured signal",
+            ),
+            adapter.metadata.operators,
+        )
 
     def _record_failure(
         self,

@@ -2,11 +2,12 @@
 # 一条命令跑完一天的流程：建run -> LLM生成候选(读方法论卡) -> 跑模拟 ->
 # 反复resume直到没有pending -> 平台检查/相关性去重/单亲修复自动结算 -> 出报告。
 #
-# 这条脚本走的是 --research-query 路径，不是 --templates：只有这条路径会实例化
-# CandidateGenerator/RepairPlanner，只有实例化了它们，approved 的方法卡才会真正
-# 被检索、被用来生成候选和指导修复。--templates 路径是纯静态种子回放，从不读
-# 方法论卡，跑得再多也不会用上卡库里的东西 (src/alpha_orchestrator/cli/app.py
-# 的 `if research_query is not None` 分支)。
+# 两种生成方式，按环境变量自动选：
+#   设了 ALPHA_LAB_LLM_API_KEY + ALPHA_LAB_LLM_MODEL -> --research-query 路径：
+#     LLM 读已批准的方法卡生成候选，RepairPlanner 按卡修复。
+#   没设 -> --templates 路径：用 $SEED_FILE（默认 seeds/first_order.txt）把一阶模板
+#     展开到数据集的全部 MATRIX 字段，不需要任何 LLM。强负 sharpe 的结果由引擎
+#     自动取反再跑一次（gates/sign_flip.py），两条路径都有这一步。
 #
 # 拦不住的唯一一步：session过期/被要求人脸验证时，这个脚本会直接报错退出并
 # 告诉你去跑 tools/取会话.py，不会假装能自动搞定生物识别。
@@ -37,11 +38,15 @@ DB="$ROOT/alpha_lab.db"
 ACTIVE_RUN_FILE="$ROOT/.runtime/active_run_id"
 export ALPHA_LAB_BRAIN_SESSION_FILE="${ALPHA_LAB_BRAIN_SESSION_FILE:-$HOME/brain-session.json}"
 
-if [ -z "${ALPHA_LAB_LLM_API_KEY:-}" ] || [ -z "${ALPHA_LAB_LLM_MODEL:-}" ]; then
-  echo "缺 ALPHA_LAB_LLM_API_KEY / ALPHA_LAB_LLM_MODEL：不设这两个环境变量，" >&2
-  echo "--research-query 路径会在生成候选那一步直接报错，CandidateGenerator/" >&2
-  echo "RepairPlanner 起不来，方法卡也就用不上。先 export 再跑这个脚本。" >&2
-  exit 1
+SEED_FILE="${SEED_FILE:-$ROOT/seeds/first_order.txt}"
+if [ -n "${ALPHA_LAB_LLM_API_KEY:-}" ] && [ -n "${ALPHA_LAB_LLM_MODEL:-}" ]; then
+  GEN_LABEL="research-query, 读方法论卡"
+  GEN_ARGS=(--research-query "$RESEARCH_QUERY")
+  RESUME_ARGS=(--research-query "$RESEARCH_QUERY")
+else
+  GEN_LABEL="templates: $SEED_FILE（没配 LLM，走确定性模板）"
+  GEN_ARGS=(--templates "$SEED_FILE")
+  RESUME_ARGS=()
 fi
 
 RESUME_WAIT_SECONDS=60
@@ -65,10 +70,9 @@ else
   echo "  run_id=$RUN_ID"
 fi
 
-echo "[2/4] 生成候选并跑第一轮模拟 (research-query, 读方法论卡)"
-echo "  query: $RESEARCH_QUERY"
+echo "[2/4] 生成候选并跑第一轮模拟 ($GEN_LABEL)"
 alpha-lab run execute "$RUN_ID" --adapter live \
-  --research-query "$RESEARCH_QUERY" \
+  "${GEN_ARGS[@]}" \
   --limit-policy "$LIMIT_POLICY" \
   --correlation-policy "$CORRELATION_POLICY" \
   --db "$DB"
@@ -78,7 +82,7 @@ attempt=0
 while true; do
   attempt=$((attempt + 1))
   SUMMARY=$(alpha-lab run resume "$RUN_ID" --adapter live \
-    --research-query "$RESEARCH_QUERY" \
+    ${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"} \
     --limit-policy "$LIMIT_POLICY" \
     --correlation-policy "$CORRELATION_POLICY" \
     --db "$DB")
