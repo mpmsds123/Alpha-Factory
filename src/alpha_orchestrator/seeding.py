@@ -30,9 +30,24 @@ OPERATOR_PLACEHOLDERS = ("<operator>", "<算子>")
 # prefix alone is insufficient: correlation/covariance require two inputs plus lookback.
 TWO_ARGUMENT_TIME_SERIES_OPERATORS = frozenset(
     {
-        "ts_arg_max", "ts_arg_min", "ts_av_diff", "ts_backfill", "ts_count_nans",
-        "ts_decay_linear", "ts_delay", "ts_delta", "ts_max", "ts_mean", "ts_median",
-        "ts_min", "ts_product", "ts_rank", "ts_scale", "ts_std_dev", "ts_sum", "ts_zscore",
+        "ts_arg_max",
+        "ts_arg_min",
+        "ts_av_diff",
+        "ts_backfill",
+        "ts_count_nans",
+        "ts_decay_linear",
+        "ts_delay",
+        "ts_delta",
+        "ts_max",
+        "ts_mean",
+        "ts_median",
+        "ts_min",
+        "ts_product",
+        "ts_rank",
+        "ts_scale",
+        "ts_std_dev",
+        "ts_sum",
+        "ts_zscore",
     }
 )
 

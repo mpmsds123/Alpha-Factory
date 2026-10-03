@@ -28,9 +28,7 @@ COMPLETE_ALPHA_RE = re.compile(
     r"|(?:^\s*(?:alpha[_-]?)?expression\s*[:=]\s*\S.+$)"
 )
 INLINE_SOURCE_RE = re.compile(r"\[source:\s*(.*?)\]", re.IGNORECASE)
-SOURCE_SEGMENT_RE = re.compile(
-    r"^\s*(?P<filename>[^;]+?\.md):(?P<lines>[0-9][0-9,\-]*)\s*$"
-)
+SOURCE_SEGMENT_RE = re.compile(r"^\s*(?P<filename>[^;]+?\.md):(?P<lines>[0-9][0-9,\-]*)\s*$")
 RULE_FIELDS = (
     "prerequisites",
     "diagnostic_signals",
@@ -241,9 +239,7 @@ def _resolve_rule_citations(
                 line_spec = segment.group("lines")
                 for start, end in _line_ranges(line_spec):
                     if start < 1 or end > line_count or start > end:
-                        raise ValueError(
-                            f"Method-card citation is outside {filename}: {line_spec}"
-                        )
+                        raise ValueError(f"Method-card citation is outside {filename}: {line_spec}")
                 locator = f"lines:{line_spec}"
                 references[(document.source_id, locator)] = SourceReference(
                     source_id=document.source_id,
@@ -277,9 +273,7 @@ def _validate_evidence_level(
     }
     weakest = max(levels, key=rank.__getitem__)
     if card.evidence_level is not weakest:
-        raise ValueError(
-            f"Method-card evidence level must match weakest cited source: {weakest}"
-        )
+        raise ValueError(f"Method-card evidence level must match weakest cited source: {weakest}")
 
 
 def _section_inventory(source_id: str, text: str) -> list[SourceSection]:

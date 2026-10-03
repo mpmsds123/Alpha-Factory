@@ -55,6 +55,17 @@ def test_duplicate_insert_1000_times_creates_one_candidate_and_no_attempts(
     assert repository.count_duplicate_events(run.run_id) == 999
 
 
+def test_live_concurrency_learning_is_persisted_and_bounded(
+    repository: Repository,
+    make_run: Callable[..., RunSpecification],
+) -> None:
+    run = make_run()
+    assert repository.learned_live_concurrency(maximum=10) == 3
+    repository.record_live_concurrency(run.run_id, 7, "CLEAN_BATCH")
+    assert repository.learned_live_concurrency(maximum=10) == 7
+    assert repository.learned_live_concurrency(maximum=4) == 4
+
+
 def test_lineage_edge_is_complete_and_same_run(
     repository: Repository,
     database: Database,

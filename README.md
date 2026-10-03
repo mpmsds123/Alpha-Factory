@@ -5,6 +5,30 @@ experiments. SQLite is the source of truth: candidate identities, state transiti
 decisions, simulation attempts, retries, lineage, policy snapshots, and stop reasons are
 persisted.
 
+## Start here
+
+Use the project virtual environment; the system Python is not the supported runtime for this
+checkout.
+
+```bash
+source .venv/bin/activate
+alpha-lab doctor --db alpha_lab.db
+```
+
+`doctor` is read-only and makes no external requests. It answers three practical questions in one
+small JSON response: whether offline replay is runnable, whether the local ledger exists, and what
+configuration is still missing for live research. A live-ready result confirms configuration only;
+it does not confirm that the BRAIN session is currently accepted.
+
+Choose one workflow:
+
+- **Prove the engine locally:** run the offline example below. It uses a sanitized fixture and
+  never contacts WorldQuant.
+- **Continue an existing run:** use `alpha-lab run status RUN_ID --db alpha_lab.db`, then
+  `alpha-lab run resume ...`; SQLite remains the source of truth.
+- **Run authorized daily research:** configure the LLM and BRAIN session, confirm `doctor`, then
+  run `tools/daily_run.sh`. This can simulate and check candidates, but it cannot submit them.
+
 This repository is an independent clean-room implementation. CNHKMCP and BrainMachine were
 read-only architectural evidence; this project does not import, vendor, modify, or depend on
 either system. The frozen contracts and safety boundaries are user-authored design decisions,
@@ -21,7 +45,9 @@ interpretation. The package contains no submission capability.
 See the detailed [architecture](docs/ARCHITECTURE.md), [sanitized replay case
 study](docs/case-studies/sanitized-replay.md), [test evidence](docs/TEST_EVIDENCE.md), [design
 tradeoffs](docs/DESIGN_TRADEOFFS.md), [known limits](docs/KNOWN_LIMITS.md), and [60-second technical
-explanation](docs/60_SECOND_EXPLANATION.md).
+explanation](docs/60_SECOND_EXPLANATION.md). For daily use, begin with
+[START_HERE.md](START_HERE.md); the independently reimplemented public-reference patterns are
+recorded in [PUBLIC_REFERENCE_DESIGN.md](docs/PUBLIC_REFERENCE_DESIGN.md).
 
 ## Implemented milestones
 
@@ -65,7 +91,9 @@ their separate configurations; replay remains fully offline.
 ## Install and verify
 
 ```bash
-python -m pip install -e '.[dev]'
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -e '.[dev]'
 ruff format --check .
 ruff check .
 mypy src

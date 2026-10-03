@@ -172,12 +172,10 @@ def test_concurrent_and_serial_execution_persist_the_same_outcomes(
     )
 
     serial_states = [
-        (item.expression, item.status)
-        for item in repository.list_candidates(serial_run.run_id)
+        (item.expression, item.status) for item in repository.list_candidates(serial_run.run_id)
     ]
     parallel_states = [
-        (item.expression, item.status)
-        for item in repository.list_candidates(parallel_run.run_id)
+        (item.expression, item.status) for item in repository.list_candidates(parallel_run.run_id)
     ]
     assert serial_states == parallel_states
 

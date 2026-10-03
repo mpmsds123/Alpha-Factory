@@ -80,9 +80,7 @@ def add_approved_platform_card(repository: Repository, failure_code: str) -> Non
             prohibited_actions=["Do not change limits"],
             stop_condition="Stop after the bounded test repair",
             evidence_level=EvidenceLevel.TRAINING,
-            source_references=[
-                SourceReference(source_id="SRC-TEST", section_locator="line:1")
-            ],
+            source_references=[SourceReference(source_id="SRC-TEST", section_locator="line:1")],
             reviewer="Test Reviewer",
             approval_timestamp=datetime.now(UTC),
         )
@@ -454,9 +452,7 @@ def test_platform_failures_call_repair_with_check_name_and_bound_children(
     register_default_prompts(repository)
     add_approved_platform_card(repository, "CONCENTRATED_WEIGHT")
     add_approved_platform_card(repository, "LOW_SHARPE")
-    constrained = limit_policy.model_copy(
-        update={"children_per_parent_per_generation": 1}
-    )
+    constrained = limit_policy.model_copy(update={"children_per_parent_per_generation": 1})
     capture = metadata_capture(metadata)
     run = create_live_run(
         make_run,
@@ -469,9 +465,7 @@ def test_platform_failures_call_repair_with_check_name_and_bound_children(
         metadata,
         check_responses=[
             [
-                PlatformCheck(
-                    name="CONCENTRATED_WEIGHT", status=PlatformCheckStatus.FAIL
-                ),
+                PlatformCheck(name="CONCENTRATED_WEIGHT", status=PlatformCheckStatus.FAIL),
                 PlatformCheck(name="LOW_SHARPE", status=PlatformCheckStatus.FAIL),
             ]
         ],
@@ -537,11 +531,7 @@ def test_complete_intercepted_daily_cycle_generates_repairs_and_reaches_review(
     adapter = StubLiveAdapter(
         metadata,
         check_responses=[
-            [
-                PlatformCheck(
-                    name="CONCENTRATED_WEIGHT", status=PlatformCheckStatus.FAIL
-                )
-            ],
+            [PlatformCheck(name="CONCENTRATED_WEIGHT", status=PlatformCheckStatus.FAIL)],
             [PlatformCheck(name="CONCENTRATED_WEIGHT", status=PlatformCheckStatus.PASS)],
         ],
     )

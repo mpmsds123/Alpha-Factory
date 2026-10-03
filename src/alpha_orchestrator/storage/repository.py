@@ -126,7 +126,9 @@ class Repository:
                 raise MissingRecord(f"Run not found: {run_id}")
             run.status = status
             run.stop_reason = stop_reason
-            if status is RunStatus.RUNNING and run.started_at is None:
+            # A run may be resumed hours or days later. The wall-clock budget applies
+            # to this active worker invocation, not time spent safely stopped.
+            if status is RunStatus.RUNNING:
                 run.started_at = utc_now()
             if status is RunStatus.RUNNING:
                 run.completed_at = None
@@ -488,6 +490,30 @@ class Repository:
                     .where(CandidateORM.run_id == str(run_id))
                 )
                 or 0
+            )
+
+    def learned_live_concurrency(self, maximum: int, default: int = 3) -> int:
+        """Return the last account-wide learned slot count stored in the ledger."""
+        with self._sessions() as session:
+            event = session.scalar(
+                select(EventORM)
+                .where(EventORM.event_type == "LIVE_CONCURRENCY_ADAPTED")
+                .order_by(EventORM.created_at.desc())
+                .limit(1)
+            )
+            value = event.payload_json.get("effective_concurrency") if event else default
+            learned = value if isinstance(value, int) else default
+            return max(1, min(maximum, learned))
+
+    def record_live_concurrency(self, run_id: str | UUID, value: int, reason: str) -> None:
+        with self._sessions.begin() as session:
+            session.add(
+                EventORM(
+                    event_id=str(uuid4()),
+                    run_id=str(run_id),
+                    event_type="LIVE_CONCURRENCY_ADAPTED",
+                    payload_json={"effective_concurrency": value, "reason": reason},
+                )
             )
 
     def count_duplicate_events(self, run_id: str | UUID) -> int:

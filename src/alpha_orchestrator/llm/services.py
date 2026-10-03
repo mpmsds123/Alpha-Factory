@@ -217,9 +217,7 @@ class CandidateGenerator:
             deterministic_validation=validate,
         )
         normalized_proposals = (
-            proposal.model_copy(
-                update={"settings": {**proposal.settings, **self.base_settings}}
-            )
+            proposal.model_copy(update={"settings": {**proposal.settings, **self.base_settings}})
             for proposal in batch.proposals
         )
         inserted = tuple(

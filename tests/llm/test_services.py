@@ -148,9 +148,7 @@ def add_approved_repair_card(repository: Repository, failure_code: str) -> None:
             prohibited_actions=["Do not change limits"],
             stop_condition="Stop after the bounded test repair",
             evidence_level=EvidenceLevel.TRAINING,
-            source_references=[
-                SourceReference(source_id="SRC-TEST", section_locator="line:1")
-            ],
+            source_references=[SourceReference(source_id="SRC-TEST", section_locator="line:1")],
             reviewer="Test Reviewer",
             approval_timestamp=datetime.now(UTC),
         )
@@ -474,9 +472,7 @@ def test_engine_invokes_generator_then_repairs_a_structural_failure(
     add_approved_repair_card(repository, str(ErrorClass.INVALID_FIELD))
     generator_client = FakeLLMClient(generator_json("rank(missing_field)"))
     repair_client = FakeLLMClient(repair_json())
-    generator = CandidateGenerator(
-        repository, MethodCardRetriever(repository), generator_client
-    )
+    generator = CandidateGenerator(repository, MethodCardRetriever(repository), generator_client)
     planner = RepairPlanner(repository, MethodCardRetriever(repository), repair_client)
     adapter = FakeBrainAdapter(
         metadata,
@@ -502,9 +498,7 @@ def test_engine_invokes_generator_then_repairs_a_structural_failure(
     assert repair_client.calls == 1
     repair_context = json.loads(repair_client.user_prompts[0])
     assert repair_context["failure_code"] == "INVALID_FIELD"
-    assert repair_context["evidence_snapshot"]["validation_issues"][0]["code"] == (
-        "INVALID_FIELD"
-    )
+    assert repair_context["evidence_snapshot"]["validation_issues"][0]["code"] == ("INVALID_FIELD")
     parent, child = repository.list_candidates(run.run_id)
     assert parent.status == CandidateStatus.INVALID
     assert child.parent_candidate_id == parent.candidate_id

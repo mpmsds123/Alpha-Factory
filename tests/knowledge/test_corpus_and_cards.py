@@ -261,11 +261,14 @@ evidence_level: training
     assert len(repository.list_source_documents()) == 1
     assert len(repository.list_method_cards(MethodCardStatus.DRAFT)) == 1
     retriever = MethodCardRetriever(repository)
-    assert retriever.retrieve(
-        query="coverage",
-        data_type=DataType.MATRIX,
-        failure_codes={"LOW_COVERAGE"},
-    ) == []
+    assert (
+        retriever.retrieve(
+            query="coverage",
+            data_type=DataType.MATRIX,
+            failure_codes={"LOW_COVERAGE"},
+        )
+        == []
+    )
 
     # Approval is explicit even in the test: production extraction never performs it.
     repository.approve_method_card("MC-DB-RETRIEVAL-001", "Test Reviewer")
