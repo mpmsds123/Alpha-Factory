@@ -12,7 +12,10 @@ from typing import Any
 
 import yaml
 
-DEFAULT_CONFIG = Path("factory.yaml")
+# The repository root (this file is src/alpha_orchestrator/factory/config.py), so the
+# command works from any folder.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_CONFIG = REPO_ROOT / "factory.yaml"
 
 
 @dataclass
@@ -79,13 +82,14 @@ class FactoryConfig:
 
     @classmethod
     def load(cls, path: Path | None = None) -> "FactoryConfig":
-        source = path or DEFAULT_CONFIG
+        source = (path or DEFAULT_CONFIG).expanduser()
         if not source.exists():
-            return cls()
+            return cls(reports_dir=str(REPO_ROOT / cls.reports_dir))
         raw: dict[str, Any] = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+        reports = Path(raw.get("reports_dir", cls.reports_dir)).expanduser()
         return cls(
             db_path=raw.get("db_path", cls.db_path),
-            reports_dir=raw.get("reports_dir", cls.reports_dir),
+            reports_dir=str(reports if reports.is_absolute() else source.parent / reports),
             budget=Budget(**raw.get("budget", {})),
             thresholds=Thresholds(**raw.get("thresholds", {})),
             llm=LLMConfig(**raw.get("llm", {})),
