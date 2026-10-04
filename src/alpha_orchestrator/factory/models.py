@@ -34,10 +34,9 @@ class FactoryBase(DeclarativeBase):
 
 class CellState:
     NEW = "NEW"  # known from the catalog, nothing spent yet
-    PROFILED = "PROFILED"  # fields fetched and grouped into families
-    PROBING = "PROBING"  # first-order probe batch queued or running
-    SIGNAL = "SIGNAL"  # probe found signal; hypotheses and expansion allowed
-    KILLED = "KILLED"  # probe budget spent without signal
+    STUDYING = "STUDYING"  # fields fetched; 6-way data probes queued or running
+    RESEARCH = "RESEARCH"  # data understood; ideas being tested round by round
+    EXHAUSTED = "EXHAUSTED"  # stop rule hit: no ore for N rounds, budget spent, or LLM said so
     SATURATED = "SATURATED"  # enough submissions from this dataset (concentration cap)
 
 
@@ -50,9 +49,9 @@ class CandidateStatus:
 
 
 class Stage:
-    PROBE = "PROBE"  # first-order scan of family representatives
-    FIRST = "FIRST"  # first-order on all members of a live family
-    LLM = "LLM"  # written by the LLM from an approved hypothesis
+    PROFILE = "PROFILE"  # 6-way data probe (neutralization NONE, decay 0); read long/short counts
+    IDEA = "IDEA"  # an idea's template expanded over its fields and windows
+    DIG = "DIG"  # variant written by the LLM around ore it found in review
     SECOND = "SECOND"  # group operator wrapped around a survivor
     THIRD = "THIRD"  # trade_when / timing wrapped around a survivor
     REPAIR = "REPAIR"  # one-variable fix routed by the failing check
@@ -61,10 +60,10 @@ class Stage:
 
 
 class HypothesisStatus:
-    PROPOSED = "PROPOSED"
-    APPROVED = "APPROVED"
-    REJECTED = "REJECTED"
-    RETIRED = "RETIRED"
+    PROPOSED = "PROPOSED"  # waiting for you (only when policy.hypotheses_need_approval)
+    APPROVED = "APPROVED"  # being tested
+    REJECTED = "REJECTED"  # you said no
+    RETIRED = "RETIRED"  # the LLM review dropped it, with a reason
 
 
 class ReviewStatus:
@@ -94,8 +93,13 @@ class CellORM(FactoryBase):
     field_count: Mapped[int] = mapped_column(Integer, default=0)
     themes: Mapped[list[Any]] = mapped_column(JSON, default=list)
     state: Mapped[str] = mapped_column(String(16), default=CellState.NEW)
-    probes: Mapped[int] = mapped_column(Integer, default=0)
-    hits: Mapped[int] = mapped_column(Integer, default=0)
+    rank_score: Mapped[float] = mapped_column(Float, default=0.0)
+    rank_reason: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    paper_refs: Mapped[int] = mapped_column(Integer, default=0)
+    rounds: Mapped[int] = mapped_column(Integer, default=0)  # LLM reviews done
+    rounds_without_ore: Mapped[int] = mapped_column(Integer, default=0)
+    hits: Mapped[int] = mapped_column(Integer, default=0)  # results with |sharpe| >= ore
+    stop_reason: Mapped[str] = mapped_column(Text, default="")
     sims_used: Mapped[int] = mapped_column(Integer, default=0)
     submitted: Mapped[int] = mapped_column(Integer, default=0)
     best_sharpe: Mapped[float] = mapped_column(Float, default=0.0)
@@ -117,6 +121,8 @@ class FieldORM(FactoryBase):
     alpha_count: Mapped[int] = mapped_column(Integer, default=0)
     family: Mapped[str] = mapped_column(String(255), default="")
     representative: Mapped[bool] = mapped_column(Boolean, default=False)
+    profile: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # 6-way probe readings
+    prep: Mapped[str] = mapped_column(Text, default="{x}")  # how the field enters a template
 
 
 class HypothesisORM(FactoryBase):
@@ -129,8 +135,14 @@ class HypothesisORM(FactoryBase):
     direction: Mapped[str] = mapped_column(Text, default="")
     fields: Mapped[list[str]] = mapped_column(JSON, default=list)
     sources: Mapped[list[str]] = mapped_column(JSON, default=list)
+    template: Mapped[str] = mapped_column(Text, default="")
+    slots: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    windows: Mapped[list[int]] = mapped_column(JSON, default=list)
+    settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # decay, neutralization
     status: Mapped[str] = mapped_column(String(16), default=HypothesisStatus.PROPOSED)
-    rounds: Mapped[int] = mapped_column(Integer, default=0)
+    rounds: Mapped[int] = mapped_column(Integer, default=0)  # rounds queued
+    reviewed: Mapped[int] = mapped_column(Integer, default=0)  # rounds the LLM has judged
+    verdicts: Mapped[list[Any]] = mapped_column(JSON, default=list)  # review history
     best_sharpe: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

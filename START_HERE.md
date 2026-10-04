@@ -1,6 +1,6 @@
 # Alpha 工厂：你每天要做什么
 
-设计依据见设计文档第 2 版（claude.ai/artifact/UmRiCRnDTXLsPVVSH5u7RD）。
+依据：官方《零基础学量化》AI 版第 1–4 课、官方 API 课、cnhkmcp 的数据探测方法、论坛作业区。
 
 ## 第一次使用（只做一次）
 
@@ -8,14 +8,15 @@
 cd ~/Desktop/brain-alpha-pipeline
 source .venv/bin/activate
 pip install -e .                       # 安装 alpha-factory 命令
+alpha-factory ideas import ~/Downloads/WQ官方培训作业帖全文.md   # 作业区模版进灵感库（一次）
 alpha-factory schedule install         # 每天 00:37 自动运行
 ```
 
 还需要两个本机文件，都放在仓库外，不会进 git：
 
 - `~/secrets/platform-brain.json`：BRAIN 账号，`{"email": "...", "password": "..."}`。你已经有了。
-- `~/secrets/deepseek.json`：DeepSeek key，`{"api_key": "sk-..."}`。没有这个文件也能跑，
-  只是不会调用 LLM（探测、扩展、修复照常进行，不会提假设和写表达式）。
+- `~/secrets/deepseek.json`：DeepSeek key，`{"api_key": "sk-..."}`。出点子和读结果都靠它，
+  没有这个文件程序不运行。
 
 ## 每天
 
@@ -23,23 +24,31 @@ alpha-factory schedule install         # 每天 00:37 自动运行
 |---|---|
 | 收到"需要刷脸"通知 | `alpha-factory login --then-run`，刷完会从断点接着跑 |
 | 想看进度 | `alpha-factory dashboard`（打开本地面板） |
-| 有待批假设（每周一次即可） | `alpha-factory hypotheses list`，然后 `approve ID ...` 或 `reject ID ...` |
+| 想先过目 LLM 的点子（可选） | `factory.yaml` 里 `hypotheses_need_approval: true`，之后 `alpha-factory hypotheses list` / `approve ID` |
 | 有待确认 alpha | `alpha-factory review list`，然后 `review approve ID`（真正提交）或 `review reject ID` |
 
 **提交只会发生在你运行 `review approve` 的时候。** 程序自己永远不提交。
 
 ## 它每天自己做的事
 
-1. 刷新你账号能用的地区、数据集、乘数和 pyramid 进度。
-2. 按期望价值给每个"地区 × 数据集"打分；30% 预算用来探测没摸过的，其余投给有信号的。
-3. 新数据集：字段分家族，每家派代表做一阶探测；50 次内没有 |Sharpe| ≥ 1 就止损。
-4. 有信号的数据集：从灵感库（3,276 篇论文和论坛帖）检索相关内容，LLM 提假设；
-   你批准后，LLM 按假设写表达式，再由另一次调用复核"表达式是否真的实现了假设"。
-5. 回测结果自动分流：强负信号取反；过了扩展门槛的套分组、再套交易条件；
-   没过的按失败原因修（每次只改一个变量，没过微调门槛不许调参数）。
-6. 过了提交门槛的，挑每个数据集最好的两条做稳健性检验（rank、sign、窗口扰动、
-   换中性化、换小股票池），保住一半以上 Sharpe 才算通过。
-7. 平台检查 + 日 PnL 相关性去重 + 组合价值排序，选至多 4 条，LLM 写说明，等你确认。
+1. **选数据集（回测之前，只选一次）**：按资料排序，不花回测。依据是平台 Research Papers
+   是否点名这个数据集、金字塔乘数和你还缺的格子、已有 alpha 数（拥挤度）、你组合里这个类别
+   的占比、地区成本和 Sharpe 门槛。同时做 2 个，停掉一个就按顺序开下一个。
+2. **读懂数据（约 60 次回测）**：字段按近似重复分家族，最大的 10 个家族各派一个代表，
+   跑官方"6 种方法"（中性化关、decay 0，只看多空股票数）：覆盖率、非零、更新周期、
+   取值范围。结果决定每个字段进模版时怎么预处理（补数据多少天、vector 怎么压、要不要去极值）。
+3. **LLM 出点子**：读字段说明和数据画像，加上点名这个数据集的论文、作业区和论坛里最相近的
+   模版，提几个点子。每个点子写明机制、方向、模版、适用字段、窗口、和窗口相配的 decay。
+4. **展开回测**：每个点子按模版展开到它的字段和窗口上，打乱后取至多 60 条。
+5. **LLM 读结果定下一步**：一轮跑完，LLM 看每个点子的 Sharpe 分布、各字段最好成绩、
+   失败原因，逐个判断：有矿就在附近深挖（写变体 + 分组比较）、方向反了就取反、
+   被某个检查卡住就修、没信号就放弃；再决定这个数据集是继续、要新点子、还是放弃。
+6. **停止规则（程序强制，LLM 改不了）**：连续 2 轮没有任何 |Sharpe| ≥ 1、数据集用满
+   1,000 次回测、或交满 8 个，就停，停的原因写在面板上。
+7. **提交前**：过门槛的挑最好的做稳健性检验（rank、sign、窗口扰动、换中性化、换小股票池），
+   保住一半以上 Sharpe 才算过；再过平台检查 + 日收益相关性去重，选至多 4 条，LLM 写说明，等你确认。
+
+预算：并发 10 × 12 小时 × 每小时约 20 次 ≈ 每天 2,400 次（`factory.yaml` 里改）。
 
 ## 文件在哪里
 

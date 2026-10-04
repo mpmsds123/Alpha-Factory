@@ -1,8 +1,16 @@
-"""The LLM's four jobs: hypotheses, expressions, alignment review, descriptions.
+"""The LLM as researcher: it proposes ideas, then reads each round of results and decides
+what happens next. Plus the submission description.
 
-It proposes; code validates, simulates and gates. Every hypothesis must cite the ideas it
-came from, every expression must name the hypothesis it implements, and every call is
-recorded in the ledger with its token usage.
+1. ideas()   dataset understanding (field descriptions + 6-way profile) + papers and
+             forum/homework templates retrieved for this dataset -> a few ideas, each a
+             mechanism with a direction, a template, the fields it applies to, windows
+             and a decay that matches the horizon.
+2. review()  every idea's results for the round -> dig near ore (writing variants), flip
+             a reversed direction, fix a failing check, or drop; and whether the dataset
+             deserves new ideas or is exhausted.
+
+It proposes; code validates, expands, simulates, enforces budgets and stop rules, and
+nothing is submitted without you. Every call is recorded with its token usage.
 """
 
 import json
@@ -11,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from alpha_orchestrator.factory.config import FactoryConfig, load_llm_key
+from alpha_orchestrator.factory.generators import PLACEHOLDER
 from alpha_orchestrator.factory.ledger import Ledger
 from alpha_orchestrator.factory.models import LLMCallORM
 
@@ -20,9 +29,12 @@ SYSTEM = (
     "the platform neutralizes and scales it. Good alphas have an economic story explainable in "
     "one minute, use one dataset (ATOM) where possible, at most 3 data fields and 8 operators, "
     "and only meaningful windows (5, 21, 63, 126, 252 days). Never combine weak signals with "
-    "fitted weights, never add terms only to lower correlation, never invent field names. "
+    "fitted weights, never add terms only to lower correlation, never invent field names, "
+    "never tune parameters just to raise in-sample sharpe. "
     "Answer with a single JSON object only."
 )
+VERDICTS = frozenset({"dig", "flip", "fix", "drop"})
+DECISIONS = frozenset({"continue", "new_ideas", "exhausted"})
 
 Completion = Callable[[str, str, str], tuple[str, int, int]]
 
@@ -32,6 +44,8 @@ class FieldInfo:
     id: str
     type: str
     description: str
+    profile: str = ""
+    prep: str = ""
 
 
 class FactoryLLM:
@@ -88,89 +102,138 @@ class FactoryLLM:
         raise RuntimeError(f"LLM {purpose} failed twice: {last_error}")
 
     # ---------- jobs ----------
-    def propose_hypotheses(
+    def ideas(
         self,
-        cell: dict[str, Any],
+        dataset: dict[str, Any],
         fields: Sequence[FieldInfo],
-        ideas: Sequence[dict[str, str]],
+        references: Sequence[dict[str, str]],
+        operators: Sequence[str],
+        tried: Sequence[dict[str, Any]],
         n: int = 4,
     ) -> list[dict[str, Any]]:
         prompt = {
-            "task": f"Propose {n} distinct, testable economic hypotheses for this dataset.",
-            "dataset": cell,
+            "task": f"Propose {n} distinct, testable alpha ideas for this dataset.",
+            "dataset": dataset,
             "fields": [f.__dict__ for f in fields],
-            "related_ideas": ideas,
+            "references": list(references),
+            "operators": list(operators),
+            "already_tried": list(tried),
             "rules": [
-                "Each hypothesis must be grounded in one or more related_ideas (cite their "
-                "titles in sources) or in the field descriptions; no free invention.",
-                "State the predicted direction: which stocks should outperform and why.",
-                "Use only field ids from `fields`; 1-3 fields per hypothesis.",
+                "Start from the references: a paper naming this dataset, or a template that "
+                "worked on similar data, adapted to these fields. Cite reference titles in "
+                "sources; 'field descriptions' is allowed only with a concrete mechanism.",
+                "mechanism: what economic behaviour the signal captures and why it predicts "
+                "returns; direction: which stocks go long.",
+                "template: a FASTEXPR expression where {A}, {B}, {C} stand for fields and "
+                "{w} for a window. Code substitutes each field already prepared (its `prep`: "
+                "backfill, vector reduction, winsorize), so do not wrap placeholders in "
+                "ts_backfill or vec_* yourself. At most 3 placeholders, 8 operators.",
+                "slots: for each placeholder the field ids it may take, all from `fields`, "
+                "chosen because the mechanism applies to them (not every field).",
+                "windows: from 5, 21, 63, 126, 252, never shorter than the field's update "
+                "period. decay: consistent with the horizon of the template (a 5-day signal "
+                "with decay 20 pulls in information the idea never used).",
+                "neutralization: one of MARKET, SECTOR, INDUSTRY, SUBINDUSTRY.",
+                "Do not repeat already_tried ideas; learn from why they were dropped.",
             ],
             "output": {
-                "hypotheses": [
+                "ideas": [
                     {
                         "title": "short name",
-                        "statement": "one paragraph",
+                        "mechanism": "one paragraph",
                         "direction": "high X -> long",
-                        "fields": ["field_id"],
-                        "sources": ["idea title"],
+                        "sources": ["reference title"],
+                        "template": "group_rank(ts_delta({A}, {w}), industry)",
+                        "slots": {"A": ["field_id"]},
+                        "windows": [21, 63],
+                        "decay": 0,
+                        "neutralization": "INDUSTRY",
                     }
                 ]
             },
         }
-        data = self.ask("hypotheses", json.dumps(prompt, ensure_ascii=False), strong=True)
+        data = self.ask("ideas", json.dumps(prompt, ensure_ascii=False), strong=True)
         known = {f.id for f in fields}
         out = []
-        for h in data.get("hypotheses") or []:
-            used = [f for f in h.get("fields") or [] if f in known]
-            if h.get("title") and h.get("statement") and used:
-                out.append({**h, "fields": used, "sources": list(h.get("sources") or [])})
+        for idea in data.get("ideas") or []:
+            parsed = _parse_idea(idea, known)
+            if parsed:
+                out.append(parsed)
         return out
 
-    def write_expressions(
+    def review(
         self,
-        hypothesis: dict[str, Any],
-        fields: Sequence[FieldInfo],
+        dataset: dict[str, Any],
+        ideas: Sequence[dict[str, Any]],
         operators: Sequence[str],
-        history: Sequence[dict[str, Any]],
-        n: int = 6,
-    ) -> list[dict[str, str]]:
+        fields: Sequence[FieldInfo],
+        dig_per_idea: int,
+    ) -> dict[str, Any]:
         prompt = {
-            "task": f"Write {n} FASTEXPR expressions that implement this hypothesis.",
-            "hypothesis": hypothesis,
+            "task": "Read this round's results and decide the next step for every idea, "
+            "then for the dataset.",
+            "dataset": dataset,
+            "ideas": list(ideas),
             "fields": [f.__dict__ for f in fields],
             "operators": list(operators),
-            "previous_attempts": list(history),
-            "rules": [
-                "Only the listed operators and field ids. VECTOR fields must be reduced with a "
-                "vec_* operator first. Sparse fundamentals/analyst data need ts_backfill(x, 63) "
-                "first.",
-                "Each expression must differ structurally (operator skeleton or field), not only "
-                "in window length.",
-                "If previous_attempts exist, learn from their metrics and failing checks; do not "
-                "repeat an expression; do not tune parameters of an attempt with sharpe < 1.4.",
-                "Prefer cross-sectional comparison inside groups (group_rank/group_zscore by "
-                "industry or subindustry) when the field has strong industry structure.",
-            ],
-            "output": {"expressions": [{"expression": "...", "rationale": "one sentence"}]},
+            "verdicts": {
+                "dig": "ore found (|sharpe| at or above the ore line with a sensible "
+                f"turnover): write up to {dig_per_idea} variants near the best expressions "
+                "that test the mechanism more precisely (another related field, a group "
+                "comparison, a conditioning event with trade_when, a residual against a "
+                "control) - not window tuning. Use raw field ids with the same preparation "
+                "the best expressions show.",
+                "flip": "results are consistently and strongly negative: the direction was "
+                "reversed; code will negate the best ones.",
+                "fix": "positive signal blocked by one check; name it in `fix`: turnover, "
+                "concentration or sub_universe.",
+                "drop": "no signal or no consistent sign: say what that tells us.",
+            },
+            "dataset_decision": {
+                "continue": "keep working the ideas that dig/flip/fix",
+                "new_ideas": "the ideas are dropped but the data still looks promising: ask "
+                "for new ideas",
+                "exhausted": "stop this dataset; say why",
+            },
+            "output": {
+                "ideas": [
+                    {
+                        "id": "idea id",
+                        "verdict": "dig|flip|fix|drop",
+                        "reason": "one or two sentences citing the numbers",
+                        "fix": "turnover|concentration|sub_universe",
+                        "expressions": [{"expression": "...", "why": "one sentence"}],
+                    }
+                ],
+                "dataset": {"decision": "continue|new_ideas|exhausted", "reason": "..."},
+            },
         }
-        data = self.ask("expressions", json.dumps(prompt, ensure_ascii=False))
-        return [
-            e
-            for e in data.get("expressions") or []
-            if isinstance(e, dict) and isinstance(e.get("expression"), str)
-        ]
-
-    def aligned(self, hypothesis: dict[str, Any], expression: str) -> tuple[bool, str]:
-        prompt = {
-            "task": "Does this expression actually implement the hypothesis, with the stated "
-            "direction? Be strict: a missing component or reversed sign is a no.",
-            "hypothesis": hypothesis,
-            "expression": expression,
-            "output": {"consistent": True, "reason": "one sentence"},
+        data = self.ask("review", json.dumps(prompt, ensure_ascii=False), strong=True)
+        verdicts = []
+        for v in data.get("ideas") or []:
+            if not isinstance(v, dict) or v.get("verdict") not in VERDICTS:
+                continue
+            exprs = [
+                e
+                for e in v.get("expressions") or []
+                if isinstance(e, dict) and isinstance(e.get("expression"), str)
+            ][:dig_per_idea]
+            verdicts.append(
+                {
+                    "id": str(v.get("id", "")),
+                    "verdict": str(v["verdict"]),
+                    "reason": str(v.get("reason", "")),
+                    "fix": str(v.get("fix", "")),
+                    "expressions": exprs,
+                }
+            )
+        ds_raw = data.get("dataset")
+        ds: dict[str, Any] = ds_raw if isinstance(ds_raw, dict) else {}
+        decision = ds.get("decision") if ds.get("decision") in DECISIONS else "continue"
+        return {
+            "ideas": verdicts,
+            "dataset": {"decision": decision, "reason": str(ds.get("reason", ""))},
         }
-        data = self.ask("alignment", json.dumps(prompt, ensure_ascii=False))
-        return bool(data.get("consistent")), str(data.get("reason", ""))
 
     def describe(self, alpha: dict[str, Any]) -> str:
         prompt = {
@@ -181,3 +244,32 @@ class FactoryLLM:
         }
         data = self.ask("description", json.dumps(prompt, ensure_ascii=False))
         return str(data.get("description", "")).strip()
+
+
+def _parse_idea(idea: Any, known: set[str]) -> dict[str, Any] | None:
+    """Keeps an idea only if every placeholder has at least one real field."""
+    if not isinstance(idea, dict) or not idea.get("title") or not idea.get("mechanism"):
+        return None
+    template = str(idea.get("template") or "")
+    raw_slots = idea.get("slots")
+    raw: dict[str, Any] = raw_slots if isinstance(raw_slots, dict) else {}
+    needed = {p for p in PLACEHOLDER.findall(template) if p != "w"}
+    slots = {p: [f for f in raw.get(p) or [] if isinstance(f, str) and f in known] for p in needed}
+    if not needed or any(not v for v in slots.values()):
+        return None
+    windows = [int(w) for w in idea.get("windows") or [] if str(w).isdigit() and int(w) > 0]
+    try:
+        decay = int(idea.get("decay") or 0)
+    except (TypeError, ValueError):
+        decay = 0
+    return {
+        "title": str(idea["title"])[:255],
+        "mechanism": str(idea["mechanism"]),
+        "direction": str(idea.get("direction", "")),
+        "sources": [str(x) for x in idea.get("sources") or []],
+        "template": template,
+        "slots": slots,
+        "windows": windows or [63],
+        "decay": max(0, min(decay, 30)),
+        "neutralization": str(idea.get("neutralization") or "").upper(),
+    }

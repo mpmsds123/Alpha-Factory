@@ -10,7 +10,6 @@ from typing import Any
 from sqlalchemy import func, select
 
 from alpha_orchestrator.brain.session import SessionStore
-from alpha_orchestrator.factory.catalog import cell_stats
 from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ledger import Ledger
 from alpha_orchestrator.factory.models import (
@@ -23,7 +22,6 @@ from alpha_orchestrator.factory.models import (
     ReviewORM,
     ReviewStatus,
 )
-from alpha_orchestrator.factory.scoring import expected_value, hit_probability
 
 CSS = """
 :root{--bg:#f4f6f8;--card:#fff;--ink:#17202a;--muted:#5e6b78;--line:#dfe5eb;--accent:#1f5fae;
@@ -43,7 +41,7 @@ text-align:left;vertical-align:top}th{color:var(--muted);font-weight:500;backgro
 td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 code{font:12px ui-monospace,Menlo,monospace;background:var(--code);padding:1px 5px;border-radius:4px;word-break:break-all}
 .pill{display:inline-block;padding:0 8px;border-radius:99px;font-size:12px;font-weight:600}
-.SIGNAL,.ok{color:var(--good)}.KILLED,.bad{color:var(--bad)}.PROBING,.NEW,.PROFILED,.warn{color:var(--warn)}
+.RESEARCH,.APPROVED,.ok{color:var(--good)}.EXHAUSTED,.RETIRED,.bad{color:var(--bad)}.STUDYING,.NEW,.PROPOSED,.warn{color:var(--warn)}
 .alert{background:var(--card);border:1px solid var(--bad);border-radius:8px;padding:12px 14px;margin-top:14px}
 """
 
@@ -79,7 +77,7 @@ def render(ledger: Ledger, config: FactoryConfig, out: Path) -> Path:
             )
         )
         cells = {c.cell_id: c for c in s.scalars(select(CellORM))}
-        stats = cell_stats(s)
+        all_hyps = list(s.scalars(select(HypothesisORM)))
         last_day = s.scalar(
             select(EventORM)
             .where(EventORM.kind == "day_done")
@@ -124,9 +122,9 @@ def render(ledger: Ledger, config: FactoryConfig, out: Path) -> Path:
         ("待批假设", len(hyps)),
         ("已提交（累计）", submitted),
         (
-            "有信号 / 已止损 / 探测中",
-            f"{states.get('SIGNAL', 0)} / {states.get('KILLED', 0)} / "
-            f"{states.get('PROBING', 0) + states.get('PROFILED', 0)}",
+            "读数据中 / 研究中 / 已停",
+            f"{states.get('STUDYING', 0)} / {states.get('RESEARCH', 0)} / "
+            f"{states.get('EXHAUSTED', 0) + states.get('SATURATED', 0)}",
         ),
         ("平台剩余配额", quota if quota is not None else "–"),
         ("今日 LLM tokens", f"{(tokens[0] or 0) + (tokens[1] or 0):,}"),
@@ -205,20 +203,50 @@ def render(ledger: Ledger, config: FactoryConfig, out: Path) -> Path:
             + "</table></div>"
         )
 
-    parts.append("<h2>挖掘地图（按期望价值）</h2>")
-    ranked = sorted(stats, key=lambda st: -expected_value(st, config))[:60]
+    parts.append("<h2>数据集研究记录（进行中 + 最近停掉的）</h2>")
+    working = [x for x in cells.values() if x.state in ("STUDYING", "RESEARCH")]
+    stopped = sorted(
+        (x for x in cells.values() if x.state in ("EXHAUSTED", "SATURATED") and x.sims_used),
+        key=lambda x: x.updated_at,
+        reverse=True,
+    )[:4]
+    if working or stopped:
+        for cell in sorted(working, key=lambda x: -x.rank_score) + stopped:
+            ideas = [h for h in all_hyps if h.cell_id == cell.cell_id and h.rounds]
+            rows = "".join(
+                f"<tr><td><span class='pill {h.status}'>{_e(h.status)}</span></td>"
+                f"<td><b>{_e(h.title)}</b><div class='muted'>{_e(h.statement[:300])}</div>"
+                f"<code>{_e(h.template)}</code></td><td class='n'>{h.rounds}</td>"
+                f"<td class='n'>{_f(h.best_sharpe)}</td>"
+                f"<td>{_e((h.verdicts or [{}])[-1].get('verdict', ''))}"
+                f"<div class='muted'>{_e((h.verdicts or [{}])[-1].get('reason', ''))}</div></td></tr>"
+                for h in ideas
+            )
+            parts.append(
+                f"<p><b>{_e(cell.dataset_id)}</b> <span class='muted'>{_e(cell.region)} · {_e(cell.category)}"
+                f" · {_e(cell.state)} {_e(cell.stop_reason)} · 已用 {cell.sims_used} 次回测 · 第 {cell.rounds} 轮 · "
+                f"连续无矿 {cell.rounds_without_ore} 轮 · 有矿结果 {cell.hits} 条</span></p>"
+                "<div class='wrap'><table><tr><th>状态</th><th>点子</th><th>轮次</th>"
+                f"<th>最好 Sharpe</th><th>LLM 最近判断</th></tr>{rows}</table></div>"
+            )
+    else:
+        parts.append("<p class='muted'>暂无。</p>")
+
+    parts.append("<h2>数据集队列（回测前按资料排序）</h2>")
+    queue = sorted(cells.values(), key=lambda c: -c.rank_score)[:60]
     rows = "".join(
-        f"<tr><td>{_e(st.region)}</td><td>{_e(cells[st.cell_id].dataset_id)}</td><td>{_e(st.category)}</td>"
-        f"<td><span class='pill {st.state}'>{_e(st.state)}</span></td><td class='n'>{st.multiplier:.2f}</td>"
-        f"<td class='n'>{st.alpha_count}</td><td class='n'>{st.probes}</td><td class='n'>{st.hits}</td>"
-        f"<td class='n'>{hit_probability(st) * 100:.1f}%</td><td class='n'>{expected_value(st, config):.3f}</td>"
-        f"<td class='n'>{st.pyramid_submitted}</td></tr>"
-        for st in ranked
+        f"<tr><td>{_e(c.region)}</td><td>{_e(c.dataset_id)}</td><td>{_e(c.category)}</td>"
+        f"<td><span class='pill {c.state}'>{_e(c.state)}</span>"
+        f"<div class='muted'>{_e(c.stop_reason)}</div></td>"
+        f"<td class='n'>{c.rank_score:.3f}</td><td class='n'>{c.paper_refs}</td>"
+        f"<td class='n'>{c.multiplier:.2f}</td><td class='n'>{c.alpha_count}</td>"
+        f"<td class='muted'>{_e(', '.join(f'{k} {v}' for k, v in (c.rank_reason or {}).items()))}</td></tr>"
+        for c in queue
     )
     parts.append(
         "<div class='wrap'><table><tr><th>地区</th><th>数据集</th><th>类别</th><th>状态</th>"
-        "<th>乘数</th><th>已有 alpha</th><th>探测</th><th>命中</th><th>命中概率</th><th>期望价值</th>"
-        f"<th>pyramid 已交</th></tr>{rows}</table></div>"
+        "<th>得分</th><th>论文提及</th><th>乘数</th><th>已有 alpha</th><th>各项因子</th>"
+        f"</tr>{rows}</table></div>"
     )
 
     parts.append(

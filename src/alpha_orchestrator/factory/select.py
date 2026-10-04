@@ -7,13 +7,13 @@ only path that calls submit.
 
 import math
 from datetime import UTC, datetime
+from itertools import pairwise
 from typing import Any
 
 from sqlalchemy import func, select
 
 from alpha_orchestrator.brain.api import BrainAPI
 from alpha_orchestrator.domain.models import utc_now
-from alpha_orchestrator.factory.catalog import cell_stats
 from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ledger import Ledger
 from alpha_orchestrator.factory.llm import FactoryLLM
@@ -24,15 +24,16 @@ from alpha_orchestrator.factory.models import (
     ReviewORM,
     ReviewStatus,
 )
-from alpha_orchestrator.factory.scoring import value_if_hit
 
 
 def pnl_corr(a: dict[str, float], b: dict[str, float]) -> float:
+    """Correlation of daily PnL changes. The platform's series is cumulative, and two
+    upward-sloping cumulative curves correlate highly whatever they hold."""
     keys = sorted(set(a) & set(b))
-    if len(keys) < 60:
+    if len(keys) < 61:
         return 0.0
-    x = [a[k] for k in keys]
-    y = [b[k] for k in keys]
+    x = [a[k] - a[p] for p, k in pairwise(keys)]
+    y = [b[k] - b[p] for p, k in pairwise(keys)]
     mx, my = sum(x) / len(x), sum(y) / len(y)
     sxy = sum((i - mx) * (j - my) for i, j in zip(x, y, strict=True))
     sxx = sum((i - mx) ** 2 for i in x)
@@ -70,15 +71,14 @@ def select_today(
                 )
             )
         ]
-        stats = {c.cell_id: c for c in cell_stats(s)}
+        value_of = {c.cell_id: c.rank_score or 1.0 for c in s.scalars(select(CellORM))}
         pool: list[tuple[str, str, float, bool, int, float]] = []
         for c in s.scalars(select(CandidateORM).where(CandidateORM.status == "DONE")):
             if c.id in reviewed or not c.extra.get("ready") or not c.alpha_id:
                 continue
             if not (c.extra.get("robust") or {}).get("pass"):
                 continue
-            st = stats.get(c.cell_id)
-            value = value_if_hit(st, config) if st else 1.0
+            value = value_of.get(c.cell_id, 1.0)
             pool.append(
                 (
                     c.id,
