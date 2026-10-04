@@ -58,6 +58,22 @@ def test_same_cookie_name_on_two_domains_round_trips(tmp_path: Path) -> None:
     # files written by the earlier version still load
     store.cookies_path.write_text(json.dumps({"t": "old"}))
     assert [c.value for c in store.load_cookies().jar] == ["old"]
+    # a stale domain-less copy next to the server's cookie is dropped, on load and on save
+    store.cookies_path.write_text(
+        json.dumps(
+            [
+                {"name": "t", "value": "stale", "domain": "", "path": "/"},
+                {"name": "t", "value": "fresh", "domain": ".api.worldquantbrain.com", "path": "/"},
+            ]
+        )
+    )
+    loaded = store.load_cookies()
+    assert [c.value for c in loaded.jar] == ["fresh"]
+    mixed = httpx.Cookies()
+    mixed.set("t", "stale")
+    mixed.set("t", "fresh", domain=".api.worldquantbrain.com")
+    store.save_cookies(mixed)
+    assert [c["value"] for c in json.loads(store.cookies_path.read_text())] == ["fresh"]
 
 
 def test_persona_challenge_raises_with_url(tmp_path: Path) -> None:
