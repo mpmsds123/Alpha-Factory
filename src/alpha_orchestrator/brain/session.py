@@ -52,6 +52,14 @@ class Credentials:
         raise AuthenticationFailed(f"Credentials file has no email/password: {source}")
 
 
+def _current(cookies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop a domain-less cookie when the server has set the same name with a domain: the
+    domain-less one is a stale copy from an older cookie file, and sending both makes the
+    platform read the stale one (seen 2026-10-04: 204 with it, 200 without)."""
+    with_domain = {c["name"] for c in cookies if c.get("domain")}
+    return [c for c in cookies if c.get("domain") or c["name"] not in with_domain]
+
+
 class SessionStore:
     """Cookies and login bookkeeping kept outside the repository, readable only by you."""
 
@@ -69,7 +77,7 @@ class SessionStore:
             for name, value in data.items():
                 jar.set(str(name), str(value))
             return jar
-        for c in data:
+        for c in _current(data):
             jar.set(
                 str(c["name"]),
                 str(c["value"]),
@@ -82,10 +90,12 @@ class SessionStore:
         """Every cookie with its domain and path: the platform sets the same name (`t`)
         for more than one domain, so name alone is not a key."""
         self.dir.mkdir(parents=True, exist_ok=True)
-        payload = [
-            {"name": c.name, "value": c.value, "domain": c.domain, "path": c.path}
-            for c in cookies.jar
-        ]
+        payload = _current(
+            [
+                {"name": c.name, "value": c.value, "domain": c.domain, "path": c.path}
+                for c in cookies.jar
+            ]
+        )
         self.cookies_path.write_text(json.dumps(payload))
         self.cookies_path.chmod(0o600)
 
