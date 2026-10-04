@@ -72,6 +72,21 @@ class Simulator:
         self.clock = clock
         self.poll_interval = poll_interval
         self._last_batch_at = -1e9
+        self.slots = min(config.budget.slots, self._learned_limit() or config.budget.slots)
+
+    def _learned_limit(self) -> int | None:
+        """The concurrency the platform accepted last time it refused more (kept in the
+        ledger, so every later run starts within the platform's rule)."""
+        from alpha_orchestrator.factory.models import EventORM
+
+        with self.ledger.session() as s:
+            event = s.scalar(
+                select(EventORM)
+                .where(EventORM.kind == "concurrency_limit")
+                .order_by(EventORM.id.desc())
+                .limit(1)
+            )
+            return int(event.payload["batches"]) if event else None
 
     # ---------- public ----------
     def run(self, sim_budget: int, deadline: float | None = None) -> RunStats:
@@ -87,12 +102,18 @@ class Simulator:
                 and (remaining_quota is None or remaining_quota > QUOTA_RESERVE)
                 and (deadline is None or self.clock() < deadline)
             )
-            if can_start and len(inflight) < self.config.budget.slots:
+            if can_start and len(inflight) < self.slots:
                 launched = self._launch_one(sim_budget - started)
                 if launched > 0:
                     started += launched
                     stats.batches += 1
                     refusals = 0
+                    continue
+                if launched == REFUSED and inflight:
+                    # The platform's limit is what is running now: obey it from here on.
+                    self.slots = len(inflight)
+                    with self.ledger.session() as s:
+                        self.ledger.log(s, "concurrency_limit", batches=self.slots)
                     continue
                 if launched == REFUSED:
                     refusals += 1

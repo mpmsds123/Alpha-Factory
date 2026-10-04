@@ -1,43 +1,46 @@
-"""Reading a dataset before researching it: the official "6 ways" (零基础课 第2课,
-cnhkmcp brain-dataset-exploration).
+"""Health check and survey formulas.
 
-Each probe runs with neutralization NONE and decay 0, and only the Long Count + Short
-Count of the IS summary is read, never the PnL. Per representative field:
+Health check (by sampling, neutralization NONE, decay 0, only long + short counts read):
 
-    cov    x                              how many stocks have a value
-    nz     x != 0 ? 1 : 0                 real values vs. zeros filling gaps
-    upd5   ts_std_dev(x, 5) != 0 ? 1 : 0  changed within a week   -> updates ~daily
-    upd22  ts_std_dev(x, 22) != 0 ? 1 : 0 changed within a month  -> ~weekly/monthly
-    upd66  ts_std_dev(x, 66) != 0 ? 1 : 0 changed within a quarter -> ~quarterly
-    big    abs(x) > 1                     values beyond +-1: not pre-normalised
+    raw     x                                 how many stocks have a value on a day
+    upd5    ts_std_dev(x, 5) != 0 ? 1 : 0     changed within a week
+    upd22   ts_std_dev(x, 22) != 0 ? 1 : 0    changed within a month
+    upd66   ts_std_dev(x, 66) != 0 ? 1 : 0    changed within a quarter
+    filled  ts_backfill(x, 1.5 x period)      stocks with a value at least once per period
 
-The readings decide how the field enters every template (`prep`): which vector reducer,
-whether and how far to backfill, whether to winsorize. They do not score the dataset.
+"Coverage" means the last one. A quarterly field that only has a value on its release
+day shows a tiny daily coverage; filled to one period it shows the real breadth.
+
+Survey: four fixed shapes per family, windows set from the measured update period, so
+every family is measured with the same ruler and compared with noise.
 """
 
 from typing import Any
 
-PROBES = (
-    ("cov", "{x}"),
-    ("nz", "{x} != 0 ? 1 : 0"),
-    ("upd5", "ts_std_dev({x}, 5) != 0 ? 1 : 0"),
-    ("upd22", "ts_std_dev({x}, 22) != 0 ? 1 : 0"),
-    ("upd66", "ts_std_dev({x}, 66) != 0 ? 1 : 0"),
-    ("big", "abs({x}) > 1"),
-)
-# News-like data loses meaning when carried forward (第4课: 前年的新闻对今年没用).
-TIME_SENSITIVE = frozenset({"news", "socialmedia", "sentiment"})
+WINDOWS = (5, 21, 63, 126, 252)
 CADENCE_LIMITS = (("daily", 5), ("weekly", 12), ("monthly", 30), ("quarterly", 95))
-BACKFILL_FOR = {"daily": 5, "weekly": 22, "monthly": 66, "quarterly": 132, "slow": 252}
 
 
 def base(field_id: str, field_type: str) -> str:
     return f"vec_avg({field_id})" if field_type == "VECTOR" else field_id
 
 
-def probe_expressions(field_id: str, field_type: str) -> list[tuple[str, str]]:
+def health_probes(field_id: str, field_type: str) -> list[tuple[str, str]]:
     x = base(field_id, field_type)
-    return [(name, template.format(x=x)) for name, template in PROBES]
+    return [
+        ("raw", x),
+        ("upd5", f"ts_std_dev({x}, 5) != 0 ? 1 : 0"),
+        ("upd22", f"ts_std_dev({x}, 22) != 0 ? 1 : 0"),
+        ("upd66", f"ts_std_dev({x}, 66) != 0 ? 1 : 0"),
+    ]
+
+
+def fill_window(period_days: float) -> int:
+    return int(min(252, max(5, round(1.5 * period_days))))
+
+
+def filled_probe(field_id: str, field_type: str, period_days: float) -> tuple[str, str]:
+    return "filled", f"ts_backfill({base(field_id, field_type)}, {fill_window(period_days)})"
 
 
 def universe_size(universe: str) -> int | None:
@@ -45,57 +48,62 @@ def universe_size(universe: str) -> int | None:
     return int(digits) if universe.startswith("TOP") and digits else None
 
 
-def interpret(counts: dict[str, int | None], universe: str) -> dict[str, Any]:
-    """`counts[name]` = long + short count of that probe (None if it failed)."""
-    cov = counts.get("cov") or 0
-    size = universe_size(universe) or max(cov, 1)
+def period_from(counts: dict[str, int | None]) -> float:
+    """A field changing every P days is non-flat in an N-day window ~min(N/P, 1) of the
+    time; the widest unsaturated window gives P ~ N / share."""
+    raw = counts.get("raw") or 0
+    if not raw:
+        return 999.0
 
     def share(name: str) -> float:
-        value = counts.get(name)
-        return round((value or 0) / cov, 3) if cov else 0.0
+        return (counts.get(name) or 0) / raw
 
-    # A field that changes every P days is non-flat in an N-day window about min(N/P, 1)
-    # of the time, so the widest unsaturated window gives P ~ N / share.
     r5, r22, r66 = share("upd5"), share("upd22"), share("upd66")
     if r5 >= 0.9:
-        period = 1.0
-    elif r22 >= 0.9:
-        period = 5 / max(r5, 1e-3)
-    elif r66 >= 0.9:
-        period = 22 / max(r22, 1e-3)
-    else:
-        period = 66 / r66 if r66 > 0 else 999.0
-    cadence = next((name for name, limit in CADENCE_LIMITS if period <= limit), "slow")
-    return {
-        "coverage": round(min(cov / size, 1.0), 3),
-        "nonzero": share("nz"),
-        "cadence": cadence,
-        "period_days": round(min(period, 999.0), 1),
-        "beyond_one": share("big"),
-        "normalised": share("big") < 0.02,
-    }
+        return 1.0
+    if r22 >= 0.9:
+        return 5 / max(r5, 1e-3)
+    if r66 >= 0.9:
+        return 22 / max(r22, 1e-3)
+    return 66 / r66 if r66 > 0 else 999.0
 
 
-def prep_for(field_id: str, field_type: str, category: str, profile: dict[str, Any]) -> str:
-    """How the field enters templates. `{x}` in a template is replaced by this."""
+def cadence(period_days: float) -> str:
+    return next((name for name, limit in CADENCE_LIMITS if period_days <= limit), "slow")
+
+
+def snap(days: float) -> int:
+    return min(WINDOWS, key=lambda w: abs(w - days))
+
+
+def prep_for(field_id: str, field_type: str, profile: dict[str, Any]) -> str:
+    """How the field enters every formula: filled to one update period when it does not
+    update daily or when filling adds coverage; otherwise as is."""
     x = base(field_id, field_type)
-    if not profile:
-        return f"ts_backfill({x}, 66)" if category.lower() not in TIME_SENSITIVE else x
-    cadence = str(profile.get("cadence", "daily"))
-    sparse = float(profile.get("coverage", 1.0)) < 0.9 or cadence != "daily"
-    if sparse and category.lower() not in TIME_SENSITIVE:
-        x = f"ts_backfill({x}, {BACKFILL_FOR[cadence]})"
-    if not profile.get("normalised", True):
-        x = f"winsorize({x}, std=4)"
+    raw = float(profile.get("raw_coverage") or 0.0)
+    filled = float(profile.get("filled_coverage") or 0.0)
+    period = float(profile.get("period_days") or 66.0)
+    if filled > raw * 1.1 or period > 5:
+        return f"ts_backfill({x}, {fill_window(period)})"
     return x
 
 
+def survey_shapes(x: str, period_days: float) -> list[tuple[str, str]]:
+    change = snap(max(5.0, period_days))
+    history = min(252, snap(max(21.0, 4 * period_days)))
+    return [
+        ("level", f"rank({x})"),
+        ("change", f"rank(ts_delta({x}, {change}))"),
+        ("history", f"rank(ts_zscore({x}, {history}))"),
+        ("peer", f"group_rank({x}, industry)"),
+    ]
+
+
 def describe(profile: dict[str, Any]) -> str:
-    """One line for the LLM."""
     if not profile:
-        return "not probed"
+        return "not checked"
     return (
-        f"coverage {profile['coverage']:.0%}, non-zero {profile['nonzero']:.0%}, "
-        f"updates {profile['cadence']}, "
-        + ("values within +-1" if profile["normalised"] else "values beyond +-1 (unscaled)")
+        f"updates {cadence(float(profile.get('period_days', 999)))}"
+        f" (~{profile.get('period_days')} days), coverage after filling "
+        f"{float(profile.get('filled_coverage') or 0):.0%}"
     )

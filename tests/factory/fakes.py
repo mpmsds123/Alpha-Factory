@@ -21,8 +21,15 @@ class FakeBrainAPI:
     """`metrics(expression, settings)` returns an IS dict, or None to make the child fail."""
 
     def __init__(
-        self, metrics: Metrics, *, polls_before_done: int = 1, refuse_first: int = 0
+        self,
+        metrics: Metrics,
+        *,
+        polls_before_done: int = 1,
+        refuse_first: int = 0,
+        max_running: int | None = None,
     ) -> None:
+        self.max_running = max_running
+        self.finished: set[str] = set()
         self.metrics = metrics
         self.client = _Client()
         self.polls_before_done = polls_before_done
@@ -41,6 +48,8 @@ class FakeBrainAPI:
         if self.refuse_first > 0:
             self.refuse_first -= 1
             raise ValueError("CONCURRENT_SIMULATION_LIMIT_EXCEEDED")
+        if self.max_running is not None and len(set(self.sims) - self.finished) >= self.max_running:
+            raise ValueError("CONCURRENT_SIMULATION_LIMIT_EXCEEDED")
         self.started += len(payloads)
         location = f"/simulations/M{len(self.sims)}"
         self.sims[location] = payloads
@@ -51,6 +60,7 @@ class FakeBrainAPI:
         self.polls[location] += 1
         if self.polls[location] <= self.polls_before_done:
             return SimulationProgress(done=False, status="RUNNING")
+        self.finished.add(location)
         kids = []
         for i, payload in enumerate(self.sims[location]):
             child_id = f"{location.rsplit('/', 1)[1]}c{i}"
@@ -142,8 +152,16 @@ def is_metrics(
 class FakePlatform(FakeBrainAPI):
     """FakeBrainAPI plus catalog endpoints, for whole-day tests."""
 
-    def __init__(self, metrics: Metrics, datasets: dict[str, list[dict[str, Any]]]) -> None:
-        super().__init__(metrics, polls_before_done=0)
+    def __init__(
+        self,
+        metrics: Metrics,
+        datasets: dict[str, list[dict[str, Any]]],
+        categories: dict[str, str] | None = None,
+        **kw: Any,
+    ) -> None:
+        kw.setdefault("polls_before_done", 0)
+        super().__init__(metrics, **kw)
+        self._categories = categories or {}
         self._datasets = datasets
 
     def simulation_options(self) -> dict[str, Any]:
@@ -160,7 +178,7 @@ class FakePlatform(FakeBrainAPI):
             {
                 "id": ds,
                 "name": ds,
-                "category": {"id": "analyst"},
+                "category": {"id": self._categories.get(ds, "analyst")},
                 "fieldCount": 10 + len(f),
                 "pyramidMultiplier": 1.3,
                 "alphaCount": 5,
@@ -194,6 +212,8 @@ class FakePlatform(FakeBrainAPI):
             "ts_decay_linear",
             "abs",
             "winsorize",
+            "bucket",
+            "group_zscore",
         ]
         return [{"name": n, "definition": f"{n}(x)", "scope": ["REGULAR"]} for n in names]
 

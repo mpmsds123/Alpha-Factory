@@ -1,16 +1,16 @@
-"""The LLM as researcher: it proposes ideas, then reads each round of results and decides
-what happens next. Plus the submission description.
+"""DeepSeek's three jobs, each one a decision plain templates cannot make.
 
-1. ideas()   dataset understanding (field descriptions + 6-way profile) + papers and
-             forum/homework templates retrieved for this dataset -> a few ideas, each a
-             mechanism with a direction, a template, the fields it applies to, windows
-             and a decay that matches the horizon.
-2. review()  every idea's results for the round -> dig near ore (writing variants), flip
-             a reversed direction, fix a failing check, or drop; and whether the dataset
-             deserves new ideas or is exhausted.
+1. group_fields()  sort a dataset's field families into economic concepts (strata) by
+                   reading names and descriptions, so sampling has meaningful layers.
+                   Cheap model; only used when field names do not show the structure.
+2. combinations()  inside the strata that showed signal, pick which pairs of fields to
+                   combine and how, by what they mean. Millions of pairs exist and none
+                   has been tested, so statistics alone cannot choose. Every LLM combination
+                   is simulated next to the same number of random ones; if it does not
+                   beat random, it stops getting budget.
+3. describe()      the submission description.
 
-It proposes; code validates, expands, simulates, enforces budgets and stop rules, and
-nothing is submitted without you. Every call is recorded with its token usage.
+Code validates, simulates, gates and decides budgets; nothing is submitted without you.
 """
 
 import json
@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from alpha_orchestrator.factory.config import FactoryConfig, load_llm_key
-from alpha_orchestrator.factory.generators import PLACEHOLDER
 from alpha_orchestrator.factory.ledger import Ledger
 from alpha_orchestrator.factory.models import LLMCallORM
 
@@ -33,8 +32,6 @@ SYSTEM = (
     "never tune parameters just to raise in-sample sharpe. "
     "Answer with a single JSON object only."
 )
-VERDICTS = frozenset({"dig", "flip", "fix", "drop"})
-DECISIONS = frozenset({"continue", "new_ideas", "exhausted"})
 
 Completion = Callable[[str, str, str], tuple[str, int, int]]
 
@@ -102,138 +99,63 @@ class FactoryLLM:
         raise RuntimeError(f"LLM {purpose} failed twice: {last_error}")
 
     # ---------- jobs ----------
-    def ideas(
-        self,
-        dataset: dict[str, Any],
-        fields: Sequence[FieldInfo],
-        references: Sequence[dict[str, str]],
-        operators: Sequence[str],
-        tried: Sequence[dict[str, Any]],
-        n: int = 4,
-    ) -> list[dict[str, Any]]:
+    def group_fields(
+        self, dataset: dict[str, Any], families: Sequence[dict[str, str]], max_groups: int = 40
+    ) -> dict[str, str]:
+        """family -> stratum name. Families the model leaves out keep no stratum."""
         prompt = {
-            "task": f"Propose {n} distinct, testable alpha ideas for this dataset.",
+            "task": f"Group these field families of one dataset into at most {max_groups} "
+            "economic concepts (for example: EPS estimate level, EPS revisions, forecast "
+            "dispersion, number of analysts, target price). Families measuring the same "
+            "thing in different units or horizons belong together.",
             "dataset": dataset,
-            "fields": [f.__dict__ for f in fields],
-            "references": list(references),
-            "operators": list(operators),
-            "already_tried": list(tried),
-            "rules": [
-                "Start from the references: a paper naming this dataset, or a template that "
-                "worked on similar data, adapted to these fields. Cite reference titles in "
-                "sources; 'field descriptions' is allowed only with a concrete mechanism.",
-                "mechanism: what economic behaviour the signal captures and why it predicts "
-                "returns; direction: which stocks go long.",
-                "template: a FASTEXPR expression where {A}, {B}, {C} stand for fields and "
-                "{w} for a window. Code substitutes each field already prepared (its `prep`: "
-                "backfill, vector reduction, winsorize), so do not wrap placeholders in "
-                "ts_backfill or vec_* yourself. At most 3 placeholders, 8 operators.",
-                "slots: for each placeholder the field ids it may take, all from `fields`, "
-                "chosen because the mechanism applies to them (not every field).",
-                "windows: from 5, 21, 63, 126, 252, never shorter than the field's update "
-                "period. decay: consistent with the horizon of the template (a 5-day signal "
-                "with decay 20 pulls in information the idea never used).",
-                "neutralization: one of MARKET, SECTOR, INDUSTRY, SUBINDUSTRY.",
-                "Do not repeat already_tried ideas; learn from why they were dropped.",
-            ],
-            "output": {
-                "ideas": [
-                    {
-                        "title": "short name",
-                        "mechanism": "one paragraph",
-                        "direction": "high X -> long",
-                        "sources": ["reference title"],
-                        "template": "group_rank(ts_delta({A}, {w}), industry)",
-                        "slots": {"A": ["field_id"]},
-                        "windows": [21, 63],
-                        "decay": 0,
-                        "neutralization": "INDUSTRY",
-                    }
-                ]
-            },
+            "families": list(families),
+            "output": {"groups": {"concept name": ["family"]}},
         }
-        data = self.ask("ideas", json.dumps(prompt, ensure_ascii=False), strong=True)
-        known = {f.id for f in fields}
-        out = []
-        for idea in data.get("ideas") or []:
-            parsed = _parse_idea(idea, known)
-            if parsed:
-                out.append(parsed)
+        data = self.ask("group_fields", json.dumps(prompt, ensure_ascii=False))
+        known = {f["family"] for f in families}
+        out: dict[str, str] = {}
+        raw = data.get("groups")
+        groups: dict[str, Any] = raw if isinstance(raw, dict) else {}
+        for name, members in groups.items():
+            for fam in members if isinstance(members, list) else []:
+                if isinstance(fam, str) and fam in known and fam not in out:
+                    out[fam] = str(name)[:120]
         return out
 
-    def review(
+    def combinations(
         self,
         dataset: dict[str, Any],
-        ideas: Sequence[dict[str, Any]],
+        strata: Sequence[dict[str, Any]],
         operators: Sequence[str],
-        fields: Sequence[FieldInfo],
-        dig_per_idea: int,
-    ) -> dict[str, Any]:
+        n: int,
+    ) -> list[dict[str, str]]:
+        """Up to n combinations of fields from the strata that showed signal."""
         prompt = {
-            "task": "Read this round's results and decide the next step for every idea, "
-            "then for the dataset.",
+            "task": f"Propose {n} combinations of two or three fields from these strata "
+            "that could predict returns better than each field alone.",
             "dataset": dataset,
-            "ideas": list(ideas),
-            "fields": [f.__dict__ for f in fields],
+            "strata": list(strata),
             "operators": list(operators),
-            "verdicts": {
-                "dig": "ore found (|sharpe| at or above the ore line with a sensible "
-                f"turnover): write up to {dig_per_idea} variants near the best expressions "
-                "that test the mechanism more precisely (another related field, a group "
-                "comparison, a conditioning event with trade_when, a residual against a "
-                "control) - not window tuning. Use raw field ids with the same preparation "
-                "the best expressions show.",
-                "flip": "results are consistently and strongly negative: the direction was "
-                "reversed; code will negate the best ones.",
-                "fix": "positive signal blocked by one check; name it in `fix`: turnover, "
-                "concentration or sub_universe.",
-                "drop": "no signal or no consistent sign: say what that tells us.",
-            },
-            "dataset_decision": {
-                "continue": "keep working the ideas that dig/flip/fix",
-                "new_ideas": "the ideas are dropped but the data still looks promising: ask "
-                "for new ideas",
-                "exhausted": "stop this dataset; say why",
-            },
+            "rules": [
+                "Each strata entry lists its fields with `prep`, the exact form a field must "
+                "be written in. Use those forms verbatim; do not invent fields.",
+                "Ground each combination in what the fields mean and in the survey results "
+                "(which shape worked, which sign). Typical reasons: one field conditions "
+                "when another is reliable; a ratio expresses a meaningful quantity; a "
+                "grouping by one field sharpens the other.",
+                "At most 8 operators. No fitted weights, no constants tuned for sharpe.",
+            ],
             "output": {
-                "ideas": [
-                    {
-                        "id": "idea id",
-                        "verdict": "dig|flip|fix|drop",
-                        "reason": "one or two sentences citing the numbers",
-                        "fix": "turnover|concentration|sub_universe",
-                        "expressions": [{"expression": "...", "why": "one sentence"}],
-                    }
-                ],
-                "dataset": {"decision": "continue|new_ideas|exhausted", "reason": "..."},
+                "combinations": [{"expression": "...", "why": "one sentence on the mechanism"}]
             },
         }
-        data = self.ask("review", json.dumps(prompt, ensure_ascii=False), strong=True)
-        verdicts = []
-        for v in data.get("ideas") or []:
-            if not isinstance(v, dict) or v.get("verdict") not in VERDICTS:
-                continue
-            exprs = [
-                e
-                for e in v.get("expressions") or []
-                if isinstance(e, dict) and isinstance(e.get("expression"), str)
-            ][:dig_per_idea]
-            verdicts.append(
-                {
-                    "id": str(v.get("id", "")),
-                    "verdict": str(v["verdict"]),
-                    "reason": str(v.get("reason", "")),
-                    "fix": str(v.get("fix", "")),
-                    "expressions": exprs,
-                }
-            )
-        ds_raw = data.get("dataset")
-        ds: dict[str, Any] = ds_raw if isinstance(ds_raw, dict) else {}
-        decision = ds.get("decision") if ds.get("decision") in DECISIONS else "continue"
-        return {
-            "ideas": verdicts,
-            "dataset": {"decision": decision, "reason": str(ds.get("reason", ""))},
-        }
+        data = self.ask("combinations", json.dumps(prompt, ensure_ascii=False), strong=True)
+        return [
+            {"expression": c["expression"], "why": str(c.get("why", ""))}
+            for c in (data.get("combinations") or [])[:n]
+            if isinstance(c, dict) and isinstance(c.get("expression"), str)
+        ]
 
     def describe(self, alpha: dict[str, Any]) -> str:
         prompt = {
@@ -244,32 +166,3 @@ class FactoryLLM:
         }
         data = self.ask("description", json.dumps(prompt, ensure_ascii=False))
         return str(data.get("description", "")).strip()
-
-
-def _parse_idea(idea: Any, known: set[str]) -> dict[str, Any] | None:
-    """Keeps an idea only if every placeholder has at least one real field."""
-    if not isinstance(idea, dict) or not idea.get("title") or not idea.get("mechanism"):
-        return None
-    template = str(idea.get("template") or "")
-    raw_slots = idea.get("slots")
-    raw: dict[str, Any] = raw_slots if isinstance(raw_slots, dict) else {}
-    needed = {p for p in PLACEHOLDER.findall(template) if p != "w"}
-    slots = {p: [f for f in raw.get(p) or [] if isinstance(f, str) and f in known] for p in needed}
-    if not needed or any(not v for v in slots.values()):
-        return None
-    windows = [int(w) for w in idea.get("windows") or [] if str(w).isdigit() and int(w) > 0]
-    try:
-        decay = int(idea.get("decay") or 0)
-    except (TypeError, ValueError):
-        decay = 0
-    return {
-        "title": str(idea["title"])[:255],
-        "mechanism": str(idea["mechanism"]),
-        "direction": str(idea.get("direction", "")),
-        "sources": [str(x) for x in idea.get("sources") or []],
-        "template": template,
-        "slots": slots,
-        "windows": windows or [63],
-        "decay": max(0, min(decay, 30)),
-        "neutralization": str(idea.get("neutralization") or "").upper(),
-    }

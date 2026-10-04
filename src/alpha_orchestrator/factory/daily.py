@@ -1,9 +1,10 @@
 """One day of research, start to finish. Safe to re-run: everything resumes from the ledger.
 
-1. refresh the catalog (once a day) and rank datasets from what is known in advance
-2. keep `active_datasets` datasets open; a stopped one is replaced by the next in rank
-3. simulate in chunks; after each chunk record results and move every dataset one
-   step (profile -> ideas -> round -> review -> ...)
+1. refresh the catalog (once a day); datasets the earlier logic stopped go back to the queue
+2. keep `active_datasets` datasets open (one, by default); the next one is chosen by a
+   Thompson draw over what is known about each dataset (datasets.py)
+3. simulate in chunks; after each chunk record results and move the dataset one step
+   (health -> survey -> research rounds), see research.py
 4. pick at most four ready alphas for you to review; nothing is submitted here
 """
 
@@ -21,7 +22,7 @@ from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ledger import Ledger
 from alpha_orchestrator.factory.llm import FactoryLLM
 from alpha_orchestrator.factory.models import CellORM, CellState, EventORM
-from alpha_orchestrator.factory.research import Factory, Metadata
+from alpha_orchestrator.factory.research import Factory, Metadata, reset_legacy
 from alpha_orchestrator.factory.scheduler import QUOTA_RESERVE, Simulator
 from alpha_orchestrator.factory.select import select_today
 
@@ -48,18 +49,18 @@ def catalog_is_stale(ledger: Ledger, hours: float = 20.0) -> bool:
     return datetime.now(UTC) - last > timedelta(hours=hours)
 
 
-def fill_active(factory: Factory, ledger: Ledger, config: FactoryConfig) -> list[str]:
-    """Opens the next datasets in rank order until `active_datasets` are being worked."""
+OPEN = [CellState.STUDYING, CellState.SURVEY, CellState.RESEARCH]
+
+
+def fill_active(
+    factory: Factory, ledger: Ledger, config: FactoryConfig, rng: random.Random
+) -> list[str]:
+    """Opens the next datasets, by Thompson draw, until `active_datasets` are worked."""
     started = []
     with ledger.session() as s:
-        ranked = datasets.rank(s, config)
+        ranked = datasets.rank(s, config, rng)
         open_now = int(
-            s.scalar(
-                select(func.count())
-                .select_from(CellORM)
-                .where(CellORM.state.in_([CellState.STUDYING, CellState.RESEARCH]))
-            )
-            or 0
+            s.scalar(select(func.count()).select_from(CellORM).where(CellORM.state.in_(OPEN))) or 0
         )
         states = {c.cell_id: c.state for c in s.scalars(select(CellORM))}
     for r in ranked:
@@ -89,13 +90,12 @@ def run_day(
     on_progress: Any = None,
 ) -> DayReport:
     report = DayReport()
-    if llm is None:
-        report.stopped_because = "no LLM key: ideas and reviews need the LLM"
-        return report
     deadline = time.monotonic() + minutes * 60
     meta = meta or Metadata.fetch(api)
     if catalog_is_stale(ledger):
         catalog.refresh(api, ledger, config)
+    reset_legacy(ledger)
+    rng = rng or random.Random()
 
     with ledger.session() as s:
         used = ledger.sims_used_today(s)
@@ -112,7 +112,7 @@ def run_day(
     spent = 0
     idle = 0
     while spent < budget and time.monotonic() < deadline:
-        report.started += fill_active(factory, ledger, config)
+        report.started += fill_active(factory, ledger, config, rng)
         moved = factory.advance()
         run = simulator.run(min(CHUNK, budget - spent), deadline=deadline)
         spent += run.completed + run.failed

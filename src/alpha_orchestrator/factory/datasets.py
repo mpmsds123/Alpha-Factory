@@ -1,24 +1,25 @@
-"""Which dataset to research next. Decided once, before any simulation is spent.
+"""Which dataset to research next: a multi-armed bandit over datasets.
 
-Simulations test ideas; they never rank datasets against each other. The order comes
-from what is known in advance:
+Each dataset has an estimated chance of "the survey finds more signal than noise",
+written as a Beta distribution (successes, failures):
 
-    score = papers x payoff x (1 - crowding) x portfolio_gap x cost x difficulty
+    successes  1 per 2 official research papers naming the dataset (capped at 2)
+               + 1 for each region where this same dataset was found to have signal
+               + 0.5 for each dataset of the same category in the same region with signal
+    failures   the same, for datasets whose survey said "noise"
 
-papers         the platform's Research Papers name datasets in which researchers already
-               found alpha (零基础 AI 课 第4课); every mention raises the prior, capped x2.
-payoff         pyramid multiplier, plus a bonus for the pyramid you have not completed.
-crowding       alpha count on the dataset: crowded data rarely clears prod correlation.
-portfolio_gap  official "value add": a category you have barely submitted adds more.
-cost           higher regional cost floors kill more alphas after fees.
-difficulty     a region with a higher sharpe floor (CHN) needs a stronger signal.
+The next dataset is the one with the best draw of (chance x payoff), Thompson sampling:
+well-supported datasets are picked most, untried ones still get picked sometimes, and a
+dataset that failed elsewhere falls back on its own. Payoff is what a found alpha is worth:
+pyramid multiplier and gap, crowding, regional cost and sharpe floor.
 
-A dataset leaves the queue when its stop rule fires (see research.py); the reason is kept.
+`rank()` gives the same numbers without the random draw, for the dashboard.
 """
 
 import math
+import random
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,7 +31,7 @@ from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.models import CellORM, CellState, IdeaORM
 
 PAPER_SOURCES = frozenset({"Research_Papers_for_Consultants", "Research_Papers_for_Users"})
-PAPER_TITLE = re.compile(r"paper|论文|research", re.I)
+PAPER_TITLE = re.compile(r"^research paper", re.I)  # official paper posts only
 
 
 @dataclass(frozen=True)
@@ -38,10 +39,6 @@ class Ranked:
     cell_id: str
     score: float
     reason: dict[str, Any]
-
-
-def paper_bonus(refs: int) -> float:
-    return 1.0 + 0.25 * min(refs, 4)
 
 
 def gap_bonus(submitted: int) -> float:
@@ -54,23 +51,20 @@ def crowding_discount(alpha_count: int) -> float:
     return min(0.6, math.log10(1 + max(alpha_count, 0)) / 10)
 
 
-def portfolio_gap(category_share: float) -> float:
-    """Under 10% of your submissions in this category: bonus. Dominant category: discount."""
-    if category_share < 0.10:
-        return 1.2
-    return max(0.6, 1.0 - 0.4 * (category_share - 0.10))
-
-
 def cost_factor(margin_floor_bps: float) -> float:
     return max(0.5, 1.0 - (margin_floor_bps - 5.0) / 75.0)
 
 
+def is_paper(idea: IdeaORM) -> bool:
+    return idea.source in PAPER_SOURCES or bool(PAPER_TITLE.search(idea.title))
+
+
 def count_paper_refs(s: Session, dataset_ids: list[str]) -> dict[str, int]:
-    """How many research-paper posts mention each dataset id (as a whole word)."""
+    """How many official research-paper posts name each dataset id (as a whole word)."""
     patterns = {d: re.compile(rf"(?<![\w]){re.escape(d)}(?![\w])", re.I) for d in dataset_ids}
     out: Counter[str] = Counter()
     for idea in s.scalars(select(IdeaORM)):
-        if idea.source not in PAPER_SOURCES and not PAPER_TITLE.search(idea.title):
+        if not is_paper(idea):
             continue
         text = f"{idea.title}\n{idea.body}"
         for d, pattern in patterns.items():
@@ -79,56 +73,76 @@ def count_paper_refs(s: Session, dataset_ids: list[str]) -> dict[str, int]:
     return dict(out)
 
 
-def rank(s: Session, config: FactoryConfig) -> list[Ranked]:
-    """Scores every dataset still open and stores the score and its reasons on the row."""
-    cells = list(
-        s.scalars(
-            select(CellORM).where(
-                CellORM.active.is_(True),
-                CellORM.state.not_in([CellState.EXHAUSTED, CellState.SATURATED]),
-            )
-        )
-    )
-    pyramids = latest_pyramid_counts(s)
-    by_category: Counter[str] = Counter()
-    for (_, _, cat), n in pyramids.items():
-        by_category[cat] += n
-    total = sum(by_category.values())
-    refs = count_paper_refs(s, sorted({c.dataset_id for c in cells}))
+def outcome_of(cell: CellORM) -> str | None:
+    """'signal' / 'noise' once a dataset's survey has decided, else None."""
+    verdict = (cell.plan or {}).get("verdict")
+    return verdict if verdict in ("signal", "noise") else None
 
+
+def evidence(cells: list[CellORM], refs: dict[str, int]) -> dict[str, tuple[float, float]]:
+    by_dataset: dict[str, Counter[str]] = defaultdict(Counter)
+    by_cat_region: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
+    for c in cells:
+        o = outcome_of(c)
+        if o:
+            by_dataset[c.dataset_id][o] += 1
+            by_cat_region[(c.category.lower(), c.region)][o] += 1
+    out = {}
+    for c in cells:
+        own = by_dataset[c.dataset_id]
+        near = by_cat_region[(c.category.lower(), c.region)]
+        mine = outcome_of(c)
+        succ = min(refs.get(c.dataset_id, 0), 4) / 2 + own["signal"] + 0.5 * near["signal"]
+        fail = own["noise"] + 0.5 * near["noise"]
+        if mine:  # do not count a dataset's own result toward itself
+            succ -= 1.5 if mine == "signal" else 0
+            fail -= 1.5 if mine == "noise" else 0
+        out[c.cell_id] = (max(succ, 0.0), max(fail, 0.0))
+    return out
+
+
+def payoff(
+    c: CellORM, config: FactoryConfig, pyramids: Counter[tuple[str, int, str]]
+) -> dict[str, float]:
+    return {
+        "multiplier": c.multiplier,
+        "pyramid_gap": gap_bonus(pyramids.get((c.region, c.delay, c.category.lower()), 0)),
+        "themes": 1.2 if c.themes else 1.0,
+        "crowding": round(1 - crowding_discount(c.alpha_count), 3),
+        "cost": round(cost_factor(config.margin_floor(c.region)), 3),
+        "difficulty": round(config.thresholds.submit_sharpe / config.sharpe_floor(c.region), 3),
+    }
+
+
+def _open(s: Session) -> list[CellORM]:
+    return list(s.scalars(select(CellORM).where(CellORM.active.is_(True))))
+
+
+def rank(s: Session, config: FactoryConfig, rng: random.Random | None = None) -> list[Ranked]:
+    """Scores every dataset still NEW; with `rng`, scores are Thompson draws."""
+    cells = _open(s)
+    pyramids = latest_pyramid_counts(s)
+    refs = count_paper_refs(s, sorted({c.dataset_id for c in cells}))
+    ev = evidence(cells, refs)
     out = []
     for c in cells:
-        if c.submitted >= config.thresholds.dataset_cap:
-            continue
-        cat = c.category.lower()
-        share = by_category[cat] / total if total else 0.0
         c.paper_refs = refs.get(c.dataset_id, 0)
+        succ, fail = ev[c.cell_id]
+        value = 1.0
+        pay = payoff(c, config, pyramids)
+        for v in pay.values():
+            value *= float(v)
+        chance = rng.betavariate(1 + succ, 1 + fail) if rng else (1 + succ) / (2 + succ + fail)
         reason = {
-            "papers": round(paper_bonus(c.paper_refs), 3),
+            **pay,
             "paper_mentions": c.paper_refs,
-            "multiplier": c.multiplier,
-            "pyramid_gap": gap_bonus(pyramids.get((c.region, c.delay, cat), 0)),
-            "themes": 1.2 if c.themes else 1.0,
-            "crowding": round(1 - crowding_discount(c.alpha_count), 3),
-            "portfolio_gap": round(portfolio_gap(share), 3),
-            "submitted_total": total,
-            "submitted_category": by_category[cat],
-            "cost": round(cost_factor(config.margin_floor(c.region)), 3),
-            "difficulty": round(config.thresholds.submit_sharpe / config.sharpe_floor(c.region), 3),
+            "successes": round(succ, 2),
+            "failures": round(fail, 2),
+            "chance": round((1 + succ) / (2 + succ + fail), 3),
         }
-        score = 1.0
-        for key in (
-            "papers",
-            "multiplier",
-            "pyramid_gap",
-            "themes",
-            "crowding",
-            "portfolio_gap",
-            "cost",
-            "difficulty",
-        ):
-            score *= float(reason[key])
-        c.rank_score, c.rank_reason = score, reason
-        out.append(Ranked(c.cell_id, score, reason))
+        c.rank_score, c.rank_reason = round(value * reason["chance"], 4), reason
+        if c.state != CellState.NEW or c.submitted >= config.thresholds.dataset_cap:
+            continue
+        out.append(Ranked(c.cell_id, value * chance, reason))
     out.sort(key=lambda r: -r.score)
     return out

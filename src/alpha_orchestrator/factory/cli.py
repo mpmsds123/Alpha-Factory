@@ -21,20 +21,15 @@ from alpha_orchestrator.factory.llm import FactoryLLM
 from alpha_orchestrator.factory.models import (
     CandidateORM,
     CellORM,
-    HypothesisORM,
-    HypothesisStatus,
     ReviewORM,
     ReviewStatus,
 )
-from alpha_orchestrator.factory.research import approve_hypotheses
 from alpha_orchestrator.factory.select import approve, reject
 
 app = typer.Typer(help="Alpha 工厂：WorldQuant BRAIN 自动挖掘流水线", no_args_is_help=True)
-hyp_app = typer.Typer(help="LLM 提出的假设：查看、批准、否决", no_args_is_help=True)
 review_app = typer.Typer(help="待你确认的 alpha：查看、提交、放弃", no_args_is_help=True)
 ideas_app = typer.Typer(help="灵感库", no_args_is_help=True)
 schedule_app = typer.Typer(help="每日自动运行（macOS launchd）", no_args_is_help=True)
-app.add_typer(hyp_app, name="hypotheses")
 app.add_typer(review_app, name="review")
 app.add_typer(ideas_app, name="ideas")
 app.add_typer(schedule_app, name="schedule")
@@ -54,7 +49,9 @@ def _api() -> BrainAPI:
 
 def _llm(config: FactoryConfig, ledger: Ledger) -> FactoryLLM | None:
     if not Path(config.llm.key_file).expanduser().exists():
-        typer.echo(f"未找到 {config.llm.key_file}：出点子和读结果都要 LLM，今天不运行。")
+        typer.echo(
+            f"未找到 {config.llm.key_file}：今天不用 DeepSeek（字段分组按名字分，不做组合对照）。"
+        )
         return None
     return FactoryLLM(config, ledger)
 
@@ -96,7 +93,7 @@ def run(
     minutes: Annotated[float, typer.Option(help="最长运行分钟数")] = 720,
     config: ConfigOpt = DEFAULT_CONFIG,
 ) -> None:
-    """跑一天：数据集排序 → 读数据 → LLM 出点子 → 回测 → LLM 读结果定下一步 → 选出待确认。"""
+    """跑一天：抽签选数据集 → 抽样体检 → 抽样普查 → 按信号浓度挖 → 按试的次数确认 → 选出待确认。"""
     from alpha_orchestrator.factory.daily import run_day
 
     cfg, ledger = _ctx(config)
@@ -140,21 +137,10 @@ def status(config: ConfigOpt = DEFAULT_CONFIG) -> None:
         pending = len(
             list(s.scalars(select(ReviewORM.id).where(ReviewORM.status == ReviewStatus.PENDING)))
         )
-        hyps = len(
-            list(
-                s.scalars(
-                    select(HypothesisORM.id).where(
-                        HypothesisORM.status == HypothesisStatus.PROPOSED
-                    )
-                )
-            )
-        )
     by_state: dict[str, int] = {}
     for c in cells:
         by_state[c.state] = by_state.get(c.state, 0) + 1
-    typer.echo(
-        f"数据集组合 {len(cells)} {by_state}；候选 {n_cand}；待确认 {pending}；待批假设 {hyps}"
-    )
+    typer.echo(f"数据集组合 {len(cells)} {by_state}；候选 {n_cand}；待确认 {pending}")
     typer.echo(f"面板：{render(ledger, cfg, _dashboard_path(cfg)).resolve()}")
 
 
@@ -188,37 +174,6 @@ def _match(ids: list[str], pool: list[str]) -> list[str]:
             continue
         out.append(hits[0])
     return out
-
-
-@hyp_app.command("list")
-def hyp_list(config: ConfigOpt = DEFAULT_CONFIG) -> None:
-    _, ledger = _ctx(config)
-    with ledger.session() as s:
-        for h in s.scalars(
-            select(HypothesisORM).where(HypothesisORM.status == HypothesisStatus.PROPOSED)
-        ):
-            typer.echo(
-                f"{h.id[:8]}  [{h.cell_id}]  {h.title}\n    {h.statement}\n"
-                f"    模版：{h.template}\n"
-                f"    方向：{h.direction}  字段：{', '.join(h.fields)}"
-                f"  出处：{'; '.join(h.sources)}\n"
-            )
-
-
-@hyp_app.command("approve")
-def hyp_approve(ids: list[str], config: ConfigOpt = DEFAULT_CONFIG) -> None:
-    _, ledger = _ctx(config)
-    with ledger.session() as s:
-        pool = list(s.scalars(select(HypothesisORM.id)))
-    typer.echo(f"已批准 {approve_hypotheses(ledger, _match(ids, pool), True)} 条。")
-
-
-@hyp_app.command("reject")
-def hyp_reject(ids: list[str], config: ConfigOpt = DEFAULT_CONFIG) -> None:
-    _, ledger = _ctx(config)
-    with ledger.session() as s:
-        pool = list(s.scalars(select(HypothesisORM.id)))
-    typer.echo(f"已否决 {approve_hypotheses(ledger, _match(ids, pool), False)} 条。")
 
 
 @review_app.command("list")

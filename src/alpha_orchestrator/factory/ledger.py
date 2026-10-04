@@ -26,28 +26,39 @@ def fingerprint(expression: str, settings: dict[str, Any]) -> str:
 
 
 def _upgrade_empty_tables(engine: Engine) -> None:
-    """A table from an older layout is rebuilt if it holds nothing yet. One with rows is
-    never touched: that needs a decision, so it stops with an explanation instead."""
+    """Brings an older ledger up to the current layout without losing rows: every column
+    the models have and the file lacks is added with its default."""
     existing = inspect(engine)
-    stale = []
+    statements = []
     for table in FactoryBase.metadata.sorted_tables:
         if not existing.has_table(table.name):
             continue
         have = {c["name"] for c in existing.get_columns(table.name)}
-        if {c.name for c in table.columns} - have:
-            stale.append(table.name)
-    if not stale:
-        return
-    with engine.begin() as conn:
-        busy = [t for t in stale if conn.execute(text(f'SELECT 1 FROM "{t}" LIMIT 1')).first()]
-        if busy:
-            raise RuntimeError(
-                f"ledger tables {busy} use an older layout and already hold data; "
-                "back up the ledger file before upgrading it"
+        for column in table.columns:
+            if column.name in have:
+                continue
+            sql_type = column.type.compile(dialect=engine.dialect)
+            default = getattr(column.default, "arg", None)
+            if callable(default):
+                default = default(None) if default.__name__ != "utc_now" else None
+            if isinstance(default, bool):
+                literal = "1" if default else "0"
+            elif isinstance(default, (int, float)):
+                literal = str(default)
+            elif isinstance(default, (dict, list)):
+                literal = "'" + ("{}" if isinstance(default, dict) else "[]") + "'"
+            elif isinstance(default, str):
+                literal = "'" + default.replace("'", "''") + "'"
+            else:
+                literal = "NULL"
+            statements.append(
+                f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {sql_type} '
+                f"DEFAULT {literal}"
             )
-        conn.execute(text("PRAGMA foreign_keys=OFF"))
-        for t in stale:
-            conn.execute(text(f'DROP TABLE "{t}"'))
+    if statements:
+        with engine.begin() as conn:
+            for stmt in statements:
+                conn.execute(text(stmt))
 
 
 def today_utc() -> str:
@@ -79,13 +90,20 @@ class Ledger:
     # ---------- candidates ----------
     def add_candidate(self, s: Session, **values: Any) -> CandidateORM | None:
         """Insert unless the same expression+settings exists anywhere in the ledger."""
+        row, created = self.get_or_add(s, **values)
+        return row if created else None
+
+    def get_or_add(self, s: Session, **values: Any) -> tuple[CandidateORM, bool]:
+        """The existing row for this expression+settings (its result is reused, never
+        simulated twice), or a new queued one."""
         fp = fingerprint(values["expression"], values["settings"])
-        if s.scalar(select(CandidateORM.id).where(CandidateORM.fingerprint == fp)):
-            return None
+        found = s.scalar(select(CandidateORM).where(CandidateORM.fingerprint == fp))
+        if found is not None:
+            return found, False
         candidate = CandidateORM(fingerprint=fp, **values)
         s.add(candidate)
         s.flush()
-        return candidate
+        return candidate, True
 
     def queued(self, s: Session, region: str, delay: int, limit: int) -> list[CandidateORM]:
         from alpha_orchestrator.factory.models import CellORM

@@ -22,26 +22,33 @@ DEFAULT_CONFIG = REPO_ROOT / "factory.yaml"
 class Budget:
     # 10 simulations in flight x 12 hours x 20 per hour (about 3 minutes each) = 2,400.
     daily_sim_cap: int = 2400
-    active_datasets: int = 2  # datasets researched at once, so the queue never runs dry
-    dataset_sim_cap: int = 1000  # one dataset: ~60 to understand + rounds of ideas + digging
-    profile_fields: int = 10  # family representatives probed with the 6 ways (6 sims each)
-    ideas_per_round: int = 4
-    expansions_per_idea: int = 60  # template x fields x windows, shuffled, then capped
-    dig_per_idea: int = 8  # variants the LLM may write around ore in one review
-    slots: int = 6  # 规则: 8 concurrent multi-sims; 2 left for manual use
+    active_datasets: int = 1  # 你定的: one dataset at a time
+    dataset_sim_cap: int = 2000  # a 4,000-field dataset with signal needs ~1,500
+    health_sample: int = 40  # families sampled for the health check (update period, coverage)
+    survey_per_stratum: int = 2  # families sampled per stratum for the survey
+    survey_max_families: int = 100
+    round_size: int = 50  # simulations planned per allocation round once signal is found
+    refine_structures: int = 3  # structures tried per refinement round of one family
+    combo_count: int = 6  # combinations per arm (llm and random) per strong stratum
+    slots: int = 6  # upper bound; lowered automatically to what the platform accepts
     children_per_slot: int = 10  # 规则: 10 alphas per multi-simulation
     min_batch_interval_s: float = 20.0  # 论坛: >3 batches / 10 min triggers 429 storms
 
 
 @dataclass
 class Thresholds:
-    ore_sharpe: float = 1.0  # |sharpe| at or above this in a round counts as ore (sign fixable)
-    flip_sharpe: float = -1.2  # cnhkmcp 优化手册: keep strong negatives, flip them
-    flip_fitness: float = -0.5
-    expand_sharpe: float = 1.2  # machine_lib: survivors entering the next order
-    expand_fitness: float = 0.7
-    finetune_sharpe: float = 1.4  # 优化手册: pure parameter tuning only above this
-    finetune_fitness: float = 0.9
+    noise_sigma: float = 0.40  # measured on this ledger: spread of |Sharpe| for no-signal formulas
+    screen_line: float = (
+        0.8  # survey queueing line (not a pass line): noise reaches it 13% of the time
+    )
+    sprt_alpha: float = 0.05  # P(call a no-signal dataset "signal")
+    sprt_beta: float = 0.20  # P(miss a dataset with signal)
+    sprt_extra_hits: float = 0.12  # a dataset worth working has this many more hits than noise
+    min_filled_coverage: float = 0.50  # 默认值 (待你确认): coverage after filling one update period
+    suspicious_sharpe: float = 3.0  # 你定的: above this the result is checked, never mined
+    suspicious_turnover: float = 0.70
+    refine_min_gain: float = 0.15  # 默认值 (待你确认): smaller gains are noise between variants
+    refine_max_rounds: int = 3  # 默认值 (待你确认)
     submit_sharpe: float = 1.58  # 规则手册: consultant D1
     submit_sharpe_chn: float = 2.08
     submit_fitness: float = 1.0
@@ -58,8 +65,8 @@ class Thresholds:
 @dataclass
 class LLMConfig:
     base_url: str = "https://api.deepseek.com"
-    model: str = "deepseek-flash"  # descriptions
-    strong_model: str = "deepseek-v4-pro"  # ideas and result reviews
+    model: str = "deepseek-flash"  # grouping fields, descriptions
+    strong_model: str = "deepseek-v4-pro"  # combinations of fields
     key_file: str = "~/secrets/deepseek.json"
     temperature: float = 0.4
     timeout_s: float = 120.0
@@ -69,8 +76,6 @@ class LLMConfig:
 class Policy:
     max_submissions_per_day: int = 4  # 规则
     auto_submit: bool = False  # 设计 ③: you confirm every submission
-    hypotheses_need_approval: bool = False  # True: ideas wait for `hypotheses approve`
-    rounds_without_ore_to_stop: int = 2  # 官方: don't grind one place; move to the next dataset
     regions: list[str] = field(default_factory=list)  # empty = every region you can access
     delays: list[int] = field(default_factory=lambda: [1])
 
