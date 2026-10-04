@@ -51,8 +51,8 @@ class Thresholds:
 @dataclass
 class LLMConfig:
     base_url: str = "https://api.deepseek.com"
-    model: str = "deepseek-v4-flash"  # what your cnhkmcp pipelines were configured with
-    strong_model: str = "deepseek-v4-flash"
+    model: str = "deepseek-flash"  # routine jobs: expressions, alignment, descriptions
+    strong_model: str = "deepseek-v4-pro"  # hypotheses
     key_file: str = "~/secrets/deepseek.json"
     temperature: float = 0.4
     timeout_s: float = 120.0
