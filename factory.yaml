@@ -23,8 +23,8 @@ thresholds:
 
 llm:
   base_url: https://api.deepseek.com
-  model: deepseek-v4-flash
-  strong_model: deepseek-v4-flash
+  model: deepseek-flash
+  strong_model: deepseek-v4-pro
   key_file: ~/secrets/deepseek.json      # {"api_key": "..."}，只在调用时读取
 
 policy:
