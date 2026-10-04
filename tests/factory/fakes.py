@@ -102,3 +102,33 @@ def is_metrics(sharpe: float, fitness: float, turnover: float = 0.1, fails: str 
     return {"sharpe": sharpe, "fitness": fitness, "turnover": turnover, "returns": returns,
             "margin": margin, "drawdown": 0.05, "longCount": 1500, "shortCount": 1500,
             "checks": checks}
+
+
+class FakePlatform(FakeBrainAPI):
+    """FakeBrainAPI plus catalog endpoints, for whole-day tests."""
+
+    def __init__(self, metrics: Metrics, datasets: dict[str, list[dict[str, Any]]]) -> None:
+        super().__init__(metrics, polls_before_done=0)
+        self._datasets = datasets
+
+    def simulation_options(self) -> dict[str, Any]:
+        return {"USA": {"universes": ["TOP3000", "TOP1000"], "delays": [1],
+                        "neutralizations": ["INDUSTRY", "SUBINDUSTRY", "MARKET", "SECTOR"]}}
+
+    def datasets(self, region: str, delay: int, universe: str) -> list[dict[str, Any]]:
+        return [{"id": ds, "name": ds, "category": {"id": "analyst"}, "fieldCount": 10 + len(f),
+                 "pyramidMultiplier": 1.3, "alphaCount": 5} for ds, f in self._datasets.items()]
+
+    def datafields(self, region: str, delay: int, universe: str, dataset_id: str
+                   ) -> list[dict[str, Any]]:
+        return self._datasets[dataset_id]
+
+    def operators(self) -> list[dict[str, Any]]:
+        names = ["rank", "ts_rank", "ts_zscore", "ts_delta", "ts_mean", "ts_av_diff",
+                 "ts_std_dev", "ts_backfill", "vec_avg", "group_rank", "group_zscore",
+                 "group_neutralize", "trade_when", "multiply", "sign", "hump",
+                 "ts_decay_linear", "abs"]
+        return [{"name": n, "definition": f"{n}(x)", "scope": ["REGULAR"]} for n in names]
+
+    def pyramid_alphas(self) -> list[dict[str, Any]]:
+        return []
