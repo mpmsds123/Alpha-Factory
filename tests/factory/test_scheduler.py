@@ -79,3 +79,29 @@ def test_inflight_batch_resumes_without_resimulating() -> None:
     api.polls_before_done = 0
     stats = sim(ledger, api).run(sim_budget=0)
     assert api.started == 4 and stats.completed == 3
+
+
+class RejectingAPI(FakeBrainAPI):
+    """Answers like BRAIN when one formula in a batch has an invalid setting."""
+
+    def start_multi_simulation(self, payloads: list[dict[str, Any]]) -> str:
+        if any(p["regular"] == "rank(f5)" for p in payloads):
+            body = [
+                '{"settings":{"decay":["Ensure this value is less than or equal to 512."]}}'
+                if p["regular"] == "rank(f5)"
+                else "{}"
+                for p in payloads
+            ]
+            raise ValueError("Simulation refused (400): [" + ",".join(body) + "]")
+        return super().start_multi_simulation(payloads)
+
+
+def test_invalid_settings_fail_one_formula_not_the_run() -> None:
+    ledger = setup(12)
+    api = RejectingAPI(metrics, polls_before_done=0)
+    run = sim(ledger, api).run(100)
+    with ledger.session() as s:
+        rows = {c.expression: c for c in s.scalars(select(CandidateORM))}
+    assert rows["rank(f5)"].status == "FAILED" and "512" in (rows["rank(f5)"].error or "")
+    assert rows["rank(f6)"].status == "DONE"  # its batch mates were sent again
+    assert run.stopped_because != "platform kept refusing batches"

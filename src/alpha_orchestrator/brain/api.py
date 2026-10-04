@@ -108,7 +108,7 @@ class BrainAPI:
         response = self.client.request("POST", "/simulations", json=body)
         location = response.headers.get("Location")
         if response.status_code // 100 != 2 or not location:
-            raise ValueError(f"Simulation refused ({response.status_code}): {response.text[:300]}")
+            raise ValueError(f"Simulation refused ({response.status_code}): {response.text[:4000]}")
         return str(location)
 
     def poll(self, location: str) -> SimulationProgress:

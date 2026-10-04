@@ -204,7 +204,9 @@ def repair_proposals(
     out: list[Proposal] = []
     fails = set(fails)
     if "HIGH_TURNOVER" in fails or (turnover or 0) > 0.4:
-        new_decay = max(decay_for_turnover(turnover), int(settings.get("decay", 0)) * 2 or 4)
+        new_decay = min(
+            512, max(decay_for_turnover(turnover), int(settings.get("decay", 0)) * 2 or 4)
+        )
         out.append(
             Proposal(
                 expression,
