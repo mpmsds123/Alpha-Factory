@@ -39,8 +39,25 @@ def test_login_saves_cookies_privately(tmp_path: Path) -> None:
 
     session, _ = make(handler, tmp_path)
     session.login()
-    assert json.loads(session.store.cookies_path.read_text()) == {"t": "abc"}
+    saved = json.loads(session.store.cookies_path.read_text())
+    assert [(c["name"], c["value"]) for c in saved] == [("t", "abc")]
     assert oct(session.store.cookies_path.stat().st_mode)[-3:] == "600"
+
+
+def test_same_cookie_name_on_two_domains_round_trips(tmp_path: Path) -> None:
+    """The platform sets `t` for more than one domain; saving must not crash."""
+    from alpha_orchestrator.brain.session import SessionStore
+
+    store = SessionStore(tmp_path)
+    jar = httpx.Cookies()
+    jar.set("t", "api", domain="api.worldquantbrain.com", path="/")
+    jar.set("t", "web", domain=".worldquantbrain.com", path="/")
+    store.save_cookies(jar)
+    again = store.load_cookies()
+    assert sorted(c.value for c in again.jar) == ["api", "web"]
+    # files written by the earlier version still load
+    store.cookies_path.write_text(json.dumps({"t": "old"}))
+    assert [c.value for c in store.load_cookies().jar] == ["old"]
 
 
 def test_persona_challenge_raises_with_url(tmp_path: Path) -> None:
