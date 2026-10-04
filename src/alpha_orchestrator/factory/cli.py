@@ -13,7 +13,7 @@ from alpha_orchestrator.brain.api import BrainAPI
 from alpha_orchestrator.brain.client import BrainClient, RateLimited, SessionExpired
 from alpha_orchestrator.brain.notify import notify
 from alpha_orchestrator.brain.session import AuthenticationFailed, BrainSession, NeedBiometric
-from alpha_orchestrator.factory.config import FactoryConfig
+from alpha_orchestrator.factory.config import DEFAULT_CONFIG, FactoryConfig
 from alpha_orchestrator.factory.dashboard import render
 from alpha_orchestrator.factory.ideas import import_ideas
 from alpha_orchestrator.factory.ledger import Ledger
@@ -68,7 +68,7 @@ def _dashboard_path(config: FactoryConfig) -> Path:
 @app.command()
 def login(
     then_run: Annotated[bool, typer.Option("--then-run")] = False,
-    config: ConfigOpt = Path("factory.yaml"),
+    config: ConfigOpt = DEFAULT_CONFIG,
 ) -> None:
     """刷脸登录。完成后可直接开始当天的运行。"""
     session = BrainSession()
@@ -96,7 +96,7 @@ def login(
 @app.command()
 def run(
     minutes: Annotated[float, typer.Option(help="最长运行分钟数")] = 600,
-    config: ConfigOpt = Path("factory.yaml"),
+    config: ConfigOpt = DEFAULT_CONFIG,
 ) -> None:
     """跑一天：刷新目录 → 打分分配 → 探测/生成 → 回测 → 评估 → 选出待确认。"""
     from alpha_orchestrator.factory.daily import run_day
@@ -126,7 +126,7 @@ def run(
 
 
 @app.command()
-def status(config: ConfigOpt = Path("factory.yaml")) -> None:
+def status(config: ConfigOpt = DEFAULT_CONFIG) -> None:
     """账本概况，并刷新面板。"""
     cfg, ledger = _ctx(config)
     with ledger.session() as s:
@@ -155,7 +155,7 @@ def status(config: ConfigOpt = Path("factory.yaml")) -> None:
 
 @app.command()
 def dashboard(
-    open_: Annotated[bool, typer.Option("--open")] = True, config: ConfigOpt = Path("factory.yaml")
+    open_: Annotated[bool, typer.Option("--open")] = True, config: ConfigOpt = DEFAULT_CONFIG
 ) -> None:
     """重新生成面板并打开。"""
     cfg, ledger = _ctx(config)
@@ -166,7 +166,7 @@ def dashboard(
 
 
 @ideas_app.command("import")
-def ideas_import(paths: list[Path], config: ConfigOpt = Path("factory.yaml")) -> None:
+def ideas_import(paths: list[Path], config: ConfigOpt = DEFAULT_CONFIG) -> None:
     """导入论文/论坛文件夹或合集 .md 文件（可重复执行，自动去重）。"""
     _, ledger = _ctx(config)
     with ledger.session() as s:
@@ -186,7 +186,7 @@ def _match(ids: list[str], pool: list[str]) -> list[str]:
 
 
 @hyp_app.command("list")
-def hyp_list(config: ConfigOpt = Path("factory.yaml")) -> None:
+def hyp_list(config: ConfigOpt = DEFAULT_CONFIG) -> None:
     _, ledger = _ctx(config)
     with ledger.session() as s:
         for h in s.scalars(
@@ -200,7 +200,7 @@ def hyp_list(config: ConfigOpt = Path("factory.yaml")) -> None:
 
 
 @hyp_app.command("approve")
-def hyp_approve(ids: list[str], config: ConfigOpt = Path("factory.yaml")) -> None:
+def hyp_approve(ids: list[str], config: ConfigOpt = DEFAULT_CONFIG) -> None:
     _, ledger = _ctx(config)
     with ledger.session() as s:
         pool = list(s.scalars(select(HypothesisORM.id)))
@@ -208,7 +208,7 @@ def hyp_approve(ids: list[str], config: ConfigOpt = Path("factory.yaml")) -> Non
 
 
 @hyp_app.command("reject")
-def hyp_reject(ids: list[str], config: ConfigOpt = Path("factory.yaml")) -> None:
+def hyp_reject(ids: list[str], config: ConfigOpt = DEFAULT_CONFIG) -> None:
     _, ledger = _ctx(config)
     with ledger.session() as s:
         pool = list(s.scalars(select(HypothesisORM.id)))
@@ -216,7 +216,7 @@ def hyp_reject(ids: list[str], config: ConfigOpt = Path("factory.yaml")) -> None
 
 
 @review_app.command("list")
-def review_list(config: ConfigOpt = Path("factory.yaml")) -> None:
+def review_list(config: ConfigOpt = DEFAULT_CONFIG) -> None:
     _, ledger = _ctx(config)
     with ledger.session() as s:
         for r in s.scalars(select(ReviewORM).where(ReviewORM.status == ReviewStatus.PENDING)):
@@ -230,7 +230,7 @@ def review_list(config: ConfigOpt = Path("factory.yaml")) -> None:
 
 
 @review_app.command("approve")
-def review_approve(review_id: str, config: ConfigOpt = Path("factory.yaml")) -> None:
+def review_approve(review_id: str, config: ConfigOpt = DEFAULT_CONFIG) -> None:
     """提交这一条 alpha 到平台（不可撤回）。"""
     _, ledger = _ctx(config)
     with ledger.session() as s:
@@ -248,7 +248,7 @@ def review_approve(review_id: str, config: ConfigOpt = Path("factory.yaml")) -> 
 
 
 @review_app.command("reject")
-def review_reject(review_id: str, note: str = "", config: ConfigOpt = Path("factory.yaml")) -> None:
+def review_reject(review_id: str, note: str = "", config: ConfigOpt = DEFAULT_CONFIG) -> None:
     _, ledger = _ctx(config)
     with ledger.session() as s:
         pool = list(s.scalars(select(ReviewORM.id)))
