@@ -16,8 +16,6 @@ from alpha_orchestrator.factory.models import (
     CandidateORM,
     CellORM,
     EventORM,
-    HypothesisORM,
-    HypothesisStatus,
     LLMCallORM,
     ReviewORM,
     ReviewStatus,
@@ -74,11 +72,6 @@ def render(ledger: Ledger, config: FactoryConfig, out: Path) -> Path:
         for r in reviews:
             c = s.get(CandidateORM, r.candidate_id)
             review_rows.append((r, c))
-        hyps = list(
-            s.scalars(
-                select(HypothesisORM).where(HypothesisORM.status == HypothesisStatus.PROPOSED)
-            )
-        )
         cells = {c.cell_id: c for c in s.scalars(select(CellORM))}
         last_day = s.scalar(
             select(EventORM)
@@ -122,11 +115,10 @@ def render(ledger: Ledger, config: FactoryConfig, out: Path) -> Path:
         ("今日回测", len(today)),
         ("今日过门槛", ready_today),
         ("待你确认", len(reviews)),
-        ("待批假设", len(hyps)),
         ("已提交（累计）", submitted),
         (
-            "读数据中 / 研究中 / 已停",
-            f"{states.get('STUDYING', 0)} / {states.get('RESEARCH', 0)} / "
+            "体检 / 普查 / 挖 / 已停",
+            f"{states.get('STUDYING', 0)} / {states.get('SURVEY', 0)} / {states.get('RESEARCH', 0)} / "
             f"{states.get('EXHAUSTED', 0) + states.get('SATURATED', 0)}",
         ),
         ("平台剩余配额", quota if quota is not None else "–"),
@@ -171,21 +163,6 @@ def render(ledger: Ledger, config: FactoryConfig, out: Path) -> Path:
             f"<th>Prod corr</th><th></th></tr>{rows}</table></div>"
             "<p class='muted'>确认：<code>alpha-factory review approve ID</code> · "
             "放弃：<code>alpha-factory review reject ID</code></p>"
-        )
-    else:
-        parts.append("<p class='muted'>暂无。</p>")
-
-    parts.append("<h2>待批假设</h2>")
-    if hyps:
-        rows = "".join(
-            f"<tr><td><code>{_e(h.id[:8])}</code></td><td>{_e(h.cell_id.split('|')[-1])}</td>"
-            f"<td><b>{_e(h.title)}</b><br>{_e(h.statement)}<div class='muted'>方向：{_e(h.direction)}"
-            f" · 字段：{_e(', '.join(h.fields))} · 出处：{_e('; '.join(h.sources)[:300])}</div></td></tr>"
-            for h in hyps
-        )
-        parts.append(
-            f"<div class='wrap'><table><tr><th>ID</th><th>数据集</th><th>假设</th></tr>{rows}"
-            "</table></div><p class='muted'>批准：<code>alpha-factory hypotheses approve ID ...</code></p>"
         )
     else:
         parts.append("<p class='muted'>暂无。</p>")

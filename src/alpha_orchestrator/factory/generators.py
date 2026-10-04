@@ -32,7 +32,7 @@ NEUTRALIZATION_BY_CATEGORY = {  # 官方 Neutralization 文档按数据类别的
 MAX_TRADE_REGIONS = frozenset({"ASI", "JPN", "HKG", "KOR", "TWN"})  # 规则: must be ON
 COUNTRY_FIRST = frozenset({"EUR", "ASI", "GLB"})  # 官方新人指南
 GROUP_WRAP = re.compile(r"\bgroup_(?:rank|zscore|neutralize)\(")
-HORIZON = re.compile(r"^(?:\d+[a-z]?|[a-z]{1,2}\d+[a-z]?|\d+[dwmqy]|fy\d|fq\d)$")
+HORIZON = re.compile(r"^(?:\d+|\d+[dwmqy]|fy\d+|fq\d+|[qhy]\d|ltm|ntm|ttm)$")  # horizons only
 
 
 @dataclass
@@ -327,3 +327,49 @@ def _smaller_universe(current: str, universes: Sequence[str]) -> str | None:
         reverse=True,
     )
     return f"TOP{tops[0]}" if tops else None
+
+
+# ---------- refinement structures (dig deeper) ----------
+# Library structures put around a family's best survey formula E. Which ones get tried is
+# decided by their recorded success on this data category (Thompson sampling), not here.
+STRUCTURES: dict[str, str] = {
+    "subindustry": "group_rank({E}, subindustry)",
+    "sector": "group_rank({E}, sector)",
+    "cap_bucket": 'group_rank({E}, bucket(rank(cap), range="0.1,1,0.1"))',
+    "smooth": "ts_decay_linear({E}, 10)",
+    "volume_event": "trade_when(volume > adv20, {E}, -1)",
+    "peer_zscore": "group_zscore({E}, industry)",
+}
+
+
+def structure(name: str, expression: str) -> str:
+    return STRUCTURES[name].replace("{E}", expression)
+
+
+# ---------- combinations (dig across fields) ----------
+# The random arm: forms valid for any two fields. The LLM arm writes its own; both are
+# simulated side by side so the LLM has to beat random to keep its budget.
+COMBO_FORMS: tuple[str, ...] = (
+    "rank({A}) * rank({B})",
+    "rank({A}) - rank({B})",
+    "trade_when(rank({B}) < 0.3, rank({A}), -1)",
+    'group_rank({A}, bucket(rank({B}), range="0.2,1,0.2"))',
+)
+
+
+def random_combos(
+    preps: Sequence[str], n: int, rng: Any, settings: dict[str, Any]
+) -> list[Proposal]:
+    out: list[Proposal] = []
+    if len(preps) < 2:
+        return out
+    for _ in range(n * 4):
+        if len(out) >= n:
+            break
+        a, b = rng.sample(list(preps), 2)
+        form = rng.choice(COMBO_FORMS)
+        expr = form.replace("{A}", a).replace("{B}", b)
+        if any(p.expression == expr for p in out):
+            continue
+        out.append(Proposal(expr, settings, "COMBO", role="random", change=form))
+    return out

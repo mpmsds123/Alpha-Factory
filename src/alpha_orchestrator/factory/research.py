@@ -1,24 +1,32 @@
-"""The research loop for one dataset, from first look to stop.
+"""One dataset, from first look to finish, with every selection made by statistics.
 
-    start     fetch fields, group near-duplicates into families, queue the 6-way probes
-              on the representatives                                      (STUDYING)
-    profile   read the probes' long/short counts -> per-field profile and `prep`
-    ideas     LLM: profile + papers naming the dataset + forum/homework templates
-              -> ideas (mechanism, direction, template, fields, windows, decay)
-    round     each idea's template expanded over its fields and windows   (RESEARCH)
-    review    LLM reads every idea's results -> dig / flip / fix / drop per idea, and
-              continue / new ideas / exhausted for the dataset
-    stop      exhausted when the LLM says so, after `rounds_without_ore_to_stop` rounds
-              without any |sharpe| >= ore line, or when the dataset budget is spent
+    structure   field ids -> families (same thing, different horizon) -> strata (economic
+                concept; from names, or DeepSeek groups them when names do not show it)
+    health      sample families per stratum; on one field each: daily coverage, change
+                within 5/22/66 days (-> update period), coverage after filling one period.
+                Inferred for the whole stratum from its sample. Coverage after filling
+                below the threshold -> family not eligible.
+    survey      sample eligible families per stratum; 4 fixed shapes each. A family is a
+                "hit" when its best |Sharpe| reaches the screening line (noise does that
+                13% of the time). A sequential test decides signal / noise for the dataset.
+    research    signal: each round, strata are drawn by their shrunk excess over noise
+                (Thompson sampling) and get: library structures on their best formula
+                (deepen, structures also drawn by their record), untested families
+                (broaden), DeepSeek vs random combinations (combine). A family stops when
+                two rounds in a row gain less than the noise between variants, or after
+                its round limit. The dataset stops when no stratum has work left or its
+                budget is spent.
+    confirm     a result counts only above the luck bar for the number of tries in this
+                dataset (sigma * sqrt(2 ln n)), and must pass robustness and correlation.
 
-Simulations never rank datasets (datasets.py does that before any is spent). Producers
-here only write QUEUED candidates; the Simulator consumes them.
+Results with |Sharpe| above the suspicious line or turnover above its limit are never mined.
 """
 
 import random
 import re
 import statistics
-from collections.abc import Iterable, Sequence
+from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -30,42 +38,32 @@ from alpha_orchestrator.brain.api import BrainAPI
 from alpha_orchestrator.domain.models import utc_now
 from alpha_orchestrator.factory import generators as gen
 from alpha_orchestrator.factory import profile as prof
+from alpha_orchestrator.factory import stats
 from alpha_orchestrator.factory.config import FactoryConfig
-from alpha_orchestrator.factory.datasets import PAPER_SOURCES, PAPER_TITLE
-from alpha_orchestrator.factory.ideas import IdeaIndex
 from alpha_orchestrator.factory.ledger import Ledger
-from alpha_orchestrator.factory.llm import FactoryLLM, FieldInfo
+from alpha_orchestrator.factory.llm import FactoryLLM
 from alpha_orchestrator.factory.models import (
     CandidateORM,
     CandidateStatus,
     CellORM,
     CellState,
     FieldORM,
-    HypothesisORM,
-    HypothesisStatus,
-    IdeaORM,
     Stage,
 )
 from alpha_orchestrator.factory.validate import check
 
-STAGE_WEIGHT = {
-    Stage.PROFILE: 3.0,  # finish reading the data first: the LLM is waiting on it
-    Stage.ROBUST: 3.0,
-    Stage.FLIP: 2.2,
-    Stage.REPAIR: 2.0,
-    Stage.DIG: 2.0,
-    Stage.SECOND: 1.8,
-    Stage.THIRD: 1.8,
-    Stage.IDEA: 1.2,
-}
 PENDING = (CandidateStatus.QUEUED, CandidateStatus.RUNNING)
-FIX_TO_FAIL = {
-    "turnover": "HIGH_TURNOVER",
-    "concentration": "CONCENTRATED_WEIGHT",
-    "sub_universe": "LOW_SUB_UNIVERSE_SHARPE",
+STAGE_WEIGHT = {
+    Stage.PROFILE: 3.0,
+    Stage.SURVEY: 2.5,
+    Stage.ROBUST: 3.0,
+    Stage.REPAIR: 2.0,
+    Stage.REFINE: 2.0,
+    Stage.COMBO: 1.8,
 }
-LLM_FIELDS = 80
-SLOT_LABEL = re.compile(r"\b([A-Za-z]\w*)=([\w.]+)")
+FIXABLE = {"HIGH_TURNOVER", "CONCENTRATED_WEIGHT", "LOW_SUB_UNIVERSE_SHARPE"}
+SURVEY_ALL_BELOW = 40  # eligible families; fewer than this are surveyed whole
+TOKEN = re.compile(r"[a-z0-9]+")
 
 
 @dataclass
@@ -92,6 +90,16 @@ class Metadata:
         return list(self.options.get(region, {}).get("universes", []))
 
 
+def name_stratum(family: str, dataset_id: str) -> str:
+    """Fallback concept from the name: the family minus its last token (the statistic),
+    after removing a dataset prefix. anl4_eps_mean, anl4_eps_median -> eps."""
+    tokens = TOKEN.findall(family.lower())
+    prefix = TOKEN.findall(dataset_id.lower())
+    if tokens and prefix and len(tokens) > 1 and tokens[0][:3] == prefix[0][:3]:
+        tokens = tokens[1:]
+    return "_".join(tokens[:-1]) if len(tokens) > 2 else "_".join(tokens) or family
+
+
 class Factory:
     def __init__(
         self,
@@ -99,7 +107,7 @@ class Factory:
         ledger: Ledger,
         config: FactoryConfig,
         meta: Metadata,
-        llm: FactoryLLM,
+        llm: FactoryLLM | None,
         rng: random.Random | None = None,
     ) -> None:
         self.api = api
@@ -108,9 +116,12 @@ class Factory:
         self.meta = meta
         self.llm = llm
         self.rng = rng or random.Random()
-        self._ideas: IdeaIndex | None = None
+        t = config.thresholds
+        self.sigma = t.noise_sigma
+        self.p0 = stats.exceed_prob(t.screen_line, self.sigma, k=3)  # 4 correlated shapes ~ 3
+        self.null_best = stats.expected_best_abs(self.sigma, 3)
 
-    # ================= step 1: start and read the data =================
+    # ======================= structure + health =======================
     def start(self, cell_id: str) -> int:
         with self.ledger.session() as s:
             cell = _cell(s, cell_id)
@@ -120,403 +131,627 @@ class Factory:
                 cell.universe,
                 cell.dataset_id,
             )
+            brief = _brief(cell)
         rows = [
             r
             for r in self.api.datafields(region, delay, universe, dataset)
             if r.get("type") in ("MATRIX", "VECTOR")
         ]
         families = gen.group_families(rows)
+        strata = self._strata(brief, families)
         with self.ledger.session() as s:
             cell = _cell(s, cell_id)
             if not rows:
-                self._stop(s, cell, "no MATRIX or VECTOR fields")
+                self._finish(s, cell, "no_fields", "no MATRIX or VECTOR fields")
                 return 0
-            for family, members in families.items():
-                for i, r in enumerate(members):
-                    s.add(
-                        FieldORM(
-                            cell_id=cell_id,
-                            field_id=str(r["id"]),
-                            type=str(r["type"]),
-                            description=str(r.get("description") or "")[:1000],
-                            coverage=float(r.get("coverage") or 0),
-                            alpha_count=int(r.get("alphaCount") or 0),
-                            family=family,
-                            representative=(i == 0),
-                        )
-                    )
-            s.flush()
-            # Probe the biggest families first: they carry most of the dataset.
-            reps = sorted(
-                families.items(),
-                key=lambda kv: (-len(kv[1]), -float(kv[1][0].get("coverage") or 0)),
-            )[: self.config.budget.profile_fields]
-            settings = {**self._settings(cell), "neutralization": "NONE", "decay": 0}
-            proposals = []
-            for _, members in reps:
-                fid, ftype = str(members[0]["id"]), str(members[0]["type"])
-                for name, expr in prof.probe_expressions(fid, ftype):
-                    proposals.append(
-                        gen.Proposal(
-                            expr,
-                            settings,
-                            Stage.PROFILE,
-                            role=name,
-                            change=f"6-way probe {name}",
-                            extra={"field": fid, "probe": name},
-                        )
-                    )
-            added = self._enqueue(s, cell, proposals)
-            cell.state = CellState.STUDYING
-            self.ledger.log(s, "dataset_started", cell_id, fields=len(rows), probes=added)
-        return added
-
-    def finish_profile(self, s: Session, cell: CellORM) -> None:
-        counts: dict[str, dict[str, int | None]] = {}
-        for c in s.scalars(
-            select(CandidateORM).where(
-                CandidateORM.cell_id == cell.cell_id, CandidateORM.stage == Stage.PROFILE
-            )
-        ):
-            total = None
-            if c.long_count is not None or c.short_count is not None:
-                total = (c.long_count or 0) + (c.short_count or 0)
-            counts.setdefault(str(c.extra.get("field")), {})[str(c.extra.get("probe"))] = total
-        fields = list(s.scalars(select(FieldORM).where(FieldORM.cell_id == cell.cell_id)))
-        by_family = {
-            f.family: prof.interpret(counts[f.field_id], cell.universe)
-            for f in fields
-            if f.representative and f.field_id in counts
-        }
-        for f in fields:
-            f.profile = by_family.get(f.family, {})
-            f.prep = prof.prep_for(f.field_id, f.type, cell.category, f.profile)
-        cell.state = CellState.RESEARCH
-        self.ledger.log(
-            s,
-            "dataset_profiled",
-            cell.cell_id,
-            profiles={k: v for k, v in list(by_family.items())[:20]},
-        )
-
-    # ================= step 2: ideas =================
-    def propose_ideas(self, cell_id: str) -> int:
-        with self.ledger.session() as s:
-            cell = _cell(s, cell_id)
-            fields = self._field_infos(s, cell_id)
-            references = self._references(s, cell, fields)
-            tried = [
-                {
-                    "title": h.title,
-                    "template": h.template,
-                    "status": h.status,
-                    "last_verdict": (h.verdicts or [{}])[-1],
-                }
-                for h in s.scalars(select(HypothesisORM).where(HypothesisORM.cell_id == cell_id))
-            ]
-            dataset = self._dataset_brief(cell)
-        ops = sorted(f"{k}: {v}" for k, v in self.meta.definitions.items())
-        ideas = self.llm.ideas(
-            dataset, fields, references, ops, tried, n=self.config.budget.ideas_per_round
-        )
-        status = (
-            HypothesisStatus.PROPOSED
-            if self.config.policy.hypotheses_need_approval
-            else HypothesisStatus.APPROVED
-        )
-        neutralizations = set(self.meta.neutralizations(dataset["region"]))
-        with self.ledger.session() as s:
-            for idea in ideas:
-                settings: dict[str, Any] = {"decay": idea["decay"]}
-                if idea["neutralization"] in neutralizations:
-                    settings["neutralization"] = idea["neutralization"]
-                s.add(
-                    HypothesisORM(
-                        cell_id=cell_id,
-                        title=idea["title"],
-                        statement=idea["mechanism"],
-                        direction=idea["direction"],
-                        fields=sorted({f for v in idea["slots"].values() for f in v}),
-                        sources=idea["sources"],
-                        template=idea["template"],
-                        slots=idea["slots"],
-                        windows=idea["windows"],
-                        settings=settings,
-                        status=status,
-                    )
-                )
-            self.ledger.log(s, "ideas_proposed", cell_id, count=len(ideas))
-        return len(ideas)
-
-    def queue_idea(self, s: Session, h: HypothesisORM) -> int:
-        cell = _cell(s, h.cell_id)
-        prep = {
-            f.field_id: f.prep
-            for f in s.scalars(
-                select(FieldORM).where(
-                    FieldORM.cell_id == h.cell_id, FieldORM.field_id.in_(h.fields)
-                )
-            )
-        }
-        proposals = gen.expand_template(
-            h.template,
-            h.slots,
-            h.windows,
-            prep,
-            {**self._settings(cell), **h.settings},
-            self.config.budget.expansions_per_idea,
-            self.rng,
-        )
-        return self._start_round(s, cell, h, proposals)
-
-    # ================= step 3: review a finished round =================
-    def review(self, cell_id: str) -> dict[str, Any]:
-        t = self.config.thresholds
-        with self.ledger.session() as s:
-            cell = _cell(s, cell_id)
-            hyps = [
-                h
-                for h in s.scalars(
-                    select(HypothesisORM).where(
-                        HypothesisORM.cell_id == cell_id,
-                        HypothesisORM.status == HypothesisStatus.APPROVED,
-                    )
-                )
-                if h.rounds > h.reviewed
-            ]
-            summaries = [self._summary(s, h) for h in hyps]
-            fields = self._field_infos(s, cell_id)
-            dataset = {
-                **self._dataset_brief(cell),
-                "rounds_done": cell.rounds,
-                "rounds_without_ore": cell.rounds_without_ore,
-                "ore_line": t.ore_sharpe,
-                "simulations_left": self.config.budget.dataset_sim_cap - cell.sims_used,
+            existing = {
+                f.field_id: f
+                for f in s.scalars(select(FieldORM).where(FieldORM.cell_id == cell_id))
             }
-        if not summaries:
-            return {}
-        ops = sorted(f"{k}: {v}" for k, v in self.meta.definitions.items())
-        result = self.llm.review(dataset, summaries, ops, fields, self.config.budget.dig_per_idea)
-        verdicts = {v["id"]: v for v in result["ideas"]}
-        ore = any(x["ore_count"] for x in summaries)
-
-        with self.ledger.session() as s:
-            cell = _cell(s, cell_id)
-            cell.rounds += 1
-            cell.rounds_without_ore = 0 if ore else cell.rounds_without_ore + 1
-            queued = 0
-            for summary in summaries:
-                h = s.get(HypothesisORM, summary["id"])
-                assert h is not None
-                v = verdicts.get(h.id) or {"verdict": "drop", "reason": "no verdict given"}
-                h.reviewed = h.rounds
-                h.verdicts = [
-                    *h.verdicts,
-                    {"round": h.rounds, "verdict": v["verdict"], "reason": v["reason"]},
-                ]
-                added = self._apply(s, cell, h, v, summary)
-                if added == 0 and h.status == HypothesisStatus.APPROVED:
-                    h.status = HypothesisStatus.RETIRED
-                queued += added
+            for fam, members in families.items():
+                for i, r in enumerate(members):
+                    f = existing.get(str(r["id"])) or FieldORM(
+                        cell_id=cell_id, field_id=str(r["id"])
+                    )
+                    f.type = str(r["type"])
+                    f.description = str(r.get("description") or "")[:1000]
+                    f.coverage = float(r.get("coverage") or 0)
+                    f.alpha_count = int(r.get("alphaCount") or 0)
+                    f.family = fam
+                    f.representative = i == 0
+                    f.stratum = strata.get(fam, fam)
+                    f.eligible = True
+                    f.survey, f.survey_score, f.profile = {}, None, {}
+                    s.add(f)
+            s.flush()
+            sample = self._health_sample(s, cell_id)
+            queued = self._queue_health(s, cell, sample)
+            cell.state = CellState.STUDYING
+            cell.plan = {
+                "phase": "health_a",
+                "health_sample": sample,
+                "family_count": len(families),
+                "strata": len(set(strata.values())),
+            }
             self.ledger.log(
                 s,
-                "round_reviewed",
+                "dataset_started",
                 cell_id,
-                round=cell.rounds,
-                ore=ore,
-                verdicts={k: v["verdict"] for k, v in verdicts.items()},
-                decision=result["dataset"],
-                queued=queued,
+                fields=len(rows),
+                families=len(families),
+                strata=cell.plan["strata"],
+                health_sample=len(sample),
             )
-            decision = result["dataset"]["decision"]
-            if cell.rounds_without_ore >= self.config.policy.rounds_without_ore_to_stop:
-                self._stop(
-                    s, cell, f"no |sharpe| >= {t.ore_sharpe} in {cell.rounds_without_ore} rounds"
-                )
-            elif decision == "exhausted":
-                self._stop(s, cell, "LLM: " + result["dataset"]["reason"])
-        if self._is_researching(cell_id) and (decision == "new_ideas" or queued == 0):
-            self.propose_ideas(cell_id)
-        return result
+        return queued
 
-    def _apply(
+    def _strata(self, brief: dict[str, Any], families: dict[str, list[Any]]) -> dict[str, str]:
+        by_name = {fam: name_stratum(fam, brief["id"]) for fam in families}
+        distinct = len(set(by_name.values()))
+        # Names show structure when they collapse families into a manageable number of
+        # groups; otherwise (every family alone, or one giant group) ask DeepSeek.
+        if self.llm is None or len(families) <= 12 or 3 <= distinct <= len(families) // 3:
+            return by_name
+        listing = [
+            {
+                "family": fam,
+                "example": str(members[0]["id"]),
+                "description": str(members[0].get("description") or "")[:160],
+            }
+            for fam, members in families.items()
+        ]
+        out: dict[str, str] = {}
+        for i in range(0, len(listing), 150):
+            try:
+                out.update(self.llm.group_fields(brief, listing[i : i + 150]))
+            except RuntimeError:
+                break
+        return {fam: out.get(fam, by_name[fam]) for fam in families}
+
+    def _health_sample(self, s: Session, cell_id: str) -> list[str]:
+        """Families to health-check: round-robin over strata (largest first), so every
+        stratum gets one before any gets two, up to the sample size."""
+        by_stratum: dict[str, list[FieldORM]] = defaultdict(list)
+        for f in self._reps(s, cell_id):
+            by_stratum[f.stratum].append(f)
+        for members in by_stratum.values():
+            self.rng.shuffle(members)
+        order = sorted(by_stratum, key=lambda k: -len(by_stratum[k]))
+        out: list[str] = []
+        depth = 0
+        limit = self.config.budget.health_sample
+        while len(out) < limit and any(len(by_stratum[k]) > depth for k in order):
+            for k in order:
+                if len(out) >= limit:
+                    break
+                if len(by_stratum[k]) > depth:
+                    out.append(by_stratum[k][depth].family)
+            depth += 1
+        return out
+
+    def _queue_health(self, s: Session, cell: CellORM, families: Sequence[str]) -> int:
+        settings = {**self._settings(cell), "neutralization": "NONE", "decay": 0}
+        added = 0
+        wanted = set(families)
+        for f in self._reps(s, cell.cell_id):
+            if f.family not in wanted:
+                continue
+            ids = {}
+            for name, expr in prof.health_probes(f.field_id, f.type):
+                row, created = self._add(s, cell, expr, settings, Stage.PROFILE, name)
+                if row is not None:
+                    ids[name] = row.id
+                    added += created
+            f.profile = {"probes": ids}
+        return added
+
+    def _health_b(self, s: Session, cell: CellORM) -> None:
+        """Update period known for the sample -> queue the filled-coverage probe."""
+        settings = {**self._settings(cell), "neutralization": "NONE", "decay": 0}
+        for f in self._reps(s, cell.cell_id):
+            ids = (f.profile or {}).get("probes") or {}
+            if not ids or "filled" in ids:
+                continue
+            counts = {name: _count(s, cid) for name, cid in ids.items()}
+            period = prof.period_from(counts)
+            name, expr = prof.filled_probe(f.field_id, f.type, period)
+            row, _ = self._add(s, cell, expr, settings, Stage.PROFILE, name)
+            f.profile = {
+                **f.profile,
+                "period_days": round(min(period, 999.0), 1),
+                "probes": {**ids, **({"filled": row.id} if row else {})},
+            }
+        cell.plan = {**cell.plan, "phase": "health_b"}
+
+    def _finish_health(self, s: Session, cell: CellORM) -> None:
+        """Measured on the sample, inferred for every family of the same stratum."""
+        size = prof.universe_size(cell.universe) or 0
+        reps = self._reps(s, cell.cell_id)
+        measured: dict[str, list[dict[str, float]]] = defaultdict(list)
+        for f in reps:
+            ids = (f.profile or {}).get("probes") or {}
+            if "filled" not in ids:
+                continue
+            raw = _count(s, ids.get("raw")) or 0
+            filled = _count(s, ids.get("filled")) or 0
+            denom = size or max(raw, filled, 1)
+            reading = {
+                "period_days": float(f.profile.get("period_days", 999.0)),
+                "raw_coverage": round(min(raw / denom, 1.0), 3),
+                "filled_coverage": round(min(filled / denom, 1.0), 3),
+            }
+            f.profile = {**f.profile, **reading, "measured": True}
+            measured[f.stratum].append(reading)
+        everything = [r for rs in measured.values() for r in rs]
+        floor = self.config.thresholds.min_filled_coverage
+        eligible = 0
+        for f in reps:
+            if not (f.profile or {}).get("measured"):
+                pool = measured.get(f.stratum) or everything
+                f.profile = {**(f.profile or {}), **_infer(f.coverage, pool)}
+                f.profile["inferred_from"] = "stratum" if measured.get(f.stratum) else "dataset"
+            f.filled_coverage = float(f.profile.get("filled_coverage") or 0.0)
+            f.eligible = f.filled_coverage >= floor
+            f.prep = prof.prep_for(f.field_id, f.type, f.profile)
+            eligible += f.eligible
+            for m in s.scalars(
+                select(FieldORM).where(
+                    FieldORM.cell_id == cell.cell_id,
+                    FieldORM.family == f.family,
+                    FieldORM.representative.is_(False),
+                )
+            ):
+                m.profile = {k: v for k, v in f.profile.items() if k != "probes"}
+                m.filled_coverage, m.eligible = f.filled_coverage, f.eligible
+                m.prep = prof.prep_for(m.field_id, m.type, m.profile)
+        cell.plan = {**cell.plan, "eligible_families": eligible}
+        self.ledger.log(
+            s,
+            "health_done",
+            cell.cell_id,
+            sampled=len(everything),
+            families=len(reps),
+            eligible=eligible,
+        )
+        if eligible == 0:
+            self._finish(s, cell, "no_eligible", "no family keeps enough coverage after filling")
+            return
+        self._start_survey(s, cell)
+
+    # ======================= survey =======================
+    def _start_survey(self, s: Session, cell: CellORM) -> None:
+        by_stratum: dict[str, list[FieldORM]] = defaultdict(list)
+        for f in self._reps(s, cell.cell_id):
+            if f.eligible:
+                by_stratum[f.stratum].append(f)
+        picked: list[FieldORM] = []
+        everything = sum(len(m) for m in by_stratum.values())
+        per = self.config.budget.survey_per_stratum
+        for members in by_stratum.values():
+            self.rng.shuffle(members)
+            # a small dataset is surveyed whole: sampling would leave too few to judge
+            picked += members if everything <= SURVEY_ALL_BELOW else members[:per]
+        self.rng.shuffle(picked)
+        picked = picked[: self.config.budget.survey_max_families]
+        for f in picked:
+            self._queue_shapes(s, cell, f)
+        cell.state = CellState.SURVEY
+        t = self.config.thresholds
+        cell.plan = {
+            **cell.plan,
+            "phase": "survey",
+            "survey_order": [f.family for f in picked],
+            "survey_seen": [],
+            "sprt": {"llr": 0.0, "n": 0, "hits": 0},
+            "p0": round(self.p0, 4),
+            "p1": round(min(self.p0 + t.sprt_extra_hits, 0.95), 4),
+            "verdict": None,
+        }
+        self.ledger.log(
+            s, "survey_started", cell.cell_id, families=len(picked), p0=round(self.p0, 4)
+        )
+
+    def _queue_shapes(self, s: Session, cell: CellORM, f: FieldORM) -> None:
+        settings = self._settings(cell)
+        ids = {}
+        period = float((f.profile or {}).get("period_days") or 66.0)
+        for shape, expr in prof.survey_shapes(f.prep, period):
+            row, _ = self._add(
+                s, cell, expr, settings, Stage.SURVEY, shape, extra={"family": f.family}
+            )
+            if row is not None:
+                ids[shape] = row.id
+        f.survey = ids
+
+    def _score_family(self, s: Session, f: FieldORM) -> tuple[float | None, dict[str, Any]]:
+        """Best |Sharpe| over the shapes, ignoring suspicious results. None until done."""
+        best, best_id, best_sign = 0.0, None, 1
+        shapes = {k: v for k, v in (f.survey or {}).items() if k not in ("best_id", "sign")}
+        if not shapes:
+            return None, {}
+        for cid in shapes.values():
+            c = s.get(CandidateORM, cid)
+            if c is None:
+                continue
+            if c.status in PENDING:
+                return None, {}
+            if c.sharpe is None or self._suspicious(c):
+                continue
+            if abs(c.sharpe) > best:
+                best, best_id, best_sign = abs(c.sharpe), c.id, (1 if c.sharpe > 0 else -1)
+        return best, {"best_id": best_id, "sign": best_sign}
+
+    def _update_survey(self, s: Session, cell: CellORM) -> None:
+        plan = dict(cell.plan)
+        seen = list(plan.get("survey_seen") or [])
+        reps = {f.family: f for f in self._reps(s, cell.cell_id)}
+        t = self.config.thresholds
+        test = stats.Sprt(plan["p0"], plan["p1"], t.sprt_alpha, t.sprt_beta, **plan["sprt"])
+        for fam in plan.get("survey_order", []):
+            if fam in seen or fam not in reps:
+                continue
+            score, info = self._score_family(s, reps[fam])
+            if score is None:
+                continue
+            f = reps[fam]
+            f.survey_score = score
+            f.survey = {**f.survey, **{k: v for k, v in info.items() if v is not None}}
+            seen.append(fam)
+            if plan.get("verdict") is None:
+                test.add(score >= t.screen_line)
+        plan["survey_seen"] = seen
+        if plan.get("verdict") is None:
+            plan["sprt"] = {"llr": round(test.llr, 4), "n": test.n, "hits": test.hits}
+            # Two tests, either one can call signal (each at half the error rate):
+            # breadth = more families reach the screening line than noise would (SPRT);
+            # peak    = one family beats the luck bar for every survey formula so far.
+            scored = [reps[f] for f in seen if reps[f].survey_score is not None]
+            formulas = 4 * len(scored)
+            peak = max((f.survey_score or 0 for f in scored), default=0.0)
+            peak_bar = stats.luck_bar(self.sigma, max(formulas, 2) * 2)
+            plan["peak"] = {"best": round(peak, 3), "bar": round(peak_bar, 3)}
+            verdict = test.verdict
+            if peak >= peak_bar:
+                verdict = "signal"
+            all_done = len(seen) >= len(plan.get("survey_order", []))
+            every_stratum = {reps[f].stratum for f in plan.get("survey_order", [])} <= {
+                reps[f].stratum for f in seen
+            }
+            if verdict == "noise" and not every_stratum:
+                verdict = "undecided"  # a concentrated signal may sit in an unmeasured stratum
+            if verdict == "undecided" and all_done and test.n:
+                tail = stats.binomial_tail(test.hits, test.n, plan["p0"])
+                verdict = "signal" if tail < t.sprt_alpha / 2 else "noise"
+                plan["binomial_p"] = tail
+            if verdict in ("signal", "noise"):
+                plan["verdict"] = verdict
+                self.ledger.log(s, "survey_verdict", cell.cell_id, verdict=verdict, **plan["sprt"])
+        cell.plan = plan
+        if plan.get("verdict") == "noise" and cell.state != CellState.EXHAUSTED:
+            sp = plan["sprt"]
+            self._finish(
+                s,
+                cell,
+                "noise",
+                f"survey: {sp['hits']}/{sp['n']} families reached the screening line, "
+                f"noise alone gives {plan['p0']:.0%}",
+            )
+        elif plan.get("verdict") == "signal" and cell.state == CellState.SURVEY:
+            cell.state = CellState.RESEARCH
+            cell.plan = {**plan, "phase": "research", "rounds": 0, "families": {}, "combos": {}}
+
+    # ======================= research rounds =======================
+    def _arms(self, s: Session, cell: CellORM) -> dict[str, stats.Arm]:
+        groups: dict[str, list[float]] = defaultdict(list)
+        for f in self._reps(s, cell.cell_id):
+            if f.eligible and f.survey_score is not None:
+                groups[f.stratum].append(f.survey_score - self.null_best)
+        return stats.shrunk_means(groups) if groups else {}
+
+    def _plan_round(self, s: Session, cell: CellORM) -> int:
+        """Spend one round of simulations where the evidence points."""
+        budget = self.config.budget.round_size
+        arms = self._arms(s, cell)
+        plan = dict(cell.plan)
+        fam_state: dict[str, Any] = {k: dict(v) for k, v in (plan.get("families") or {}).items()}
+        combos: dict[str, Any] = dict(plan.get("combos") or {})
+        by_stratum: dict[str, list[FieldORM]] = defaultdict(list)
+        for f in self._reps(s, cell.cell_id):
+            if f.eligible:
+                by_stratum[f.stratum].append(f)
+        spent = 0
+        closed: set[str] = set()
+        while spent < budget and len(closed) < len(arms):
+            open_arms = {k: v for k, v in arms.items() if k not in closed}
+            stratum = stats.thompson_pick(open_arms, self.rng)[0]
+            work = self._stratum_work(
+                s, cell, stratum, by_stratum[stratum], fam_state, combos, arms[stratum]
+            )
+            if work == 0:
+                closed.add(stratum)
+            spent += work
+        plan = dict(cell.plan)  # _stratum_work may extend the survey order
+        plan["families"], plan["combos"] = fam_state, combos
+        plan["rounds"] = int(plan.get("rounds", 0)) + 1
+        cell.plan = plan
+        self.ledger.log(
+            s,
+            "round_planned",
+            cell.cell_id,
+            round=plan["rounds"],
+            queued=spent,
+            strata_with_work=len(arms) - len(closed),
+        )
+        return spent
+
+    def _stratum_work(
         self,
         s: Session,
         cell: CellORM,
-        h: HypothesisORM,
-        v: dict[str, Any],
-        summary: dict[str, Any],
+        stratum: str,
+        members: list[FieldORM],
+        fam_state: dict[str, Any],
+        combos: dict[str, Any],
+        arm: stats.Arm,
     ) -> int:
-        verdict = v["verdict"]
-        settings = {**self._settings(cell), **h.settings}
-        best = summary["best"]
-        out: list[gen.Proposal] = []
-        if verdict == "drop":
-            h.status = HypothesisStatus.RETIRED
-            return 0
-        if verdict == "flip":
-            for b in [b for b in best if b["sharpe"] < 0][:5]:
-                p = gen.flip(b["expression"], b["settings"], b["sharpe"])
-                if p:
-                    out.append(p)
-        elif verdict == "fix":
-            fail = FIX_TO_FAIL.get(v.get("fix", ""), "")
-            for b in [b for b in best if b["sharpe"] > 0][:3]:
-                out += gen.repair_proposals(
-                    b["expression"],
-                    b["settings"],
-                    [fail, *b["fails"].split(",")],
-                    b["turnover"],
-                    self.meta.neutralizations(cell.region),
-                    may_finetune=False,
-                )
-        elif verdict == "dig":
-            for e in v.get("expressions") or []:
-                out.append(
-                    gen.Proposal(
-                        e["expression"], settings, Stage.DIG, role="dig", change=e.get("why", "")
-                    )
-                )
-            top = next((b for b in best if b["sharpe"] > 0), None)
-            if top and not gen.GROUP_WRAP.search(top["expression"]):
-                out += [
-                    p
-                    for p in gen.second_order(top["expression"], top["settings"])
-                    if p.role == "group_rank"
-                ]
-        return self._start_round(s, cell, h, out)
+        line = self.config.thresholds.screen_line
+        # deepen: the strongest families here that still have rounds and nothing pending
+        live = sorted(
+            (
+                f
+                for f in members
+                if (f.survey_score or 0) >= line and (f.survey or {}).get("best_id")
+            ),
+            key=lambda f: -(f.survey_score or 0),
+        )
+        for f in live:
+            st = fam_state.setdefault(f.family, {})
+            if st.get("done") or st.get("pending"):
+                continue
+            n = self._queue_refine(s, cell, f, st)
+            if n:
+                return n
+        # broaden: a family of this stratum the survey has not measured yet
+        untested = [f for f in members if f.survey_score is None and not f.survey]
+        if untested:
+            f = self.rng.choice(untested)
+            self._queue_shapes(s, cell, f)
+            plan = dict(cell.plan)
+            plan["survey_order"] = [*plan.get("survey_order", []), f.family]
+            cell.plan = plan
+            return len(f.survey)
+        # combine: once per stratum that is clearly above noise
+        if arm.mean - 2 * arm.sd > 0 and stratum not in combos and len(members) >= 2:
+            return self._queue_combos(s, cell, stratum, members, combos)
+        return 0
 
-    def _summary(self, s: Session, h: HypothesisORM) -> dict[str, Any]:
+    def _queue_refine(self, s: Session, cell: CellORM, f: FieldORM, st: dict[str, Any]) -> int:
         t = self.config.thresholds
-        rows = [
-            c
-            for c in s.scalars(select(CandidateORM).where(CandidateORM.hypothesis_id == h.id))
-            if c.extra.get("round") == h.rounds and c.stage != Stage.ROBUST
-        ]
-        done = [c for c in rows if c.sharpe is not None]
-        sharpes = sorted(c.sharpe for c in done if c.sharpe is not None)
-        by_field: dict[str, float] = {}
-        for c in done:
-            for _, fid in SLOT_LABEL.findall(c.change or ""):
-                if abs(c.sharpe or 0) > abs(by_field.get(fid, 0.0)):
-                    by_field[fid] = round(c.sharpe or 0.0, 2)
-        best = sorted(done, key=lambda c: -abs(c.sharpe or 0))[:6]
-        errors = [c.error for c in rows if c.status == CandidateStatus.FAILED and c.error]
+        if st.get("rounds", 0) >= t.refine_max_rounds or st.get("dry", 0) >= 2:
+            st["done"] = True
+            return 0
+        if not st.get("parent"):
+            parent = s.get(CandidateORM, f.survey["best_id"])
+            if parent is None or parent.sharpe is None:
+                st["done"] = True
+                return 0
+            expr = (
+                parent.expression
+                if f.survey.get("sign", 1) > 0
+                else f"multiply(-1, {parent.expression})"
+            )
+            st.update(
+                parent=expr, parent_settings=parent.settings, best=abs(parent.sharpe), tried=[]
+            )
+        records = self._structure_record(s, cell.category)
+        options = [n for n in gen.STRUCTURES if n not in st.get("tried", [])]
+        if not options:
+            st["done"] = True
+            return 0
+        draws = sorted(
+            options, key=lambda n: -stats.beta_draw(*records.get(n, (0.0, 0.0)), self.rng)
+        )[: self.config.budget.refine_structures]
+        ids = []
+        for name in draws:
+            row, _ = self._add(
+                s,
+                cell,
+                gen.structure(name, st["parent"]),
+                st["parent_settings"],
+                Stage.REFINE,
+                name,
+                extra={"family": f.family, "structure": name, "parent_best": st["best"]},
+            )
+            if row is not None:
+                ids.append(row.id)
+        st["tried"] = [*st.get("tried", []), *draws]
+        st["pending"] = ids
+        st["rounds"] = st.get("rounds", 0) + 1
+        if not ids:
+            st["done"] = True
+        return len(ids)
 
-        def q(p: float) -> float | None:
-            if not sharpes:
-                return None
-            return round(sharpes[min(int(p * len(sharpes)), len(sharpes) - 1)], 2)
-
-        return {
-            "id": h.id,
-            "title": h.title,
-            "mechanism": h.statement,
-            "direction": h.direction,
-            "template": h.template,
-            "round": h.rounds,
-            "previous_verdicts": h.verdicts[-3:],
-            "simulated": len(rows),
-            "errors": len(rows) - len(done),
-            "error_samples": errors[:3],
-            "ore_count": sum(abs(x) >= t.ore_sharpe for x in sharpes),
-            "positive_share": round(sum(x > 0 for x in sharpes) / len(sharpes), 2)
-            if sharpes
-            else None,
-            "sharpe_p10": q(0.1),
-            "sharpe_median": round(statistics.median(sharpes), 2) if sharpes else None,
-            "sharpe_p90": q(0.9),
-            "best_by_field": dict(sorted(by_field.items(), key=lambda kv: -abs(kv[1]))[:10]),
-            "best": [
+    def _queue_combos(
+        self,
+        s: Session,
+        cell: CellORM,
+        stratum: str,
+        members: list[FieldORM],
+        combos: dict[str, Any],
+    ) -> int:
+        n = self.config.budget.combo_count
+        settings = self._settings(cell)
+        strong = sorted(members, key=lambda f: -(f.survey_score or 0))[:6]
+        rows: dict[str, list[str]] = {"llm": [], "random": []}
+        for p in gen.random_combos([f.prep for f in strong], n, self.rng, settings):
+            row, _ = self._add(
+                s,
+                cell,
+                p.expression,
+                settings,
+                Stage.COMBO,
+                "random",
+                change=p.change,
+                extra={"stratum": stratum, "arm": "random"},
+            )
+            if row is not None:
+                rows["random"].append(row.id)
+        if self.llm is not None:
+            summary = [
                 {
-                    "expression": c.expression,
-                    "settings": c.settings,
-                    "sharpe": round(c.sharpe or 0.0, 2),
-                    "fitness": round(c.fitness or 0.0, 2),
-                    "turnover": round(c.turnover or 0.0, 3),
-                    "fails": c.fails,
-                    "change": c.change,
+                    "stratum": stratum,
+                    "fields": [
+                        {
+                            "id": f.field_id,
+                            "prep": f.prep,
+                            "description": f.description[:200],
+                            "survey_best_abs_sharpe": round(f.survey_score or 0, 2),
+                            "best_sign": (f.survey or {}).get("sign"),
+                        }
+                        for f in strong
+                    ],
                 }
-                for c in best
-            ],
-        }
+            ]
+            ops = sorted(f"{k}: {v}" for k, v in self.meta.definitions.items())
+            try:
+                proposals = self.llm.combinations(_brief(cell), summary, ops, n)
+            except RuntimeError:
+                proposals = []
+            for c in proposals:
+                row, _ = self._add(
+                    s,
+                    cell,
+                    c["expression"],
+                    settings,
+                    Stage.COMBO,
+                    "llm",
+                    change=c["why"],
+                    extra={"stratum": stratum, "arm": "llm"},
+                )
+                if row is not None:
+                    rows["llm"].append(row.id)
+        combos[stratum] = rows
+        return len(rows["llm"]) + len(rows["random"])
 
-    # ================= what to do next =================
+    def _settle_refines(self, s: Session, cell: CellORM) -> None:
+        plan = dict(cell.plan)
+        fam_state = {k: dict(v) for k, v in (plan.get("families") or {}).items()}
+        gain_min = self.config.thresholds.refine_min_gain
+        changed = False
+        for st in fam_state.values():
+            ids = st.get("pending") or []
+            if not ids:
+                continue
+            rows = [s.get(CandidateORM, i) for i in ids]
+            if any(r is not None and r.status in PENDING for r in rows):
+                continue
+            best_row = max(
+                (
+                    r
+                    for r in rows
+                    if r is not None and r.sharpe is not None and not self._suspicious(r)
+                ),
+                key=lambda r: r.sharpe or 0,
+                default=None,
+            )
+            gain = (best_row.sharpe or 0) - st["best"] if best_row else -1.0
+            if best_row is not None and gain >= gain_min:
+                st.update(
+                    parent=best_row.expression,
+                    parent_settings=best_row.settings,
+                    best=best_row.sharpe,
+                    dry=0,
+                )
+            else:
+                st["dry"] = st.get("dry", 0) + 1
+            st["pending"] = []
+            if (
+                st.get("dry", 0) >= 2
+                or st.get("rounds", 0) >= self.config.thresholds.refine_max_rounds
+            ):
+                st["done"] = True
+            changed = True
+        if changed:
+            plan["families"] = fam_state
+            cell.plan = plan
+
+    def _structure_record(self, s: Session, category: str) -> dict[str, tuple[float, float]]:
+        """Per structure, across all datasets of this category: (beat parent, did not)."""
+        gain_min = self.config.thresholds.refine_min_gain
+        out: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
+        rows = s.execute(
+            select(CandidateORM.extra, CandidateORM.sharpe)
+            .join(CellORM, CellORM.cell_id == CandidateORM.cell_id)
+            .where(
+                CandidateORM.stage == Stage.REFINE,
+                CandidateORM.status == CandidateStatus.DONE,
+                CellORM.category == category,
+            )
+        )
+        for extra, sharpe in rows:
+            name = (extra or {}).get("structure")
+            if not name or sharpe is None:
+                continue
+            won = sharpe >= float((extra or {}).get("parent_best", 0)) + gain_min
+            out[name][0 if won else 1] += 1
+        return {k: (v[0], v[1]) for k, v in out.items()}
+
+    # ======================= driving =======================
     def advance(self) -> dict[str, int]:
-        """Moves every open dataset one step if its current step is finished."""
-        moved = {"profiled": 0, "queued": 0, "reviewed": 0, "ideas": 0}
+        """Moves every open dataset one step when its current step is finished."""
+        moved = {"health": 0, "survey": 0, "rounds": 0, "finished": 0}
         with self.ledger.session() as s:
-            open_cells = [
+            ids = [
                 c.cell_id
                 for c in s.scalars(
                     select(CellORM).where(
-                        CellORM.state.in_([CellState.STUDYING, CellState.RESEARCH])
-                    )
-                )
-            ]
-        for cell_id in open_cells:
-            with self.ledger.session() as s:
-                cell = _cell(s, cell_id)
-                if cell.sims_used >= self.config.budget.dataset_sim_cap:
-                    self._stop(s, cell, "dataset simulation budget spent")
-                    continue
-                if self._pending(s, cell_id):
-                    continue
-                if cell.state == CellState.STUDYING:
-                    self.finish_profile(s, cell)
-                    moved["profiled"] += 1
-                hyps = list(
-                    s.scalars(
-                        select(HypothesisORM).where(
-                            HypothesisORM.cell_id == cell_id,
-                            HypothesisORM.status.in_(
-                                [HypothesisStatus.APPROVED, HypothesisStatus.PROPOSED]
-                            ),
+                        CellORM.state.in_(
+                            [CellState.STUDYING, CellState.SURVEY, CellState.RESEARCH]
                         )
                     )
                 )
-                fresh = [h for h in hyps if h.status == HypothesisStatus.APPROVED and h.rounds == 0]
-                for h in fresh:
-                    added = self.queue_idea(s, h)
-                    if added == 0:
-                        h.status = HypothesisStatus.RETIRED
-                        h.verdicts = [
-                            {
-                                "round": 0,
-                                "verdict": "drop",
-                                "reason": "nothing new: every expression invalid or already tested",
-                            }
-                        ]
-                    moved["queued"] += added
-                if fresh and not any(h.rounds for h in fresh):
-                    # A whole batch of ideas that cannot be expressed counts as a dry round.
-                    cell.rounds_without_ore += 1
-                    if cell.rounds_without_ore >= self.config.policy.rounds_without_ore_to_stop:
-                        self._stop(s, cell, "new ideas produced nothing untested")
-                        continue
-                fresh = [h for h in fresh if h.rounds]
-                needs_review = any(
-                    h.status == HypothesisStatus.APPROVED and h.rounds > h.reviewed for h in hyps
-                )
-                needs_ideas = not [h for h in hyps if h.status != HypothesisStatus.RETIRED]
-            if fresh:
-                continue
-            if needs_review:
-                self.review(cell_id)
-                moved["reviewed"] += 1
-            elif needs_ideas:
-                proposed = self.propose_ideas(cell_id)
-                moved["ideas"] += proposed
-                if proposed == 0:
-                    with self.ledger.session() as s:
-                        self._stop(s, _cell(s, cell_id), "LLM produced no usable idea")
+            ]
+        for cell_id in ids:
+            with self.ledger.session() as s:
+                cell = _cell(s, cell_id)
+                if cell.sims_used >= self.config.budget.dataset_sim_cap:
+                    self._finish(s, cell, "budget", "dataset simulation budget spent")
+                    moved["finished"] += 1
+                    continue
+                phase = (cell.plan or {}).get("phase")
+                pending = self._pending(s, cell_id)
+                if phase == "health_a" and not pending:
+                    self._health_b(s, cell)
+                    moved["health"] += 1
+                elif phase == "health_b" and not pending:
+                    self._finish_health(s, cell)
+                    moved["health"] += 1
+                elif phase in ("survey", "research"):
+                    before = (cell.state, len((cell.plan or {}).get("survey_seen") or []))
+                    self._update_survey(s, cell)
+                    after = (cell.state, len((cell.plan or {}).get("survey_seen") or []))
+                    moved["survey"] += before != after
+                    if cell.state == CellState.EXHAUSTED:
+                        moved["finished"] += 1
+                    elif cell.state == CellState.RESEARCH:
+                        self._settle_refines(s, cell)
+                        if self._pending(s, cell_id) < self.config.budget.round_size // 2:
+                            if self._plan_round(s, cell) == 0:
+                                if not self._pending(s, cell_id):
+                                    self._finish(
+                                        s,
+                                        cell,
+                                        "signal",
+                                        "every stratum with signal has been worked",
+                                    )
+                                    moved["finished"] += 1
+                            else:
+                                moved["rounds"] += 1
         return moved
 
-    # ================= results =================
+    # ======================= results =======================
     def evaluate(self) -> dict[str, int]:
-        """Records every new result. Idempotent per candidate."""
+        """Records every new result; queues robustness and repairs. Idempotent."""
         counts = {"evaluated": 0, "ready": 0}
-        t = self.config.thresholds
         with self.ledger.session() as s:
             fresh = list(
                 s.scalars(
@@ -532,45 +767,87 @@ class Factory:
                 cell = _cell(s, c.cell_id)
                 cell.sims_used += 1
                 cell.updated_at = utc_now()
-                if c.sharpe is None or c.stage == Stage.PROFILE:
+                if c.sharpe is None or c.stage in (Stage.PROFILE, Stage.ROBUST):
                     continue
-                sharpe = c.sharpe
-                cell.best_sharpe = max(cell.best_sharpe, abs(sharpe))
-                if c.stage != Stage.ROBUST:
-                    cell.hits += abs(sharpe) >= t.ore_sharpe
-                if c.hypothesis_id:
-                    h = s.get(HypothesisORM, c.hypothesis_id)
-                    if h:
-                        h.best_sharpe = max(h.best_sharpe, sharpe)
-                if c.stage != Stage.ROBUST and self._passes_is(c, cell.region):
+                if self._suspicious(c):
+                    c.extra = {**c.extra, "suspicious": True}
+                    continue
+                cell.best_sharpe = max(cell.best_sharpe, abs(c.sharpe))
+                cell.hits += abs(c.sharpe) >= self.config.thresholds.screen_line
+                if self._passes_is(c, cell):
                     c.extra = {**c.extra, "ready": True}
                     counts["ready"] += 1
-            counts["robust_queued"] = self._schedule_robustness(s)
+                elif c.stage != Stage.REPAIR:
+                    self._repair(s, cell, c)
+            self._schedule_robustness(s)
             self._settle_robustness(s)
             for cell in s.scalars(
                 select(CellORM).where(
-                    CellORM.submitted >= t.dataset_cap, CellORM.state != CellState.SATURATED
+                    CellORM.submitted >= self.config.thresholds.dataset_cap,
+                    CellORM.state != CellState.SATURATED,
                 )
             ):
                 cell.state = CellState.SATURATED
                 cell.stop_reason = f"{cell.submitted} submissions from this dataset"
         return counts
 
-    def _passes_is(self, c: CandidateORM, region: str) -> bool:
+    def tries(self, s: Session, cell_id: str) -> int:
+        return int(
+            s.scalar(
+                select(func.count())
+                .select_from(CandidateORM)
+                .where(
+                    CandidateORM.cell_id == cell_id,
+                    CandidateORM.stage.not_in([Stage.PROFILE, Stage.ROBUST]),
+                    CandidateORM.status == CandidateStatus.DONE,
+                )
+            )
+            or 0
+        )
+
+    def luck_bar(self, s: Session, cell_id: str) -> float:
+        return stats.luck_bar(self.sigma, self.tries(s, cell_id))
+
+    def _passes_is(self, c: CandidateORM, cell: CellORM) -> bool:
         t = self.config.thresholds
         if c.fails or c.sharpe is None or c.fitness is None or c.turnover is None:
             return False
         margin_bps = (c.margin or 0.0) * 10_000
         return (
-            c.sharpe >= self.config.sharpe_floor(region)
+            c.sharpe >= self.config.sharpe_floor(cell.region)
             and c.fitness >= t.submit_fitness
             and t.turnover_min <= c.turnover <= t.turnover_max
-            and margin_bps >= self.config.margin_floor(region)
+            and margin_bps >= self.config.margin_floor(cell.region)
         )
 
-    def _schedule_robustness(self, s: Session) -> int:
-        """Stress-test only alphas that could be chosen: per dataset the best few by fitness
-        with distinct field sets, and at most twice the daily submission slots per day."""
+    def _suspicious(self, c: CandidateORM) -> bool:
+        t = self.config.thresholds
+        return abs(c.sharpe or 0) > t.suspicious_sharpe or (c.turnover or 0) > t.suspicious_turnover
+
+    def _repair(self, s: Session, cell: CellORM, c: CandidateORM) -> None:
+        """Close to the floor and blocked only by fixable checks: one rule-based fix per
+        kind, never a fix of a fix."""
+        fails = set((c.fails or "").split(",")) - {""}
+        floor = self.config.sharpe_floor(cell.region)
+        if not fails & FIXABLE or not fails <= FIXABLE | {"LOW_FITNESS", "LOW_SHARPE"}:
+            return
+        if (c.sharpe or 0) < floor - 0.2:
+            return
+        for p in gen.repair_proposals(
+            c.expression,
+            c.settings,
+            sorted(fails),
+            c.turnover,
+            self.meta.neutralizations(cell.region),
+            may_finetune=False,
+        ):
+            self._add(
+                s, cell, p.expression, p.settings, Stage.REPAIR, p.role, change=p.change, parent=c
+            )
+
+    def _schedule_robustness(self, s: Session) -> None:
+        """Only results above the luck bar of their dataset are stress-tested: per dataset
+        the best two distinct field sets by fitness, at most twice the daily slots a day."""
         start = datetime.combine(datetime.now(UTC).date(), datetime.min.time(), tzinfo=UTC)
         tested_today = {
             c.parent_id
@@ -582,43 +859,53 @@ class Factory:
         }
         room = 2 * self.config.policy.max_submissions_per_day - len(tested_today)
         if room <= 0:
-            return 0
+            return
         waiting = [
             c
             for c in s.scalars(select(CandidateORM).where(CandidateORM.status == "DONE"))
             if c.extra.get("ready") and not c.extra.get("robust_queued")
         ]
         waiting.sort(key=lambda c: -(c.fitness or 0))
+        bars: dict[str, float] = {}
         taken: dict[str, set[tuple[str, ...]]] = {}
-        queued = 0
         for c in waiting:
             if room <= 0:
                 break
+            bar = bars.setdefault(c.cell_id, self.luck_bar(s, c.cell_id))
+            if (c.sharpe or 0) < bar:
+                c.extra = {**c.extra, "below_luck_bar": round(bar, 2)}
+                continue
             signature = tuple(c.extra.get("fields") or [])
             seen = taken.setdefault(c.cell_id, set())
             if signature in seen or len(seen) >= 2:
                 continue
             seen.add(signature)
             cell = _cell(s, c.cell_id)
-            proposals = gen.robustness_proposals(
+            for p in gen.robustness_proposals(
                 c.expression,
                 c.settings,
                 self.meta.neutralizations(cell.region),
                 self.meta.universes(cell.region),
-            )
-            for p in proposals:
-                p.extra["robust_of"] = c.id
-            queued += self._enqueue(s, cell, proposals, parent=c, hypothesis_id=c.hypothesis_id)
-            c.extra = {**c.extra, "robust_queued": True}
+            ):
+                self._add(
+                    s,
+                    cell,
+                    p.expression,
+                    p.settings,
+                    Stage.ROBUST,
+                    p.role,
+                    parent=c,
+                    extra={"robust_of": c.id},
+                )
+            c.extra = {**c.extra, "robust_queued": True, "luck_bar": round(bar, 2)}
             room -= 1
-        return queued
 
     def _settle_robustness(self, s: Session) -> None:
         t = self.config.thresholds
         ready = [
             c
             for c in s.scalars(select(CandidateORM).where(CandidateORM.status == "DONE"))
-            if c.extra.get("ready") and "robust" not in c.extra
+            if c.extra.get("robust_queued") and "robust" not in c.extra
         ]
         for parent in ready:
             kids = list(
@@ -641,20 +928,11 @@ class Factory:
                 s, "robustness", parent.cell_id, candidate=parent.id, passed=verdict, ratios=results
             )
 
-    # ================= helpers =================
-    def _start_round(
-        self, s: Session, cell: CellORM, h: HypothesisORM, proposals: Sequence[gen.Proposal]
-    ) -> int:
-        for p in proposals:
-            p.extra["round"] = h.rounds + 1
-        added = self._enqueue(s, cell, proposals, hypothesis_id=h.id)
-        if added:
-            h.rounds += 1
-        return added
-
-    def _stop(self, s: Session, cell: CellORM, reason: str) -> None:
+    # ======================= helpers =======================
+    def _finish(self, s: Session, cell: CellORM, outcome: str, reason: str) -> None:
         cell.state = CellState.EXHAUSTED
         cell.stop_reason = reason
+        cell.plan = {**(cell.plan or {}), "phase": "done", "outcome": outcome}
         for q in s.scalars(
             select(CandidateORM).where(
                 CandidateORM.cell_id == cell.cell_id,
@@ -663,88 +941,87 @@ class Factory:
             )
         ):
             q.status = CandidateStatus.INVALID
-            q.error = f"dataset stopped: {reason}"
-        self.ledger.log(s, "dataset_stopped", cell.cell_id, reason=reason, sims=cell.sims_used)
+            q.error = f"dataset finished: {reason}"
+        self.ledger.log(
+            s, "dataset_stopped", cell.cell_id, outcome=outcome, reason=reason, sims=cell.sims_used
+        )
 
-    def _is_researching(self, cell_id: str) -> bool:
-        with self.ledger.session() as s:
-            return _cell(s, cell_id).state == CellState.RESEARCH
+    def _add(
+        self,
+        s: Session,
+        cell: CellORM,
+        expression: str,
+        settings: dict[str, Any],
+        stage: str,
+        role: str,
+        *,
+        change: str = "",
+        parent: CandidateORM | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> tuple[CandidateORM | None, bool]:
+        """Validated, deduplicated (an identical earlier row is returned and its result
+        reused), within the dataset budget."""
+        fields = {
+            f.field_id: f.type
+            for f in s.scalars(select(FieldORM).where(FieldORM.cell_id == cell.cell_id))
+        }
+        verdict = check(expression, operators=self.meta.operators, fields=fields)
+        if not verdict.ok:
+            self.ledger.log(
+                s, "invalid", cell.cell_id, expression=expression, issues=verdict.issues[:3]
+            )
+            return None, False
+        if stage != Stage.ROBUST:
+            room = (
+                self.config.budget.dataset_sim_cap - cell.sims_used - self._pending(s, cell.cell_id)
+            )
+            if room <= 0:
+                return None, False
+        row, created = self.ledger.get_or_add(
+            s,
+            cell_id=cell.cell_id,
+            parent_id=parent.id if parent else None,
+            stage=stage,
+            role=role,
+            change=change,
+            expression=expression,
+            settings=settings,
+            priority=100 * max(cell.rank_score, 1e-3) * STAGE_WEIGHT.get(stage, 1.0),
+            extra={
+                **(extra or {}),
+                "atom": verdict.atom,
+                "operators": verdict.operator_count,
+                "fields": sorted(verdict.fields_used),
+            },
+        )
+        if not created and row.status == CandidateStatus.INVALID:
+            row.status = CandidateStatus.QUEUED  # cancelled by an earlier run: run it now
+            row.error = None
+        return row, created
 
     @staticmethod
-    def _pending(s: Session, cell_id: str) -> bool:
-        """Anything still to simulate for this dataset, robustness tests aside."""
-        return (
+    def _pending(s: Session, cell_id: str) -> int:
+        return int(
             s.scalar(
-                select(CandidateORM.id)
+                select(func.count())
+                .select_from(CandidateORM)
                 .where(
                     CandidateORM.cell_id == cell_id,
                     CandidateORM.status.in_(PENDING),
                     CandidateORM.stage != Stage.ROBUST,
                 )
-                .limit(1)
-            )
-            is not None
-        )
-
-    def _enqueue(
-        self,
-        s: Session,
-        cell: CellORM,
-        proposals: Iterable[gen.Proposal],
-        *,
-        parent: CandidateORM | None = None,
-        hypothesis_id: str | None = None,
-    ) -> int:
-        fields = {
-            f.field_id: f.type
-            for f in s.scalars(select(FieldORM).where(FieldORM.cell_id == cell.cell_id))
-        }
-        room = self.config.budget.dataset_sim_cap - cell.sims_used - self._queued(s, cell.cell_id)
-        priority = 100 * max(cell.rank_score, 1e-3)
-        added = 0
-        for p in proposals:
-            if p.stage != Stage.ROBUST and room <= 0:
-                self.ledger.log(s, "dataset_budget_reached", cell.cell_id, stage=p.stage)
-                break
-            verdict = check(p.expression, operators=self.meta.operators, fields=fields)
-            if not verdict.ok:
-                self.ledger.log(
-                    s, "invalid", cell.cell_id, expression=p.expression, issues=verdict.issues[:3]
-                )
-                continue
-            row = self.ledger.add_candidate(
-                s,
-                cell_id=cell.cell_id,
-                hypothesis_id=hypothesis_id,
-                parent_id=parent.id if parent else None,
-                stage=p.stage,
-                role=p.role,
-                change=p.change,
-                expression=p.expression,
-                settings=p.settings,
-                priority=priority * STAGE_WEIGHT.get(p.stage, 1.0),
-                extra={
-                    **p.extra,
-                    "atom": verdict.atom,
-                    "operators": verdict.operator_count,
-                    "fields": sorted(verdict.fields_used),
-                },
-            )
-            if row is not None:
-                added += 1
-                if p.stage != Stage.ROBUST:
-                    room -= 1
-        return added
-
-    @staticmethod
-    def _queued(s: Session, cell_id: str) -> int:
-        return int(
-            s.scalar(
-                select(func.count())
-                .select_from(CandidateORM)
-                .where(CandidateORM.cell_id == cell_id, CandidateORM.status.in_(PENDING))
             )
             or 0
+        )
+
+    @staticmethod
+    def _reps(s: Session, cell_id: str) -> list[FieldORM]:
+        return list(
+            s.scalars(
+                select(FieldORM).where(
+                    FieldORM.cell_id == cell_id, FieldORM.representative.is_(True)
+                )
+            )
         )
 
     def _settings(self, cell: CellORM) -> dict[str, Any]:
@@ -756,54 +1033,50 @@ class Factory:
             self.meta.neutralizations(cell.region),
         )
 
-    @staticmethod
-    def _dataset_brief(cell: CellORM) -> dict[str, Any]:
+
+def _infer(platform_coverage: float, pool: list[dict[str, float]]) -> dict[str, float]:
+    """A family that was not probed takes its stratum's update period and its stratum's
+    ratio of filled to daily coverage, applied to its own daily coverage when known."""
+    if not pool:
         return {
-            "id": cell.dataset_id,
-            "name": cell.dataset_name,
-            "category": cell.category,
-            "region": cell.region,
-            "universe": cell.universe,
-            "delay": cell.delay,
-            "description": cell.description[:1500],
+            "period_days": 66.0,
+            "raw_coverage": platform_coverage,
+            "filled_coverage": platform_coverage,
         }
+    period = statistics.median(r["period_days"] for r in pool)
+    ratios = [r["filled_coverage"] / r["raw_coverage"] for r in pool if r["raw_coverage"] > 0]
+    ratio = statistics.median(ratios) if ratios else 1.0
+    filled = (
+        min(platform_coverage * ratio, 1.0)
+        if platform_coverage > 0
+        else statistics.median(r["filled_coverage"] for r in pool)
+    )
+    return {
+        "period_days": round(period, 1),
+        "raw_coverage": round(platform_coverage, 3),
+        "filled_coverage": round(filled, 3),
+    }
 
-    @staticmethod
-    def _field_infos(s: Session, cell_id: str) -> list[FieldInfo]:
-        rows = s.scalars(
-            select(FieldORM)
-            .where(FieldORM.cell_id == cell_id)
-            .order_by(FieldORM.representative.desc(), FieldORM.coverage.desc())
-            .limit(LLM_FIELDS)
-        )
-        return [
-            FieldInfo(f.field_id, f.type, f.description, prof.describe(f.profile), f.prep)
-            for f in rows
-        ]
 
-    def _references(
-        self, s: Session, cell: CellORM, fields: Sequence[FieldInfo]
-    ) -> list[dict[str, str]]:
-        """Papers naming this dataset first, then the closest forum posts and homework."""
-        pattern = re.compile(rf"(?<![\w]){re.escape(cell.dataset_id)}(?![\w])", re.I)
-        papers = [
-            i
-            for i in s.scalars(select(IdeaORM))
-            if (i.source in PAPER_SOURCES or PAPER_TITLE.search(i.title))
-            and pattern.search(f"{i.title}\n{i.body}")
-        ][:3]
-        if self._ideas is None:
-            self._ideas = IdeaIndex.load(s)
-        query = " ".join(
-            [cell.dataset_name, cell.dataset_id, cell.category, cell.description]
-            + [f.description for f in fields[:15]]
-        )
-        seen = {i.id for i in papers}
-        near = [i for i in self._ideas.search(query, 9) if i.id not in seen][:6]
-        return [
-            {"kind": "paper naming this dataset", "title": i.title, "excerpt": i.body[:2000]}
-            for i in papers
-        ] + [{"kind": i.source, "title": i.title, "excerpt": i.body[:1200]} for i in near]
+def _count(s: Session, cid: str | None) -> int | None:
+    if not cid:
+        return None
+    c = s.get(CandidateORM, cid)
+    if c is None or c.status != CandidateStatus.DONE:
+        return None
+    return (c.long_count or 0) + (c.short_count or 0)
+
+
+def _brief(cell: CellORM) -> dict[str, Any]:
+    return {
+        "id": cell.dataset_id,
+        "name": cell.dataset_name,
+        "category": cell.category,
+        "region": cell.region,
+        "universe": cell.universe,
+        "delay": cell.delay,
+        "description": cell.description[:1500],
+    }
 
 
 def _cell(s: Session, cell_id: str) -> CellORM:
@@ -813,13 +1086,24 @@ def _cell(s: Session, cell_id: str) -> CellORM:
     return cell
 
 
-def approve_hypotheses(ledger: Ledger, ids: Sequence[str], approve: bool = True) -> int:
+def reset_legacy(ledger: Ledger) -> int:
+    """Datasets stopped or left open by the earlier logic (no plan) go back to the queue;
+    their simulations stay and are reused when the same formula comes up again."""
+    n = 0
     with ledger.session() as s:
-        n = 0
-        for hid in ids:
-            h = s.get(HypothesisORM, hid)
-            if h and h.status == HypothesisStatus.PROPOSED:
-                h.status = HypothesisStatus.APPROVED if approve else HypothesisStatus.REJECTED
-                h.decided_at = utc_now()
+        legacy: set[str] = set()
+        for c in s.scalars(
+            select(CellORM).where(
+                CellORM.state.in_([CellState.EXHAUSTED, CellState.STUDYING, CellState.RESEARCH])
+            )
+        ):
+            if not (c.plan or {}).get("phase"):
+                c.state, c.stop_reason = CellState.NEW, ""
+                legacy.add(c.cell_id)
                 n += 1
-        return n
+        for q in s.scalars(
+            select(CandidateORM).where(CandidateORM.status == CandidateStatus.QUEUED)
+        ):
+            if q.cell_id in legacy:
+                q.status, q.error = CandidateStatus.INVALID, "left by the earlier logic"
+    return n

@@ -74,6 +74,7 @@ select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 "src/alpha_orchestrator/factory/*.py" = ["RUF001", "RUF002", "RUF003"]
 # HTML template strings; wrapping them hurts readability more than long lines do.
 "src/alpha_orchestrator/factory/dashboard.py" = ["RUF001", "RUF002", "RUF003", "E501"]
+"src/alpha_orchestrator/factory/story.py" = ["RUF001", "RUF002", "RUF003", "E501"]
 "tests/factory/*.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]

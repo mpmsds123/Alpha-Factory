@@ -7,7 +7,7 @@ from sqlalchemy import select
 from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ideas import IdeaIndex, import_ideas, tokens
 from alpha_orchestrator.factory.ledger import Ledger
-from alpha_orchestrator.factory.llm import FactoryLLM, FieldInfo
+from alpha_orchestrator.factory.llm import FactoryLLM
 from alpha_orchestrator.factory.models import IdeaORM, LLMCallORM
 
 
@@ -16,68 +16,30 @@ def scripted(*replies: str):  # type: ignore[no-untyped-def]
     return lambda model, system, user: (queue.pop(0), 100, 50)
 
 
-def test_ideas_keep_only_real_fields_and_complete_templates() -> None:
+def test_group_fields_keeps_known_families_and_is_ledgered() -> None:
     ledger = Ledger("sqlite://")
     reply = json.dumps(
-        {
-            "ideas": [
-                {
-                    "title": "Revision drift",
-                    "mechanism": "m",
-                    "template": "group_rank(ts_delta({A}, {w}), industry)",
-                    "slots": {"A": ["eps_rev", "made_up"]},
-                    "windows": [21, "63", "x"],
-                    "decay": 99,
-                    "neutralization": "industry",
-                    "sources": ["P"],
-                },
-                {
-                    "title": "Ghost",
-                    "mechanism": "m",
-                    "template": "rank({A})",
-                    "slots": {"A": ["no"]},
-                },
-                {
-                    "title": "No slot",
-                    "mechanism": "m",
-                    "template": "rank({A} - {B})",
-                    "slots": {"A": ["eps_rev"]},
-                },
-            ]
-        }
+        {"groups": {"EPS revisions": ["eps_rev", "made_up"], "Dispersion": ["eps_std"]}}
     )
     llm = FactoryLLM(FactoryConfig(), ledger, complete=scripted(reply))
-    out = llm.ideas({"id": "ds"}, [FieldInfo("eps_rev", "MATRIX", "d")], [], [], [])
-    assert [i["title"] for i in out] == ["Revision drift"]
-    idea = out[0]
-    assert idea["slots"] == {"A": ["eps_rev"]} and idea["windows"] == [21, 63]
-    assert idea["decay"] == 30 and idea["neutralization"] == "INDUSTRY"
+    out = llm.group_fields({"id": "ds"}, [{"family": "eps_rev"}, {"family": "eps_std"}])
+    assert out == {"eps_rev": "EPS revisions", "eps_std": "Dispersion"}
     with ledger.session() as s:
         (call,) = s.scalars(select(LLMCallORM))
-    assert call.purpose == "ideas" and call.prompt_tokens == 100
-    assert call.model == FactoryConfig().llm.strong_model
+    assert call.purpose == "group_fields" and call.model == FactoryConfig().llm.model
 
 
-def test_review_keeps_known_verdicts_and_defaults_the_dataset_decision() -> None:
+def test_combinations_use_the_strong_model_and_cap_the_count() -> None:
     ledger = Ledger("sqlite://")
     reply = json.dumps(
-        {
-            "ideas": [
-                {
-                    "id": "h1",
-                    "verdict": "dig",
-                    "reason": "r",
-                    "expressions": [{"expression": "rank(a)", "why": "w"}] * 20,
-                },
-                {"id": "h2", "verdict": "celebrate"},
-            ],
-            "dataset": {"decision": "party"},
-        }
+        {"combinations": [{"expression": "rank(a) - rank(b)", "why": "w"}] * 9 + [{"nope": 1}]}
     )
     llm = FactoryLLM(FactoryConfig(), ledger, complete=scripted(reply))
-    out = llm.review({}, [], [], [], dig_per_idea=3)
-    assert [v["id"] for v in out["ideas"]] == ["h1"] and len(out["ideas"][0]["expressions"]) == 3
-    assert out["dataset"]["decision"] == "continue"
+    out = llm.combinations({"id": "ds"}, [], [], n=3)
+    assert len(out) == 3 and out[0] == {"expression": "rank(a) - rank(b)", "why": "w"}
+    with ledger.session() as s:
+        (call,) = s.scalars(select(LLMCallORM))
+    assert call.model == FactoryConfig().llm.strong_model
 
 
 def test_bad_json_is_retried_then_raises() -> None:

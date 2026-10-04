@@ -34,9 +34,10 @@ class FactoryBase(DeclarativeBase):
 
 class CellState:
     NEW = "NEW"  # known from the catalog, nothing spent yet
-    STUDYING = "STUDYING"  # fields fetched; 6-way data probes queued or running
-    RESEARCH = "RESEARCH"  # data understood; ideas being tested round by round
-    EXHAUSTED = "EXHAUSTED"  # stop rule hit: no ore for N rounds, budget spent, or LLM said so
+    STUDYING = "STUDYING"  # health check: update period and filled coverage, by sampling
+    SURVEY = "SURVEY"  # sampled survey: does this dataset carry more signal than noise?
+    RESEARCH = "RESEARCH"  # signal found: budget allocated to strata by concentration
+    EXHAUSTED = "EXHAUSTED"  # finished; `plan["outcome"]` says how
     SATURATED = "SATURATED"  # enough submissions from this dataset (concentration cap)
 
 
@@ -49,9 +50,12 @@ class CandidateStatus:
 
 
 class Stage:
-    PROFILE = "PROFILE"  # 6-way data probe (neutralization NONE, decay 0); read long/short counts
-    IDEA = "IDEA"  # an idea's template expanded over its fields and windows
-    DIG = "DIG"  # variant written by the LLM around ore it found in review
+    PROFILE = "PROFILE"  # health probe (neutralization NONE, decay 0); read long/short counts
+    SURVEY = "SURVEY"  # one of the 4 fixed signal shapes on a sampled family
+    REFINE = "REFINE"  # a library structure around a family's best survey formula
+    COMBO = "COMBO"  # two fields combined (arm "llm" or "random", compared head to head)
+    IDEA = "IDEA"  # legacy: an idea's template expanded over its fields and windows
+    DIG = "DIG"  # legacy: variant written by the LLM around ore it found in review
     SECOND = "SECOND"  # group operator wrapped around a survivor
     THIRD = "THIRD"  # trade_when / timing wrapped around a survivor
     REPAIR = "REPAIR"  # one-variable fix routed by the failing check
@@ -100,6 +104,7 @@ class CellORM(FactoryBase):
     rounds_without_ore: Mapped[int] = mapped_column(Integer, default=0)
     hits: Mapped[int] = mapped_column(Integer, default=0)  # results with |sharpe| >= ore
     stop_reason: Mapped[str] = mapped_column(Text, default="")
+    plan: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # phase state and outcome
     sims_used: Mapped[int] = mapped_column(Integer, default=0)
     submitted: Mapped[int] = mapped_column(Integer, default=0)
     best_sharpe: Mapped[float] = mapped_column(Float, default=0.0)
@@ -121,8 +126,13 @@ class FieldORM(FactoryBase):
     alpha_count: Mapped[int] = mapped_column(Integer, default=0)
     family: Mapped[str] = mapped_column(String(255), default="")
     representative: Mapped[bool] = mapped_column(Boolean, default=False)
-    profile: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # 6-way probe readings
+    profile: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # health readings
     prep: Mapped[str] = mapped_column(Text, default="{x}")  # how the field enters a template
+    stratum: Mapped[str] = mapped_column(String(255), default="")
+    eligible: Mapped[bool] = mapped_column(Boolean, default=True)
+    filled_coverage: Mapped[float | None] = mapped_column(Float)
+    survey: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # shape -> candidate id
+    survey_score: Mapped[float | None] = mapped_column(Float)  # best |Sharpe| over the shapes
 
 
 class HypothesisORM(FactoryBase):
