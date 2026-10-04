@@ -13,11 +13,16 @@ from alpha_orchestrator.factory.select import approve
 
 from .fakes import FakePlatform, is_metrics
 
+NOVEL_EXPRESSION = "group_zscore(ts_av_diff(ts_backfill(goodf_fy1, 63), 126), subindustry)"
 FIELDS = {
-    "good": [{"id": "goodf_fy1", "type": "MATRIX", "coverage": 0.9},
-             {"id": "goodf_fy2", "type": "MATRIX", "coverage": 0.8}],
-    "dead": [{"id": "deadf", "type": "MATRIX", "coverage": 0.9},
-             {"id": "deadg", "type": "MATRIX", "coverage": 0.9}],
+    "good": [
+        {"id": "goodf_fy1", "type": "MATRIX", "coverage": 0.9},
+        {"id": "goodf_fy2", "type": "MATRIX", "coverage": 0.8},
+    ],
+    "dead": [
+        {"id": "deadf", "type": "MATRIX", "coverage": 0.9},
+        {"id": "deadg", "type": "MATRIX", "coverage": 0.9},
+    ],
 }
 
 
@@ -41,13 +46,38 @@ def platform_metrics(expr: str, settings: dict[str, Any]) -> dict[str, Any]:
 def scripted_llm(model: str, system: str, user: str) -> tuple[str, int, int]:
     task = json.loads(user)["task"]
     if "hypotheses" in task:
-        return json.dumps({"hypotheses": [{"title": "Revision drift", "statement": "s",
-                                           "direction": "high -> long", "fields": ["goodf_fy1"],
-                                           "sources": ["paper"]}]}), 10, 10
+        return (
+            json.dumps(
+                {
+                    "hypotheses": [
+                        {
+                            "title": "Revision drift",
+                            "statement": "s",
+                            "direction": "high -> long",
+                            "fields": ["goodf_fy1"],
+                            "sources": ["paper"],
+                        }
+                    ]
+                }
+            ),
+            10,
+            10,
+        )
     if task.startswith("Write"):
-        return json.dumps({"expressions": [
-            {"expression": "group_zscore(ts_av_diff(ts_backfill(goodf_fy1, 63), 126), subindustry)",
-             "rationale": "r"}]}), 10, 10
+        return (
+            json.dumps(
+                {
+                    "expressions": [
+                        {
+                            "expression": NOVEL_EXPRESSION,
+                            "rationale": "r",
+                        }
+                    ]
+                }
+            ),
+            10,
+            10,
+        )
     if "implement" in task:
         return json.dumps({"consistent": True, "reason": "ok"}), 5, 5
     return json.dumps({"description": "Idea: ... Rationale: ..."}), 5, 5
@@ -61,8 +91,15 @@ def test_one_day_end_to_end() -> None:
     cfg.policy.hypotheses_need_approval = False
     llm = FactoryLLM(cfg, ledger, complete=scripted_llm)
 
-    report = run_day(cfg, api, ledger, llm, minutes=5, rng=random.Random(7),  # type: ignore[arg-type]
-                     sleep=lambda _s: None)
+    report = run_day(
+        cfg,
+        api,
+        ledger,
+        llm,
+        minutes=5,
+        rng=random.Random(7),  # type: ignore[arg-type]
+        sleep=lambda _s: None,
+    )
     with ledger.session() as s:
         cells = {c.dataset_id: c for c in s.scalars(select(CellORM))}
         cands = list(s.scalars(select(CandidateORM)))
@@ -79,8 +116,15 @@ def test_one_day_end_to_end() -> None:
     assert api.submitted == []  # nothing is submitted without approval
 
     # Day 2: the dataset with signal is exploited with LLM expressions from its hypothesis.
-    run_day(cfg, api, ledger, llm, minutes=5, rng=random.Random(8),  # type: ignore[arg-type]
-            sleep=lambda _s: None)
+    run_day(
+        cfg,
+        api,
+        ledger,
+        llm,
+        minutes=5,
+        rng=random.Random(8),  # type: ignore[arg-type]
+        sleep=lambda _s: None,
+    )
     with ledger.session() as s:
         llm_rows = [c for c in s.scalars(select(CandidateORM)) if c.stage == "LLM"]
         total_reviews = len(list(s.scalars(select(ReviewORM))))

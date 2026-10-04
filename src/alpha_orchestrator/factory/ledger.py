@@ -67,8 +67,11 @@ class Ledger:
         stmt = (
             select(CandidateORM)
             .join(CellORM, CellORM.cell_id == CandidateORM.cell_id)
-            .where(CandidateORM.status == CandidateStatus.QUEUED,
-                   CellORM.region == region, CellORM.delay == delay)
+            .where(
+                CandidateORM.status == CandidateStatus.QUEUED,
+                CellORM.region == region,
+                CellORM.delay == delay,
+            )
             .order_by(CandidateORM.priority.desc(), CandidateORM.created_at)
             .limit(limit)
         )

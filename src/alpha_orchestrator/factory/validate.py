@@ -13,8 +13,9 @@ FREE_OPERATORS = frozenset({"ts_backfill", "group_backfill"})  # 规则: not cou
 MAX_OPERATORS = 8
 KEYWORDS = frozenset({"true", "false", "nan", "inf"})
 # Price-volume fields exist in every region (dataset pv1). Using them breaks ATOM purity.
-COMMON_FIELDS = frozenset({"close", "open", "high", "low", "volume", "vwap", "returns",
-                           "adv20", "cap", "sharesout"})
+COMMON_FIELDS = frozenset(
+    {"close", "open", "high", "low", "volume", "vwap", "returns", "adv20", "cap", "sharesout"}
+)
 VECTOR_REDUCERS_PREFIX = "vec_"
 
 
@@ -89,8 +90,9 @@ def check(
             continue
         if tok in fields:
             verdict.fields_used.add(tok)
-            if fields[tok] == "VECTOR" and not any(f.startswith(VECTOR_REDUCERS_PREFIX)
-                                                   for f in stack):
+            if fields[tok] == "VECTOR" and not any(
+                f.startswith(VECTOR_REDUCERS_PREFIX) for f in stack
+            ):
                 verdict.issues.append(f"vector field {tok} needs a vec_* reducer")
             continue
         if low in extra_fields:

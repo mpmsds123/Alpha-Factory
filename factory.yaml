@@ -1,0 +1,35 @@
+# Alpha 工厂配置。每个数字的出处见 src/alpha_orchestrator/factory/config.py。
+db_path: ~/.alpha_factory/factory.db     # 账本，放在仓库外
+reports_dir: reports                     # 面板（含真实表达式，已 gitignore）
+
+budget:
+  daily_sim_cap: 4500        # 每天 5,000 次，留 500 给手动
+  explore_fraction: 0.30     # 第一个月 30% 探索，之后改成 0.10–0.15
+  probe_budget: 50           # 每个数据集最多探测 50 次，无信号就止损
+  slots: 6                   # 同时 8 个批量回测，留 2 个给手动
+  children_per_slot: 10
+  min_batch_interval_s: 20   # 防 429 风暴
+  max_cells_per_day: 12
+
+thresholds:
+  probe_hit_sharpe: 1.0
+  submit_sharpe: 1.58
+  submit_sharpe_chn: 2.08
+  submit_fitness: 1.0
+  robust_keep_ratio: 0.5
+  pnl_corr_max: 0.7
+  dataset_cap: 8
+  margin_bps: {USA: 5.0, CHN: 20.0, IND: 20.0, MEA: 20.0, default: 15.0}
+
+llm:
+  base_url: https://api.deepseek.com
+  model: deepseek-v4-flash
+  strong_model: deepseek-v4-flash
+  key_file: ~/secrets/deepseek.json      # {"api_key": "..."}，只在调用时读取
+
+policy:
+  max_submissions_per_day: 4
+  auto_submit: false                     # 提交永远由你确认
+  hypotheses_need_approval: true         # 假设由你每周批一次
+  regions: []                            # 空 = 你账号能用的全部地区
+  delays: [1]

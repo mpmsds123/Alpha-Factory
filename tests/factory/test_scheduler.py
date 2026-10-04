@@ -20,8 +20,14 @@ def setup(n: int) -> Ledger:
     with ledger.session() as s:
         upsert_cells(s, [{"id": "ds", "fieldCount": 10}], "USA", 1, "TOP3000")
         for i in range(n):
-            ledger.add_candidate(s, cell_id=CELL, stage="PROBE", expression=f"rank(f{i})",
-                                 settings=settings, priority=float(i))
+            ledger.add_candidate(
+                s,
+                cell_id=CELL,
+                stage="PROBE",
+                expression=f"rank(f{i})",
+                settings=settings,
+                priority=float(i),
+            )
     return ledger
 
 

@@ -20,8 +20,9 @@ class _Client:
 class FakeBrainAPI:
     """`metrics(expression, settings)` returns an IS dict, or None to make the child fail."""
 
-    def __init__(self, metrics: Metrics, *, polls_before_done: int = 1,
-                 refuse_first: int = 0) -> None:
+    def __init__(
+        self, metrics: Metrics, *, polls_before_done: int = 1, refuse_first: int = 0
+    ) -> None:
         self.metrics = metrics
         self.client = _Client()
         self.polls_before_done = polls_before_done
@@ -58,12 +59,27 @@ class FakeBrainAPI:
             alpha_id = None
             if is_ is not None:
                 alpha_id = f"A{len(self.alphas)}"
-                keep = {k: settings[k] for k in ("region", "universe", "delay", "decay",
-                                                  "neutralization", "truncation", "maxTrade")}
-                self.alphas[alpha_id] = {"id": alpha_id, "regular": {"code": payload["regular"]},
-                                         "settings": keep, "is": is_}
-            self.children[child_id] = ChildResult(child_id, "COMPLETE" if alpha_id else "ERROR",
-                                                  alpha_id, None if alpha_id else "bad")
+                keep = {
+                    k: settings[k]
+                    for k in (
+                        "region",
+                        "universe",
+                        "delay",
+                        "decay",
+                        "neutralization",
+                        "truncation",
+                        "maxTrade",
+                    )
+                }
+                self.alphas[alpha_id] = {
+                    "id": alpha_id,
+                    "regular": {"code": payload["regular"]},
+                    "settings": keep,
+                    "is": is_,
+                }
+            self.children[child_id] = ChildResult(
+                child_id, "COMPLETE" if alpha_id else "ERROR", alpha_id, None if alpha_id else "bad"
+            )
             kids.append(child_id)
         return SimulationProgress(done=True, status="COMPLETE", children=kids)
 
@@ -74,10 +90,13 @@ class FakeBrainAPI:
         return self.alphas[alpha_id]
 
     def check(self, alpha_id: str) -> list[dict[str, Any]]:
-        return self.checks.get(alpha_id, [{"name": "SELF_CORRELATION", "result": "PASS",
-                                           "value": 0.2},
-                                          {"name": "PROD_CORRELATION", "result": "PASS",
-                                           "value": 0.3}])
+        return self.checks.get(
+            alpha_id,
+            [
+                {"name": "SELF_CORRELATION", "result": "PASS", "value": 0.2},
+                {"name": "PROD_CORRELATION", "result": "PASS", "value": 0.3},
+            ],
+        )
 
     def daily_pnl(self, alpha_id: str) -> dict[str, float]:
         return self.pnl.get(alpha_id, {})
@@ -96,12 +115,26 @@ class FakeBrainAPI:
         return True
 
 
-def is_metrics(sharpe: float, fitness: float, turnover: float = 0.1, fails: str = "",
-               margin: float = 0.001, returns: float = 0.05) -> dict[str, Any]:
+def is_metrics(
+    sharpe: float,
+    fitness: float,
+    turnover: float = 0.1,
+    fails: str = "",
+    margin: float = 0.001,
+    returns: float = 0.05,
+) -> dict[str, Any]:
     checks = [{"name": n, "result": "FAIL"} for n in fails.split(",") if n]
-    return {"sharpe": sharpe, "fitness": fitness, "turnover": turnover, "returns": returns,
-            "margin": margin, "drawdown": 0.05, "longCount": 1500, "shortCount": 1500,
-            "checks": checks}
+    return {
+        "sharpe": sharpe,
+        "fitness": fitness,
+        "turnover": turnover,
+        "returns": returns,
+        "margin": margin,
+        "drawdown": 0.05,
+        "longCount": 1500,
+        "shortCount": 1500,
+        "checks": checks,
+    }
 
 
 class FakePlatform(FakeBrainAPI):
@@ -112,22 +145,53 @@ class FakePlatform(FakeBrainAPI):
         self._datasets = datasets
 
     def simulation_options(self) -> dict[str, Any]:
-        return {"USA": {"universes": ["TOP3000", "TOP1000"], "delays": [1],
-                        "neutralizations": ["INDUSTRY", "SUBINDUSTRY", "MARKET", "SECTOR"]}}
+        return {
+            "USA": {
+                "universes": ["TOP3000", "TOP1000"],
+                "delays": [1],
+                "neutralizations": ["INDUSTRY", "SUBINDUSTRY", "MARKET", "SECTOR"],
+            }
+        }
 
     def datasets(self, region: str, delay: int, universe: str) -> list[dict[str, Any]]:
-        return [{"id": ds, "name": ds, "category": {"id": "analyst"}, "fieldCount": 10 + len(f),
-                 "pyramidMultiplier": 1.3, "alphaCount": 5} for ds, f in self._datasets.items()]
+        return [
+            {
+                "id": ds,
+                "name": ds,
+                "category": {"id": "analyst"},
+                "fieldCount": 10 + len(f),
+                "pyramidMultiplier": 1.3,
+                "alphaCount": 5,
+            }
+            for ds, f in self._datasets.items()
+        ]
 
-    def datafields(self, region: str, delay: int, universe: str, dataset_id: str
-                   ) -> list[dict[str, Any]]:
+    def datafields(
+        self, region: str, delay: int, universe: str, dataset_id: str
+    ) -> list[dict[str, Any]]:
         return self._datasets[dataset_id]
 
     def operators(self) -> list[dict[str, Any]]:
-        names = ["rank", "ts_rank", "ts_zscore", "ts_delta", "ts_mean", "ts_av_diff",
-                 "ts_std_dev", "ts_backfill", "vec_avg", "group_rank", "group_zscore",
-                 "group_neutralize", "trade_when", "multiply", "sign", "hump",
-                 "ts_decay_linear", "abs"]
+        names = [
+            "rank",
+            "ts_rank",
+            "ts_zscore",
+            "ts_delta",
+            "ts_mean",
+            "ts_av_diff",
+            "ts_std_dev",
+            "ts_backfill",
+            "vec_avg",
+            "group_rank",
+            "group_zscore",
+            "group_neutralize",
+            "trade_when",
+            "multiply",
+            "sign",
+            "hump",
+            "ts_decay_linear",
+            "abs",
+        ]
         return [{"name": n, "definition": f"{n}(x)", "scope": ["REGULAR"]} for n in names]
 
     def pyramid_alphas(self) -> list[dict[str, Any]]:

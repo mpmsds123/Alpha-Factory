@@ -34,6 +34,7 @@ dev = [
 [project.scripts]
 alpha-lab = "alpha_orchestrator.cli.app:app"
 alpha-lab-mcp = "alpha_orchestrator.mcp.server:main"
+alpha-factory = "alpha_orchestrator.factory.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -47,7 +48,7 @@ testpaths = ["tests"]
 
 [tool.coverage.run]
 source = ["alpha_orchestrator"]
-omit = ["src/alpha_orchestrator/cli/*"]
+omit = ["src/alpha_orchestrator/cli/*", "src/alpha_orchestrator/factory/cli.py"]
 
 [tool.coverage.report]
 exclude_also = [
@@ -70,6 +71,10 @@ select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 # is the norm, not a mistake, for a script whose only reader is its Chinese-speaking
 # author.
 "tools/*.py" = ["RUF001", "RUF002", "RUF003"]
+"src/alpha_orchestrator/factory/*.py" = ["RUF001", "RUF002", "RUF003"]
+# HTML template strings; wrapping them hurts readability more than long lines do.
+"src/alpha_orchestrator/factory/dashboard.py" = ["RUF001", "RUF002", "RUF003", "E501"]
+"tests/factory/*.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]
 python_version = "3.11"

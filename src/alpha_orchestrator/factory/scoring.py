@@ -30,8 +30,8 @@ class CellStats:
     themes: int
     probes: int
     hits: int
-    pyramid_submitted: int   # your submissions this quarter in (region, delay, category)
-    dataset_submitted: int   # your submissions from this exact dataset
+    pyramid_submitted: int  # your submissions this quarter in (region, delay, category)
+    dataset_submitted: int  # your submissions from this exact dataset
 
 
 def posterior(probes: int, hits: int) -> tuple[float, float]:
@@ -85,7 +85,7 @@ def expected_value(stats: CellStats, config: FactoryConfig) -> float:
 class Allocation:
     cell_id: str
     budget: int
-    mode: str        # "explore" (probe) or "exploit" (expand a cell with signal)
+    mode: str  # "explore" (probe) or "exploit" (expand a cell with signal)
     score: float
 
 
@@ -100,8 +100,11 @@ def plan_day(
     explore_budget = int(budget * config.budget.explore_fraction)
     probe = config.budget.probe_budget
 
-    unexplored = [c for c in cells if c.state in ("NEW", "PROFILED", "PROBING")
-                  and value_if_hit(c, config) > 0]
+    unexplored = [
+        c
+        for c in cells
+        if c.state in ("NEW", "PROFILED", "PROBING") and value_if_hit(c, config) > 0
+    ]
     # Thompson sampling: draw a plausible hit rate per cell, rank by sampled EV.
     sampled = sorted(
         unexplored,
@@ -121,7 +124,9 @@ def plan_day(
     live = [c for c in cells if c.state == "SIGNAL"]
     scored = sorted(((expected_value(c, config), c) for c in live), key=lambda t: -t[0])
     exploit_budget = budget - (explore_budget - remaining)
-    top = [(ev, c) for ev, c in scored if ev > 0][: max(config.budget.max_cells_per_day - len(plan), 0)]
+    top = [(ev, c) for ev, c in scored if ev > 0][
+        : max(config.budget.max_cells_per_day - len(plan), 0)
+    ]
     total = sum(ev for ev, _ in top)
     for ev, c in top:
         share = int(exploit_budget * ev / total) if total else 0

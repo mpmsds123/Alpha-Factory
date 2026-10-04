@@ -1,9 +1,26 @@
 from alpha_orchestrator.factory import generators as g
 from alpha_orchestrator.factory.validate import check, operator_count
 
-OPS = {"rank", "ts_rank", "ts_zscore", "ts_delta", "ts_mean", "ts_av_diff", "ts_std_dev",
-       "ts_backfill", "vec_avg", "group_rank", "group_zscore", "group_neutralize", "trade_when",
-       "multiply", "hump", "ts_decay_linear", "sign", "abs"}
+OPS = {
+    "rank",
+    "ts_rank",
+    "ts_zscore",
+    "ts_delta",
+    "ts_mean",
+    "ts_av_diff",
+    "ts_std_dev",
+    "ts_backfill",
+    "vec_avg",
+    "group_rank",
+    "group_zscore",
+    "group_neutralize",
+    "trade_when",
+    "multiply",
+    "hump",
+    "ts_decay_linear",
+    "sign",
+    "abs",
+}
 FIELDS = {"eps_fy1": "MATRIX", "eps_fy2": "MATRIX", "news_vec": "VECTOR"}
 S = g.base_settings("USA", "TOP3000", 1, "analyst", ["INDUSTRY", "SUBINDUSTRY", "MARKET"])
 
@@ -15,8 +32,15 @@ def test_settings_follow_region_rules() -> None:
 
 
 def test_families_drop_horizon_tokens() -> None:
-    fams = g.group_families([{"id": "eps_fy1", "coverage": 0.9}, {"id": "eps_fy2", "coverage": 0.95},
-                             {"id": "iv_call_30"}, {"id": "iv_call_60"}, {"id": "sales"}])
+    fams = g.group_families(
+        [
+            {"id": "eps_fy1", "coverage": 0.9},
+            {"id": "eps_fy2", "coverage": 0.95},
+            {"id": "iv_call_30"},
+            {"id": "iv_call_60"},
+            {"id": "sales"},
+        ]
+    )
     assert set(fams) == {"eps", "iv_call", "sales"}
     assert fams["eps"][0]["id"] == "eps_fy2"  # best coverage represents the family
 
@@ -51,20 +75,31 @@ def test_flip_and_orders() -> None:
 
 
 def test_repairs_route_by_failure() -> None:
-    roles = {p.role for p in g.repair_proposals("rank(x)", S, ["HIGH_TURNOVER"], 0.8,
-                                                 ["INDUSTRY"], False)}
+    roles = {
+        p.role
+        for p in g.repair_proposals("rank(x)", S, ["HIGH_TURNOVER"], 0.8, ["INDUSTRY"], False)
+    }
     assert roles == {"decay", "hump"}
-    roles = {p.role for p in g.repair_proposals("rank(x)", S, ["LOW_SHARPE"], 0.1,
-                                                 ["INDUSTRY", "SUBINDUSTRY"], False)}
+    roles = {
+        p.role
+        for p in g.repair_proposals(
+            "rank(x)", S, ["LOW_SHARPE"], 0.1, ["INDUSTRY", "SUBINDUSTRY"], False
+        )
+    }
     assert roles == set()  # below the fine-tune gate nothing parametric is allowed
-    roles = {p.role for p in g.repair_proposals("rank(x)", S, ["LOW_SHARPE"], 0.1,
-                                                 ["INDUSTRY", "SUBINDUSTRY"], True)}
+    roles = {
+        p.role
+        for p in g.repair_proposals(
+            "rank(x)", S, ["LOW_SHARPE"], 0.1, ["INDUSTRY", "SUBINDUSTRY"], True
+        )
+    }
     assert roles == {"neutralization"}
 
 
 def test_robustness_variants() -> None:
-    props = g.robustness_proposals("ts_rank(x, 21)", S, ["INDUSTRY", "SUBINDUSTRY"],
-                                   ["TOP3000", "TOP1000", "TOP500"])
+    props = g.robustness_proposals(
+        "ts_rank(x, 21)", S, ["INDUSTRY", "SUBINDUSTRY"], ["TOP3000", "TOP1000", "TOP500"]
+    )
     roles = [p.role for p in props]
     assert roles[:2] == ["rank", "sign"]
     assert "ts_rank(x, 19)" in [p.expression for p in props]

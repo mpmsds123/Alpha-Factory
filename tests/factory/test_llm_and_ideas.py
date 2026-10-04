@@ -18,10 +18,19 @@ def scripted(*replies: str):  # type: ignore[no-untyped-def]
 
 def test_hypotheses_drop_invented_fields_and_are_ledgered() -> None:
     ledger = Ledger("sqlite://")
-    reply = json.dumps({"hypotheses": [
-        {"title": "Revision", "statement": "s", "fields": ["eps_rev", "made_up"], "sources": ["P"]},
-        {"title": "Ghost", "statement": "s", "fields": ["nope"]},
-    ]})
+    reply = json.dumps(
+        {
+            "hypotheses": [
+                {
+                    "title": "Revision",
+                    "statement": "s",
+                    "fields": ["eps_rev", "made_up"],
+                    "sources": ["P"],
+                },
+                {"title": "Ghost", "statement": "s", "fields": ["nope"]},
+            ]
+        }
+    )
     llm = FactoryLLM(FactoryConfig(), ledger, complete=scripted(reply))
     out = llm.propose_hypotheses({"id": "ds"}, [FieldInfo("eps_rev", "MATRIX", "d")], [])
     assert [h["title"] for h in out] == ["Revision"] and out[0]["fields"] == ["eps_rev"]
@@ -48,8 +57,10 @@ def test_tokens_mix_words_and_cjk_bigrams() -> None:
 def test_import_and_search(tmp_path: Path) -> None:
     d = tmp_path / "Research_Papers_for_Users"
     d.mkdir()
-    (d / "1.md").write_text("# Research Paper 1: Short interest and returns\n- 来源: https://x\n---\n"
-                            + "Short interest predicts negative returns. " * 10)
+    (d / "1.md").write_text(
+        "# Research Paper 1: Short interest and returns\n- 来源: https://x\n---\n"
+        + "Short interest predicts negative returns. " * 10
+    )
     (d / "2.md").write_text("# Momentum in news\n---\n" + "News sentiment momentum. " * 10)
     ledger = Ledger("sqlite://")
     with ledger.session() as s:

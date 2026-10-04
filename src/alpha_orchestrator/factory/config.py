@@ -17,40 +17,41 @@ DEFAULT_CONFIG = Path("factory.yaml")
 
 @dataclass
 class Budget:
-    daily_sim_cap: int = 4500          # 规则: 5,000/day for consultants; 500 kept for manual work
-    explore_fraction: float = 0.30     # 设计 ⑤: month one 30%, later 10-15%
-    probe_budget: int = 50             # 官方: "先跑 10-50 次试探"; kill a dataset after this
-    slots: int = 6                     # 规则: 8 concurrent multi-sims; 2 left for manual use
-    children_per_slot: int = 10        # 规则: 10 alphas per multi-simulation
+    daily_sim_cap: int = 4500  # 规则: 5,000/day for consultants; 500 kept for manual work
+    explore_fraction: float = 0.30  # 设计 ⑤: month one 30%, later 10-15%
+    probe_budget: int = 50  # 官方: "先跑 10-50 次试探"; kill a dataset after this
+    slots: int = 6  # 规则: 8 concurrent multi-sims; 2 left for manual use
+    children_per_slot: int = 10  # 规则: 10 alphas per multi-simulation
     min_batch_interval_s: float = 20.0  # 论坛: >3 batches / 10 min triggers 429 storms
     max_cells_per_day: int = 12
 
 
 @dataclass
 class Thresholds:
-    probe_hit_sharpe: float = 1.0       # 成长经历帖: no |sharpe|>1 in a first-order scan = no signal
-    flip_sharpe: float = -1.2           # cnhkmcp 优化手册: keep strong negatives, flip them
+    probe_hit_sharpe: float = 1.0  # 成长经历帖: no |sharpe|>1 in a first-order scan = no signal
+    flip_sharpe: float = -1.2  # cnhkmcp 优化手册: keep strong negatives, flip them
     flip_fitness: float = -0.5
-    expand_sharpe: float = 1.2          # machine_lib: survivors entering the next order
+    expand_sharpe: float = 1.2  # machine_lib: survivors entering the next order
     expand_fitness: float = 0.7
-    finetune_sharpe: float = 1.4        # 优化手册: pure parameter tuning only above this
+    finetune_sharpe: float = 1.4  # 优化手册: pure parameter tuning only above this
     finetune_fitness: float = 0.9
-    submit_sharpe: float = 1.58         # 规则手册: consultant D1
+    submit_sharpe: float = 1.58  # 规则手册: consultant D1
     submit_sharpe_chn: float = 2.08
     submit_fitness: float = 1.0
     turnover_min: float = 0.01
     turnover_max: float = 0.70
-    robust_keep_ratio: float = 0.5      # 研究小组: rank/sign variants keep >=50% of sharpe
-    pnl_corr_max: float = 0.7           # 规则: self/prod correlation < 0.7
-    dataset_cap: int = 8                # 论坛: <=8-10 submissions per dataset
-    margin_bps: dict[str, float] = field(default_factory=lambda: {
-        "USA": 5.0, "CHN": 20.0, "IND": 20.0, "MEA": 20.0, "default": 15.0})  # AI课
+    robust_keep_ratio: float = 0.5  # 研究小组: rank/sign variants keep >=50% of sharpe
+    pnl_corr_max: float = 0.7  # 规则: self/prod correlation < 0.7
+    dataset_cap: int = 8  # 论坛: <=8-10 submissions per dataset
+    margin_bps: dict[str, float] = field(
+        default_factory=lambda: {"USA": 5.0, "CHN": 20.0, "IND": 20.0, "MEA": 20.0, "default": 15.0}
+    )  # AI课
 
 
 @dataclass
 class LLMConfig:
     base_url: str = "https://api.deepseek.com"
-    model: str = "deepseek-v4-flash"     # what your cnhkmcp pipelines were configured with
+    model: str = "deepseek-v4-flash"  # what your cnhkmcp pipelines were configured with
     strong_model: str = "deepseek-v4-flash"
     key_file: str = "~/secrets/deepseek.json"
     temperature: float = 0.4
@@ -59,8 +60,8 @@ class LLMConfig:
 
 @dataclass
 class Policy:
-    max_submissions_per_day: int = 4    # 规则
-    auto_submit: bool = False           # 设计 ③: you confirm every submission
+    max_submissions_per_day: int = 4  # 规则
+    auto_submit: bool = False  # 设计 ③: you confirm every submission
     hypotheses_need_approval: bool = True  # 设计 ④
     hypothesis_rounds_before_retire: int = 3
     regions: list[str] = field(default_factory=list)  # empty = every region you can access
@@ -105,5 +106,5 @@ def load_llm_key(path: str) -> str:
     data = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
     key = data.get("api_key") if isinstance(data, dict) else None
     if not key:
-        raise ValueError(f"{path} must contain {{\"api_key\": \"...\"}}")
+        raise ValueError(f'{path} must contain {{"api_key": "..."}}')
     return str(key)

@@ -1,6 +1,11 @@
 import random
 
-from alpha_orchestrator.factory.catalog import cell_stats, pick_universe, pyramid_counts, upsert_cells
+from alpha_orchestrator.factory.catalog import (
+    cell_stats,
+    pick_universe,
+    pyramid_counts,
+    upsert_cells,
+)
 from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ledger import Ledger
 from alpha_orchestrator.factory.scoring import (
@@ -16,9 +21,19 @@ CFG = FactoryConfig()
 
 
 def stats(cell_id: str = "USA|1|TOP3000|d", **kw):  # type: ignore[no-untyped-def]
-    base = dict(cell_id=cell_id, region="USA", category="analyst", state="NEW", multiplier=1.0,
-                alpha_count=10, themes=0, probes=0, hits=0, pyramid_submitted=3,
-                dataset_submitted=0)
+    base = dict(
+        cell_id=cell_id,
+        region="USA",
+        category="analyst",
+        state="NEW",
+        multiplier=1.0,
+        alpha_count=10,
+        themes=0,
+        probes=0,
+        hits=0,
+        pyramid_submitted=3,
+        dataset_submitted=0,
+    )
     base.update(kw)
     return CellStats(**base)
 
@@ -75,8 +90,15 @@ def test_pyramid_counts_accepts_both_shapes() -> None:
 
 def test_upsert_and_stats_round_trip() -> None:
     ledger = Ledger("sqlite://")
-    row = {"id": "fundamental6", "name": "F6", "category": {"id": "fundamental"},
-           "pyramidMultiplier": 1.4, "alphaCount": 12, "fieldCount": 40, "themes": ["t"]}
+    row = {
+        "id": "fundamental6",
+        "name": "F6",
+        "category": {"id": "fundamental"},
+        "pyramidMultiplier": 1.4,
+        "alphaCount": 12,
+        "fieldCount": 40,
+        "themes": ["t"],
+    }
     with ledger.session() as s:
         assert upsert_cells(s, [row], "USA", 1, "TOP3000") == 1
     with ledger.session() as s:

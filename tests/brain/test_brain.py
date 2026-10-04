@@ -18,8 +18,9 @@ CREDS = Credentials(email="me@example.com", password="pw")
 
 
 def make(handler, tmp_path: Path, clock=lambda: 10_000.0):  # type: ignore[no-untyped-def]
-    session = BrainSession(CREDS, SessionStore(tmp_path), transport=httpx.MockTransport(handler),
-                           clock=clock)
+    session = BrainSession(
+        CREDS, SessionStore(tmp_path), transport=httpx.MockTransport(handler), clock=clock
+    )
     return session, BrainClient(session, sleep=lambda _s: None)
 
 
@@ -44,8 +45,13 @@ def test_login_saves_cookies_privately(tmp_path: Path) -> None:
 
 def test_persona_challenge_raises_with_url(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(401, headers={"WWW-Authenticate": "persona",
-                                            "Location": "/authentication/persona?inquiry=1"})
+        return httpx.Response(
+            401,
+            headers={
+                "WWW-Authenticate": "persona",
+                "Location": "/authentication/persona?inquiry=1",
+            },
+        )
 
     session, _ = make(handler, tmp_path)
     with pytest.raises(NeedBiometric) as info:
@@ -68,8 +74,7 @@ def test_client_retries_429_then_succeeds(tmp_path: Path) -> None:
         calls["n"] += 1
         if calls["n"] < 3:
             return httpx.Response(429, headers={"Retry-After": "1"})
-        return httpx.Response(200, json={"ok": True},
-                              headers={"X-Ratelimit-Remaining": "4321"})
+        return httpx.Response(200, json={"ok": True}, headers={"X-Ratelimit-Remaining": "4321"})
 
     _, client = make(handler, tmp_path)
     assert client.request("GET", "/x").json() == {"ok": True}
@@ -105,8 +110,10 @@ def test_multi_simulation_round_trip(tmp_path: Path) -> None:
 
     _, client = make(handler, tmp_path)
     api = BrainAPI(client)
-    payloads = [simulation_payload("rank(close)", {"region": "USA"}),
-                simulation_payload("rank(open)", {"region": "USA"})]
+    payloads = [
+        simulation_payload("rank(close)", {"region": "USA"}),
+        simulation_payload("rank(open)", {"region": "USA"}),
+    ]
     progress = api.poll(api.start_multi_simulation(payloads))
     assert progress.done and progress.children == ["C1", "C2"]
     assert api.child("C1").alpha_id == "A1"
@@ -127,20 +134,35 @@ def test_paged_datafields(tmp_path: Path) -> None:
 def test_simulation_options_flatten() -> None:
     tree = {
         "region": {"choices": {"instrumentType": {"EQUITY": [{"value": "USA"}]}}},
-        "universe": {"choices": {"instrumentType": {"EQUITY": {"region": {
-            "USA": [{"value": "TOP3000"}, {"value": "TOP1000"}]}}}}},
-        "neutralization": {"choices": {"instrumentType": {"EQUITY": {"region": {
-            "USA": [{"value": "INDUSTRY"}]}}}}},
-        "delay": {"choices": {"instrumentType": {"EQUITY": {"region": {
-            "USA": [{"value": 1}, {"value": 0}]}}}}},
+        "universe": {
+            "choices": {
+                "instrumentType": {
+                    "EQUITY": {"region": {"USA": [{"value": "TOP3000"}, {"value": "TOP1000"}]}}
+                }
+            }
+        },
+        "neutralization": {
+            "choices": {"instrumentType": {"EQUITY": {"region": {"USA": [{"value": "INDUSTRY"}]}}}}
+        },
+        "delay": {
+            "choices": {
+                "instrumentType": {"EQUITY": {"region": {"USA": [{"value": 1}, {"value": 0}]}}}
+            }
+        },
     }
     assert parse_simulation_options(tree) == {
-        "USA": {"universes": ["TOP3000", "TOP1000"], "neutralizations": ["INDUSTRY"],
-                "delays": [1, 0]}}
+        "USA": {
+            "universes": ["TOP3000", "TOP1000"],
+            "neutralizations": ["INDUSTRY"],
+            "delays": [1, 0],
+        }
+    }
 
 
 def test_yearly_stats_and_pnl_tables(tmp_path: Path) -> None:
-    table = {"schema": {"properties": [{"name": "date"}, {"name": "pnl"}]},
-             "records": [["2020-01-02", 10.0], ["2020-01-03", -2.5]]}
+    table = {
+        "schema": {"properties": [{"name": "date"}, {"name": "pnl"}]},
+        "records": [["2020-01-02", 10.0], ["2020-01-03", -2.5]],
+    }
     _, client = make(lambda r: httpx.Response(200, json=table), tmp_path)
     assert BrainAPI(client).daily_pnl("A") == {"2020-01-02": 10.0, "2020-01-03": -2.5}
