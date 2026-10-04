@@ -6,6 +6,8 @@ back. Batches in flight are rows in the ledger, so a crash or a face-check pause
 by re-polling them instead of simulating again.
 """
 
+import json
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -21,6 +23,7 @@ from alpha_orchestrator.factory.models import BatchORM, CandidateORM, CandidateS
 
 QUOTA_RESERVE = 300  # stop before the platform's own counter runs dry
 REFUSED = -1
+REJECTED = -2  # the platform said some formulas are invalid: not a capacity problem
 MAX_REFUSALS = 10
 
 
@@ -30,6 +33,23 @@ class RunStats:
     completed: int = 0
     failed: int = 0
     stopped_because: str = ""
+
+
+def rejected_children(message: str, size: int) -> set[int]:
+    """Positions the platform rejected in a 400 answer, e.g.
+    `[{"settings":{"decay":["..."]}},{},...]`; empty when it is not that kind of answer."""
+    match = re.search(r"\(400\): (.*)$", message, re.S)
+    if not match:
+        return set()
+    try:
+        body = json.loads(match.group(1))
+    except ValueError:
+        return set()
+    if isinstance(body, dict):
+        return {0} if body and size == 1 else set()
+    if isinstance(body, list):
+        return {i for i, item in enumerate(body) if item and i < size}
+    return set()
 
 
 def metrics_from_alpha(alpha: dict[str, Any]) -> dict[str, Any]:
@@ -109,6 +129,8 @@ class Simulator:
                     stats.batches += 1
                     refusals = 0
                     continue
+                if launched == REJECTED:
+                    continue
                 if launched == REFUSED and inflight:
                     # The platform's limit is what is running now: obey it from here on.
                     self.slots = len(inflight)
@@ -160,6 +182,7 @@ class Simulator:
             if not batch:
                 return 0
             payloads = [simulation_payload(c.expression, c.settings) for c in batch]
+            member_ids = [c.id for c in batch]
             row = BatchORM(region=region, delay=delay, size=len(batch))
             s.add(row)
             s.flush()
@@ -170,6 +193,10 @@ class Simulator:
         try:
             location = self.api.start_multi_simulation(payloads)
         except ValueError as exc:
+            bad = rejected_children(str(exc), len(payloads))
+            if bad:
+                self._reject(batch_id, member_ids, bad, str(exc))
+                return REJECTED
             self._release(batch_id, str(exc))
             self.sleep(60)
             return REFUSED
@@ -180,6 +207,27 @@ class Simulator:
             launched.location = location
             self.ledger.log(s, "batch_started", batch=batch_id, size=len(payloads))
         return len(payloads)
+
+    def _reject(self, batch_id: str, ids: list[str], bad: set[int], reason: str) -> None:
+        """Invalid formulas fail with the platform's message; the rest go back in line."""
+        with self.ledger.session() as s:
+            row = s.get(BatchORM, batch_id)
+            assert row is not None
+            row.status = "REJECTED"
+            row.finished_at = utc_now()
+            for i, cid in enumerate(ids):
+                c = s.get(CandidateORM, cid)
+                assert c is not None
+                c.batch_id = None
+                if i in bad:
+                    c.status = CandidateStatus.FAILED
+                    c.error = f"platform rejected the settings: {reason[:400]}"
+                    c.completed_at = utc_now()
+                else:
+                    c.status = CandidateStatus.QUEUED
+            self.ledger.log(
+                s, "batch_rejected", batch=batch_id, invalid=sorted(bad), reason=reason[:300]
+            )
 
     def _release(self, batch_id: str, reason: str) -> None:
         with self.ledger.session() as s:
