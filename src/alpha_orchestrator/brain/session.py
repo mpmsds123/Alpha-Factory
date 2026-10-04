@@ -60,14 +60,32 @@ class SessionStore:
         self.cookies_path = self.dir / "brain_cookies.json"
         self.meta_path = self.dir / "brain_session.json"
 
-    def load_cookies(self) -> dict[str, str]:
+    def load_cookies(self) -> httpx.Cookies:
+        jar = httpx.Cookies()
         if not self.cookies_path.exists():
-            return {}
-        return {str(k): str(v) for k, v in json.loads(self.cookies_path.read_text()).items()}
+            return jar
+        data = json.loads(self.cookies_path.read_text())
+        if isinstance(data, dict):  # older files: {name: value}
+            for name, value in data.items():
+                jar.set(str(name), str(value))
+            return jar
+        for c in data:
+            jar.set(
+                str(c["name"]),
+                str(c["value"]),
+                domain=str(c.get("domain") or ""),
+                path=str(c.get("path") or "/"),
+            )
+        return jar
 
     def save_cookies(self, cookies: httpx.Cookies) -> None:
+        """Every cookie with its domain and path: the platform sets the same name (`t`)
+        for more than one domain, so name alone is not a key."""
         self.dir.mkdir(parents=True, exist_ok=True)
-        payload = {name: value for name, value in cookies.items()}
+        payload = [
+            {"name": c.name, "value": c.value, "domain": c.domain, "path": c.path}
+            for c in cookies.jar
+        ]
         self.cookies_path.write_text(json.dumps(payload))
         self.cookies_path.chmod(0o600)
 
