@@ -103,7 +103,14 @@ def run(
     api = _api()
     try:
         api.client.session.ensure()
-        report = run_day(cfg, api, ledger, _llm(cfg, ledger), minutes=minutes)
+        report = run_day(
+            cfg,
+            api,
+            ledger,
+            _llm(cfg, ledger),
+            minutes=minutes,
+            on_progress=lambda: render(ledger, cfg, _dashboard_path(cfg)),
+        )
     except NeedBiometric:
         notify("平台要求刷脸：运行 alpha-factory login --then-run，会从断点继续")
         render(ledger, cfg, _dashboard_path(cfg))

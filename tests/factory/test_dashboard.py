@@ -33,5 +33,6 @@ def test_dashboard_renders_after_a_day(tmp_path: Path, monkeypatch: pytest.Monke
     page = render(ledger, cfg, tmp_path / "dash.html").read_text()
     assert "待你确认" in page and "数据集队列" in page
     assert "goodf_fy" in page  # reviews show real expressions (file stays local)
-    assert "Revision drift" in page and "dig" in page  # ideas with the LLM's latest verdict
-    assert "EXHAUSTED" in page  # stopped datasets stay visible with their reason
+    assert "研究日志" in page and "为什么先做它" in page
+    assert "Revision drift" in page and "有矿，在附近深挖" in page  # each round's LLM verdict
+    assert "已停" in page  # stopped datasets stay visible with their reason

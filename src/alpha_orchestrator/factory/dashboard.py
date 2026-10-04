@@ -22,6 +22,7 @@ from alpha_orchestrator.factory.models import (
     ReviewORM,
     ReviewStatus,
 )
+from alpha_orchestrator.factory.story import render_story
 
 CSS = """
 :root{--bg:#f4f6f8;--card:#fff;--ink:#17202a;--muted:#5e6b78;--line:#dfe5eb;--accent:#1f5fae;
@@ -42,6 +43,8 @@ td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 code{font:12px ui-monospace,Menlo,monospace;background:var(--code);padding:1px 5px;border-radius:4px;word-break:break-all}
 .pill{display:inline-block;padding:0 8px;border-radius:99px;font-size:12px;font-weight:600}
 .RESEARCH,.APPROVED,.ok{color:var(--good)}.EXHAUSTED,.RETIRED,.bad{color:var(--bad)}.STUDYING,.NEW,.PROPOSED,.warn{color:var(--warn)}
+.story{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 16px 12px;margin:12px 0}
+h3{font-size:15px;margin:10px 0 4px}h4{font-size:13.5px;margin:14px 0 4px;color:var(--accent)}
 .alert{background:var(--card);border:1px solid var(--bad);border-radius:8px;padding:12px 14px;margin-top:14px}
 """
 
@@ -77,7 +80,6 @@ def render(ledger: Ledger, config: FactoryConfig, out: Path) -> Path:
             )
         )
         cells = {c.cell_id: c for c in s.scalars(select(CellORM))}
-        all_hyps = list(s.scalars(select(HypothesisORM)))
         last_day = s.scalar(
             select(EventORM)
             .where(EventORM.kind == "day_done")
@@ -98,6 +100,7 @@ def render(ledger: Ledger, config: FactoryConfig, out: Path) -> Path:
             or 0
         )
         events = list(s.scalars(select(EventORM).order_by(EventORM.id.desc()).limit(25)))
+        story = render_story(s, config)
 
     stage_counts = Counter(c.stage for c in today)
     fails = Counter(f for c in today for f in (c.fails or "").split(",") if f)
@@ -148,6 +151,7 @@ def render(ledger: Ledger, config: FactoryConfig, out: Path) -> Path:
         + "</div>"
     )
 
+    parts.append(story)
     parts.append("<h2>待你确认</h2>")
     if review_rows:
         rows = "".join(
@@ -202,35 +206,6 @@ def render(ledger: Ledger, config: FactoryConfig, out: Path) -> Path:
             )
             + "</table></div>"
         )
-
-    parts.append("<h2>数据集研究记录（进行中 + 最近停掉的）</h2>")
-    working = [x for x in cells.values() if x.state in ("STUDYING", "RESEARCH")]
-    stopped = sorted(
-        (x for x in cells.values() if x.state in ("EXHAUSTED", "SATURATED") and x.sims_used),
-        key=lambda x: x.updated_at,
-        reverse=True,
-    )[:4]
-    if working or stopped:
-        for cell in sorted(working, key=lambda x: -x.rank_score) + stopped:
-            ideas = [h for h in all_hyps if h.cell_id == cell.cell_id and h.rounds]
-            rows = "".join(
-                f"<tr><td><span class='pill {h.status}'>{_e(h.status)}</span></td>"
-                f"<td><b>{_e(h.title)}</b><div class='muted'>{_e(h.statement[:300])}</div>"
-                f"<code>{_e(h.template)}</code></td><td class='n'>{h.rounds}</td>"
-                f"<td class='n'>{_f(h.best_sharpe)}</td>"
-                f"<td>{_e((h.verdicts or [{}])[-1].get('verdict', ''))}"
-                f"<div class='muted'>{_e((h.verdicts or [{}])[-1].get('reason', ''))}</div></td></tr>"
-                for h in ideas
-            )
-            parts.append(
-                f"<p><b>{_e(cell.dataset_id)}</b> <span class='muted'>{_e(cell.region)} · {_e(cell.category)}"
-                f" · {_e(cell.state)} {_e(cell.stop_reason)} · 已用 {cell.sims_used} 次回测 · 第 {cell.rounds} 轮 · "
-                f"连续无矿 {cell.rounds_without_ore} 轮 · 有矿结果 {cell.hits} 条</span></p>"
-                "<div class='wrap'><table><tr><th>状态</th><th>点子</th><th>轮次</th>"
-                f"<th>最好 Sharpe</th><th>LLM 最近判断</th></tr>{rows}</table></div>"
-            )
-    else:
-        parts.append("<p class='muted'>暂无。</p>")
 
     parts.append("<h2>数据集队列（回测前按资料排序）</h2>")
     queue = sorted(cells.values(), key=lambda c: -c.rank_score)[:60]
