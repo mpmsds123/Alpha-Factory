@@ -26,7 +26,7 @@ from alpha_orchestrator.factory.models import (
     ReviewORM,
     ReviewStatus,
 )
-from alpha_orchestrator.factory.pipeline import approve_hypotheses
+from alpha_orchestrator.factory.research import approve_hypotheses
 from alpha_orchestrator.factory.select import approve, reject
 
 app = typer.Typer(help="Alpha 工厂：WorldQuant BRAIN 自动挖掘流水线", no_args_is_help=True)
@@ -54,9 +54,7 @@ def _api() -> BrainAPI:
 
 def _llm(config: FactoryConfig, ledger: Ledger) -> FactoryLLM | None:
     if not Path(config.llm.key_file).expanduser().exists():
-        typer.echo(
-            f"未找到 {config.llm.key_file}：今天只跑确定性部分（探测、扩展、修复），不调用 LLM。"
-        )
+        typer.echo(f"未找到 {config.llm.key_file}：出点子和读结果都要 LLM，今天不运行。")
         return None
     return FactoryLLM(config, ledger)
 
@@ -95,10 +93,10 @@ def login(
 
 @app.command()
 def run(
-    minutes: Annotated[float, typer.Option(help="最长运行分钟数")] = 600,
+    minutes: Annotated[float, typer.Option(help="最长运行分钟数")] = 720,
     config: ConfigOpt = DEFAULT_CONFIG,
 ) -> None:
-    """跑一天：刷新目录 → 打分分配 → 探测/生成 → 回测 → 评估 → 选出待确认。"""
+    """跑一天：数据集排序 → 读数据 → LLM 出点子 → 回测 → LLM 读结果定下一步 → 选出待确认。"""
     from alpha_orchestrator.factory.daily import run_day
 
     cfg, ledger = _ctx(config)
@@ -194,6 +192,7 @@ def hyp_list(config: ConfigOpt = DEFAULT_CONFIG) -> None:
         ):
             typer.echo(
                 f"{h.id[:8]}  [{h.cell_id}]  {h.title}\n    {h.statement}\n"
+                f"    模版：{h.template}\n"
                 f"    方向：{h.direction}  字段：{', '.join(h.fields)}"
                 f"  出处：{'; '.join(h.sources)}\n"
             )

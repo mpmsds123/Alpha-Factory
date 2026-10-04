@@ -7,7 +7,6 @@ your account offers, because sub-universe tests are easier to pass from a wide p
 
 from collections import Counter
 from collections.abc import Iterable, Mapping
-from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -17,8 +16,7 @@ from alpha_orchestrator.brain.api import BrainAPI
 from alpha_orchestrator.domain.models import utc_now
 from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ledger import Ledger
-from alpha_orchestrator.factory.models import CellORM, CellState
-from alpha_orchestrator.factory.scoring import CellStats
+from alpha_orchestrator.factory.models import CellORM
 
 PREFERRED_UNIVERSE = {
     "USA": "TOP3000",
@@ -144,28 +142,4 @@ def latest_pyramid_counts(s: Session) -> Counter[tuple[str, int, str]]:
         for key, value in (event.payload.get("counts") or {}).items():
             region, delay, cat = key.split("|")
             out[(region, int(delay), cat)] = int(value)
-    return out
-
-
-def cell_stats(s: Session, since: datetime | None = None) -> list[CellStats]:
-    pyramids = latest_pyramid_counts(s)
-    out = []
-    for c in s.scalars(
-        select(CellORM).where(CellORM.active.is_(True), CellORM.state != CellState.KILLED)
-    ):
-        out.append(
-            CellStats(
-                cell_id=c.cell_id,
-                region=c.region,
-                category=c.category.lower(),
-                state=c.state,
-                multiplier=c.multiplier,
-                alpha_count=c.alpha_count,
-                themes=len(c.themes or []),
-                probes=c.probes,
-                hits=c.hits,
-                pyramid_submitted=pyramids.get((c.region, c.delay, c.category.lower()), 0),
-                dataset_submitted=c.submitted,
-            )
-        )
     return out

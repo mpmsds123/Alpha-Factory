@@ -122,6 +122,8 @@ def is_metrics(
     fails: str = "",
     margin: float = 0.001,
     returns: float = 0.05,
+    long_count: int = 1500,
+    short_count: int = 1500,
 ) -> dict[str, Any]:
     checks = [{"name": n, "result": "FAIL"} for n in fails.split(",") if n]
     return {
@@ -131,8 +133,8 @@ def is_metrics(
         "returns": returns,
         "margin": margin,
         "drawdown": 0.05,
-        "longCount": 1500,
-        "shortCount": 1500,
+        "longCount": long_count,
+        "shortCount": short_count,
         "checks": checks,
     }
 
@@ -149,7 +151,7 @@ class FakePlatform(FakeBrainAPI):
             "USA": {
                 "universes": ["TOP3000", "TOP1000"],
                 "delays": [1],
-                "neutralizations": ["INDUSTRY", "SUBINDUSTRY", "MARKET", "SECTOR"],
+                "neutralizations": ["NONE", "INDUSTRY", "SUBINDUSTRY", "MARKET", "SECTOR"],
             }
         }
 
@@ -191,6 +193,7 @@ class FakePlatform(FakeBrainAPI):
             "hump",
             "ts_decay_linear",
             "abs",
+            "winsorize",
         ]
         return [{"name": n, "definition": f"{n}(x)", "scope": ["REGULAR"]} for n in names]
 

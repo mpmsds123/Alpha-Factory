@@ -45,11 +45,38 @@ def test_families_drop_horizon_tokens() -> None:
     assert fams["eps"][0]["id"] == "eps_fy2"  # best coverage represents the family
 
 
-def test_probes_are_valid_and_vector_safe() -> None:
-    for p in g.probe_proposals("news_vec", "VECTOR", "news", S):
-        assert check(p.expression, operators=OPS, fields=FIELDS).ok, p.expression
-    assert "21)" in g.probe_proposals("x", "MATRIX", "news", S)[1].expression
-    assert "63)" in g.probe_proposals("x", "MATRIX", "analyst", S)[1].expression
+def test_template_expands_prepared_fields_windows_and_caps() -> None:
+    import random
+
+    prep = {"eps_fy1": "ts_backfill(eps_fy1, 66)", "news_vec": "vec_avg(news_vec)"}
+    out = g.expand_template(
+        "group_rank(ts_delta({A}, {w}), industry)",
+        {"A": ["eps_fy1", "news_vec"]},
+        [21, 63],
+        prep,
+        S,
+        limit=10,
+        rng=random.Random(1),
+    )
+    exprs = {p.expression for p in out}
+    assert "group_rank(ts_delta(ts_backfill(eps_fy1, 66), 63), industry)" in exprs
+    assert "group_rank(ts_delta(vec_avg(news_vec), 21), industry)" in exprs
+    assert len(out) == 4 and all(p.stage == "IDEA" for p in out)
+    assert all(check(p.expression, operators=OPS, fields=FIELDS).ok for p in out)
+    pair = g.expand_template(
+        "rank({A} - {B})",
+        {"A": ["eps_fy1", "eps_fy2"], "B": ["eps_fy1", "eps_fy2"]},
+        [],
+        {},
+        S,
+        limit=10,
+        rng=random.Random(1),
+    )
+    assert {p.expression for p in pair} == {"rank(eps_fy1 - eps_fy2)", "rank(eps_fy2 - eps_fy1)"}
+    assert (
+        len(g.expand_template("rank({A})", {"A": ["a", "b", "c"]}, [], {}, S, 2, random.Random(0)))
+        == 2
+    )
 
 
 def test_validator_catches_platform_errors_locally() -> None:

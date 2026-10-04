@@ -1,4 +1,5 @@
-"""Deterministic expression generators: probes, orders 2-3, flips, repairs, stress tests.
+"""Deterministic expression generators: idea templates, orders 2-3, flips, repairs, stress
+tests.
 
 Each returns `Proposal`s; the pipeline validates, de-duplicates and queues them.
 Window choices are restricted to economically meaningful lengths (one week, month,
@@ -7,26 +8,13 @@ quarter, half-year, year), per the official guidance against fitted values like 
 
 import re
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from alpha_orchestrator.gates.sign_flip import negate
 
 WINDOWS = (5, 21, 63, 126, 252)
-SLOW_CATEGORIES = frozenset(
-    {
-        "fundamental",
-        "analyst",
-        "model",
-        "earnings",
-        "institutions",
-        "insiders",
-        "shortinterest",
-        "risk",
-    }
-)
-PROBE_OPERATORS = ("ts_rank", "ts_zscore", "ts_delta", "ts_mean", "ts_av_diff", "ts_std_dev")
 GROUP_OPERATORS = ("group_rank", "group_zscore", "group_neutralize")
 GROUPS = ("industry", "subindustry", "sector")
 NEUTRALIZATION_BY_CATEGORY = {  # 官方 Neutralization 文档按数据类别的推荐
@@ -43,6 +31,7 @@ NEUTRALIZATION_BY_CATEGORY = {  # 官方 Neutralization 文档按数据类别的
 }
 MAX_TRADE_REGIONS = frozenset({"ASI", "JPN", "HKG", "KOR", "TWN"})  # 规则: must be ON
 COUNTRY_FIRST = frozenset({"EUR", "ASI", "GLB"})  # 官方新人指南
+GROUP_WRAP = re.compile(r"\bgroup_(?:rank|zscore|neutralize)\(")
 HORIZON = re.compile(r"^(?:\d+[a-z]?|[a-z]{1,2}\d+[a-z]?|\d+[dwmqy]|fy\d|fq\d)$")
 
 
@@ -108,21 +97,45 @@ def group_families(fields: Iterable[Mapping[str, Any]]) -> dict[str, list[Mappin
     return dict(families)
 
 
-def prepared(field_id: str, field_type: str, backfill: int = 63) -> str:
-    x = f"vec_avg({field_id})" if field_type == "VECTOR" else field_id
-    return f"ts_backfill({x}, {backfill})"
+# ---------- an idea's template ----------
+def _filler(values: Mapping[str, str]) -> Callable[[re.Match[str]], str]:
+    return lambda m: values.get(m.group(1), m.group(0))
 
 
-# ---------- order 1: probes ----------
-def probe_proposals(
-    field_id: str, field_type: str, category: str, settings: dict[str, Any], stage: str = "PROBE"
+PLACEHOLDER = re.compile(r"\{([A-Za-z]\w*)\}")
+
+
+def expand_template(
+    template: str,
+    slots: Mapping[str, Sequence[str]],
+    windows: Sequence[int],
+    prep: Mapping[str, str],
+    settings: dict[str, Any],
+    limit: int,
+    rng: Any,
 ) -> list[Proposal]:
-    window = 63 if category in SLOW_CATEGORIES else 21
-    x = prepared(field_id, field_type)
-    out = [Proposal(f"rank({x})", settings, stage, role="level")]
-    for op in PROBE_OPERATORS:
-        out.append(Proposal(f"{op}({x}, {window})", settings, stage, role=op))
-    return out
+    """`{A}`, `{B}` ... take field ids from `slots` (each entering through its `prep`),
+    `{w}` takes each window. Every combination is built, shuffled (官方: random sampling
+    beats the first N in field order), and capped at `limit`. A combination that puts the
+    same field in two slots is skipped."""
+    names = [n for n in dict.fromkeys(PLACEHOLDER.findall(template)) if n != "w"]
+    combos: list[dict[str, str]] = [{}]
+    for name in names:
+        combos = [{**c, name: f} for c in combos for f in slots.get(name, [])]
+    combos = [c for c in combos if len(set(c.values())) == len(c)]
+    wins = list(windows) if "{w}" in template else [0]
+    out = []
+    for combo in combos:
+        for w in wins:
+            values = {n: prep.get(f, f) for n, f in combo.items()}
+            values["w"] = str(w)
+            expr = PLACEHOLDER.sub(_filler(values), template)
+            label = ",".join(f"{n}={f}" for n, f in combo.items())
+            out.append(
+                Proposal(expr, settings, "IDEA", role="idea", change=f"{label} w={w}".strip())
+            )
+    rng.shuffle(out)
+    return out[:limit]
 
 
 # ---------- order 2 / 3 ----------

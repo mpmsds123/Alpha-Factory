@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, event, func, select
+from sqlalchemy import Engine, create_engine, event, func, inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -25,6 +25,31 @@ def fingerprint(expression: str, settings: dict[str, Any]) -> str:
     return sha256_text(re.sub(r"\s+", "", expression) + "\x1f" + canonical_json(settings))
 
 
+def _upgrade_empty_tables(engine: Engine) -> None:
+    """A table from an older layout is rebuilt if it holds nothing yet. One with rows is
+    never touched: that needs a decision, so it stops with an explanation instead."""
+    existing = inspect(engine)
+    stale = []
+    for table in FactoryBase.metadata.sorted_tables:
+        if not existing.has_table(table.name):
+            continue
+        have = {c["name"] for c in existing.get_columns(table.name)}
+        if {c.name for c in table.columns} - have:
+            stale.append(table.name)
+    if not stale:
+        return
+    with engine.begin() as conn:
+        busy = [t for t in stale if conn.execute(text(f'SELECT 1 FROM "{t}" LIMIT 1')).first()]
+        if busy:
+            raise RuntimeError(
+                f"ledger tables {busy} use an older layout and already hold data; "
+                "back up the ledger file before upgrading it"
+            )
+        conn.execute(text("PRAGMA foreign_keys=OFF"))
+        for t in stale:
+            conn.execute(text(f'DROP TABLE "{t}"'))
+
+
 def today_utc() -> str:
     return datetime.now(UTC).date().isoformat()
 
@@ -36,6 +61,7 @@ class Ledger:
             kwargs["poolclass"] = StaticPool
         self.engine = create_engine(url, future=True, **kwargs)
         event.listen(self.engine, "connect", _sqlite_pragmas)
+        _upgrade_empty_tables(self.engine)
         FactoryBase.metadata.create_all(self.engine)
         self._sessions = sessionmaker(bind=self.engine, expire_on_commit=False)
 

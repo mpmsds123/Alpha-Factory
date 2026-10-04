@@ -20,7 +20,7 @@ def test_dashboard_renders_after_a_day(tmp_path: Path, monkeypatch: pytest.Monke
     cfg.budget.min_batch_interval_s = 0
     llm = FactoryLLM(cfg, ledger, complete=scripted_llm)
     api = FakePlatform(platform_metrics, FIELDS)
-    for seed in (3, 4):  # day 1 probes; day 2 proposes hypotheses for the dataset with signal
+    for seed in (3, 4):
         run_day(
             cfg,
             api,
@@ -31,6 +31,7 @@ def test_dashboard_renders_after_a_day(tmp_path: Path, monkeypatch: pytest.Monke
             sleep=lambda _s: None,
         )
     page = render(ledger, cfg, tmp_path / "dash.html").read_text()
-    assert "待你确认" in page and "挖掘地图" in page
+    assert "待你确认" in page and "数据集队列" in page
     assert "goodf_fy" in page  # reviews show real expressions (file stays local)
-    assert "Revision drift" in page  # hypotheses wait for approval by default
+    assert "Revision drift" in page and "dig" in page  # ideas with the LLM's latest verdict
+    assert "EXHAUSTED" in page  # stopped datasets stay visible with their reason

@@ -20,18 +20,22 @@ DEFAULT_CONFIG = REPO_ROOT / "factory.yaml"
 
 @dataclass
 class Budget:
-    daily_sim_cap: int = 4500  # 规则: 5,000/day for consultants; 500 kept for manual work
-    explore_fraction: float = 0.30  # 设计 ⑤: month one 30%, later 10-15%
-    probe_budget: int = 50  # 官方: "先跑 10-50 次试探"; kill a dataset after this
+    # 10 simulations in flight x 12 hours x 20 per hour (about 3 minutes each) = 2,400.
+    daily_sim_cap: int = 2400
+    active_datasets: int = 2  # datasets researched at once, so the queue never runs dry
+    dataset_sim_cap: int = 1000  # one dataset: ~60 to understand + rounds of ideas + digging
+    profile_fields: int = 10  # family representatives probed with the 6 ways (6 sims each)
+    ideas_per_round: int = 4
+    expansions_per_idea: int = 60  # template x fields x windows, shuffled, then capped
+    dig_per_idea: int = 8  # variants the LLM may write around ore in one review
     slots: int = 6  # 规则: 8 concurrent multi-sims; 2 left for manual use
     children_per_slot: int = 10  # 规则: 10 alphas per multi-simulation
     min_batch_interval_s: float = 20.0  # 论坛: >3 batches / 10 min triggers 429 storms
-    max_cells_per_day: int = 12
 
 
 @dataclass
 class Thresholds:
-    probe_hit_sharpe: float = 1.0  # 成长经历帖: no |sharpe|>1 in a first-order scan = no signal
+    ore_sharpe: float = 1.0  # |sharpe| at or above this in a round counts as ore (sign fixable)
     flip_sharpe: float = -1.2  # cnhkmcp 优化手册: keep strong negatives, flip them
     flip_fitness: float = -0.5
     expand_sharpe: float = 1.2  # machine_lib: survivors entering the next order
@@ -54,8 +58,8 @@ class Thresholds:
 @dataclass
 class LLMConfig:
     base_url: str = "https://api.deepseek.com"
-    model: str = "deepseek-flash"  # routine jobs: expressions, alignment, descriptions
-    strong_model: str = "deepseek-v4-pro"  # hypotheses
+    model: str = "deepseek-flash"  # descriptions
+    strong_model: str = "deepseek-v4-pro"  # ideas and result reviews
     key_file: str = "~/secrets/deepseek.json"
     temperature: float = 0.4
     timeout_s: float = 120.0
@@ -65,8 +69,8 @@ class LLMConfig:
 class Policy:
     max_submissions_per_day: int = 4  # 规则
     auto_submit: bool = False  # 设计 ③: you confirm every submission
-    hypotheses_need_approval: bool = True  # 设计 ④
-    hypothesis_rounds_before_retire: int = 3
+    hypotheses_need_approval: bool = False  # True: ideas wait for `hypotheses approve`
+    rounds_without_ore_to_stop: int = 2  # 官方: don't grind one place; move to the next dataset
     regions: list[str] = field(default_factory=list)  # empty = every region you can access
     delays: list[int] = field(default_factory=lambda: [1])
 

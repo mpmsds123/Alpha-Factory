@@ -87,11 +87,38 @@ def parse_compilation(path: Path, source: str) -> Iterator[Doc]:
             yield Doc(source, title[:500], url_match.group(0) if url_match else "", body[:MAX_BODY])
 
 
+HOMEWORK_POST = re.compile(r"^--- #(\d+)\s.*---$", re.M)
+COURSE = re.compile(r"^# (.*Course\s*\d+.*)$", re.M)
+HAS_EXPRESSION = re.compile(r"\b(?:ts_\w+|group_\w+|rank|trade_when|vec_\w+)\s*\(")
+
+
+def parse_homework(path: Path, source: str) -> Iterator[Doc]:
+    """The official homework thread: every student answer is its own document, titled by
+    its course, because most answers are dataset-specific templates with a rationale."""
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    courses = [(m.start(), m.group(1).strip()) for m in COURSE.finditer(text)]
+    posts = list(HOMEWORK_POST.finditer(text))
+    for i, m in enumerate(posts):
+        end = posts[i + 1].start() if i + 1 < len(posts) else len(text)
+        body = text[m.end() : end]
+        body = body.split("\n# ", 1)[0].strip()  # stop at the next course heading
+        course = next((name for pos, name in reversed(courses) if pos < m.start()), "作业")
+        # Course 1 answers are platform-basics quizzes; templates start with course 2.
+        if re.search(r"Course\s*1\D", course + " ") or not HAS_EXPRESSION.search(body):
+            continue
+        if len(body) > 80:
+            yield Doc(source, f"{course[:200]} · 作业 #{m.group(1)}", "", body[:MAX_BODY])
+
+
 def collect(paths: Iterable[Path]) -> Iterator[Doc]:
     for path in paths:
         path = path.expanduser()
         if path.is_file():
-            yield from parse_compilation(path, path.stem)
+            head = path.read_text(encoding="utf-8", errors="ignore")[:200_000]
+            if HOMEWORK_POST.search(head):
+                yield from parse_homework(path, "作业区")
+            else:
+                yield from parse_compilation(path, path.stem)
         elif path.is_dir():
             for f in sorted(path.rglob("*.md")):
                 doc = parse_post_file(f, f.parent.name)

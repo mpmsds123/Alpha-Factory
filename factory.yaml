@@ -3,22 +3,25 @@ db_path: ~/.alpha_factory/factory.db     # 账本，放在仓库外
 reports_dir: reports                     # 面板（含真实表达式，已 gitignore）
 
 budget:
-  daily_sim_cap: 4500        # 每天 5,000 次，留 500 给手动
-  explore_fraction: 0.30     # 第一个月 30% 探索，之后改成 0.10–0.15
-  probe_budget: 50           # 每个数据集最多探测 50 次，无信号就止损
-  slots: 6                   # 同时 8 个批量回测，留 2 个给手动
+  daily_sim_cap: 2400        # 并发 10 × 12 小时 × 每小时 20 次（约 3 分钟一次）
+  active_datasets: 2         # 同时在做的数据集数，保证回测队列不空
+  dataset_sim_cap: 1000      # 一个数据集最多花多少次回测
+  profile_fields: 10         # 读数据：每个数据集挑 10 个代表字段，各跑 6 种探测
+  ideas_per_round: 4         # LLM 每轮提几个点子
+  expansions_per_idea: 60    # 每个点子展开成多少条表达式
+  dig_per_idea: 8            # 找到矿后，LLM 每轮在附近写几条变体
+  slots: 6
   children_per_slot: 10
   min_batch_interval_s: 20   # 防 429 风暴
-  max_cells_per_day: 12
 
 thresholds:
-  probe_hit_sharpe: 1.0
+  ore_sharpe: 1.0            # 一轮里 |Sharpe| 达到这个就算"有矿"（负的可以取反）
   submit_sharpe: 1.58
   submit_sharpe_chn: 2.08
   submit_fitness: 1.0
   robust_keep_ratio: 0.5
   pnl_corr_max: 0.7
-  dataset_cap: 8
+  dataset_cap: 8             # 每个数据集最多交 8 个
   margin_bps: {USA: 5.0, CHN: 20.0, IND: 20.0, MEA: 20.0, default: 15.0}
 
 llm:
@@ -30,6 +33,7 @@ llm:
 policy:
   max_submissions_per_day: 4
   auto_submit: false                     # 提交永远由你确认
-  hypotheses_need_approval: true         # 假设由你每周批一次
+  hypotheses_need_approval: false        # 改成 true：LLM 的点子要你批准后才回测
+  rounds_without_ore_to_stop: 2          # 连续 2 轮没矿就换下一个数据集
   regions: []                            # 空 = 你账号能用的全部地区
   delays: [1]
