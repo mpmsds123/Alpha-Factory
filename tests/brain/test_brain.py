@@ -82,6 +82,8 @@ def test_relogin_is_rationed(tmp_path: Path) -> None:
     session.login()
     with pytest.raises(AuthenticationFailed):
         session.login()
+    # a person running `alpha-factory login` is not held back by the cooldown
+    session.login(interactive=True)
 
 
 def test_client_retries_429_then_succeeds(tmp_path: Path) -> None:

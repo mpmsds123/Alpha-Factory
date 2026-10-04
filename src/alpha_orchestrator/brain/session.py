@@ -145,17 +145,19 @@ class BrainSession:
         self.store.update_meta(expires_at=self._clock() + expiry)
         return expiry
 
-    def ensure(self, minimum_seconds: float = 600.0) -> float:
+    def ensure(self, minimum_seconds: float = 600.0, *, interactive: bool = False) -> float:
         """Return remaining seconds, logging in with the password when needed."""
         remaining = self.seconds_remaining()
         if remaining >= minimum_seconds:
             return remaining
-        self.login()
+        self.login(interactive=interactive)
         return self.seconds_remaining()
 
-    def login(self) -> None:
+    def login(self, *, interactive: bool = False) -> None:
+        """The cooldown guards unattended runs from hammering the password; a person at
+        the keyboard running `alpha-factory login` is not held back by it."""
         last = float(self.store.meta().get("last_password_login", 0.0))
-        if self._clock() - last < RELOGIN_COOLDOWN_SECONDS:
+        if not interactive and self._clock() - last < RELOGIN_COOLDOWN_SECONDS:
             raise AuthenticationFailed(
                 "A password login happened less than 30 minutes ago; refusing another "
                 "to protect the account. Run `alpha-factory login` interactively."

@@ -68,7 +68,7 @@ def login(
     """刷脸登录。完成后可直接开始当天的运行。"""
     session = BrainSession()
     try:
-        remaining = session.ensure()
+        remaining = session.ensure(interactive=True)
         typer.echo(f"已登录，会话剩余约 {remaining / 3600:.1f} 小时。")
     except NeedBiometric as need:
         typer.echo(f"平台要求刷脸，正在打开浏览器：\n  {need.url}")
