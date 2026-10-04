@@ -10,7 +10,7 @@ import typer
 from sqlalchemy import select
 
 from alpha_orchestrator.brain.api import BrainAPI
-from alpha_orchestrator.brain.client import BrainClient
+from alpha_orchestrator.brain.client import BrainClient, RateLimited, SessionExpired
 from alpha_orchestrator.brain.notify import notify
 from alpha_orchestrator.brain.session import AuthenticationFailed, BrainSession, NeedBiometric
 from alpha_orchestrator.factory.config import FactoryConfig
@@ -110,6 +110,10 @@ def run(
         notify("平台要求刷脸：运行 alpha-factory login --then-run，会从断点继续")
         render(ledger, cfg, _dashboard_path(cfg))
         raise typer.Exit(2) from None
+    except (AuthenticationFailed, SessionExpired, RateLimited) as exc:
+        notify(f"运行暂停：{exc}。进度已保存，稍后重跑 alpha-factory run 会接着来")
+        render(ledger, cfg, _dashboard_path(cfg))
+        raise typer.Exit(3) from None
     finally:
         api.client.session.close()
     render(ledger, cfg, _dashboard_path(cfg))
