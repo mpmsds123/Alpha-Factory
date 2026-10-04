@@ -111,6 +111,8 @@ def rank(s: Session, config: FactoryConfig) -> list[Ranked]:
             "themes": 1.2 if c.themes else 1.0,
             "crowding": round(1 - crowding_discount(c.alpha_count), 3),
             "portfolio_gap": round(portfolio_gap(share), 3),
+            "submitted_total": total,
+            "submitted_category": by_category[cat],
             "cost": round(cost_factor(config.margin_floor(c.region)), 3),
             "difficulty": round(config.thresholds.submit_sharpe / config.sharpe_floor(c.region), 3),
         }

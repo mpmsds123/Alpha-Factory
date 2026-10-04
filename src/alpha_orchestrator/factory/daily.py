@@ -86,6 +86,7 @@ def run_day(
     rng: random.Random | None = None,
     meta: Metadata | None = None,
     sleep: Any = time.sleep,
+    on_progress: Any = None,
 ) -> DayReport:
     report = DayReport()
     if llm is None:
@@ -118,6 +119,8 @@ def run_day(
         report.simulations += run.completed
         report.failed += run.failed
         report.ready += factory.evaluate()["ready"]
+        if on_progress is not None:
+            on_progress()
         report.stopped_because = run.stopped_because
         if run.stopped_because in ("quota", "deadline", "platform kept refusing batches"):
             break
