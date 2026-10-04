@@ -47,34 +47,54 @@ def check_value(checks: list[dict[str, Any]], name: str) -> float | None:
     return None
 
 
-def select_today(api: BrainAPI, ledger: Ledger, config: FactoryConfig,
-                 llm: FactoryLLM | None) -> list[str]:
+def select_today(
+    api: BrainAPI, ledger: Ledger, config: FactoryConfig, llm: FactoryLLM | None
+) -> list[str]:
     start = datetime.combine(datetime.now(UTC).date(), datetime.min.time(), tzinfo=UTC)
     with ledger.session() as s:
-        used_today = int(s.scalar(select(func.count()).select_from(ReviewORM)
-                                  .where(ReviewORM.created_at >= start)) or 0)
+        used_today = int(
+            s.scalar(
+                select(func.count()).select_from(ReviewORM).where(ReviewORM.created_at >= start)
+            )
+            or 0
+        )
         slots = config.policy.max_submissions_per_day - used_today
         reviewed = set(s.scalars(select(ReviewORM.candidate_id)))
-        keep = [r.alpha_id for r in s.scalars(select(ReviewORM).where(
-            ReviewORM.status.in_([ReviewStatus.PENDING, ReviewStatus.APPROVED,
-                                  ReviewStatus.SUBMITTED])))]
+        keep = [
+            r.alpha_id
+            for r in s.scalars(
+                select(ReviewORM).where(
+                    ReviewORM.status.in_(
+                        [ReviewStatus.PENDING, ReviewStatus.APPROVED, ReviewStatus.SUBMITTED]
+                    )
+                )
+            )
+        ]
         stats = {c.cell_id: c for c in cell_stats(s)}
-        pool = []
+        pool: list[tuple[str, str, float, bool, int, float]] = []
         for c in s.scalars(select(CandidateORM).where(CandidateORM.status == "DONE")):
-            if c.id in reviewed or not c.extra.get("ready"):
+            if c.id in reviewed or not c.extra.get("ready") or not c.alpha_id:
                 continue
             if not (c.extra.get("robust") or {}).get("pass"):
                 continue
             st = stats.get(c.cell_id)
             value = value_if_hit(st, config) if st else 1.0
-            pool.append((c.id, c.alpha_id, value, c.extra.get("atom", False),
-                         int(c.extra.get("operators", 8)), c.fitness or 0.0))
+            pool.append(
+                (
+                    c.id,
+                    c.alpha_id,
+                    float(value),
+                    bool(c.extra.get("atom", False)),
+                    int(c.extra.get("operators", 8)),
+                    c.fitness or 0.0,
+                )
+            )
     if slots <= 0 or not pool:
         return []
 
     def prelim(item: tuple[Any, ...]) -> float:
         _, _, value, atom, ops, fitness = item
-        return value * (1.15 if atom else 1.0) * (1 + 0.1 * (8 - ops) / 8) * fitness
+        return float(value * (1.15 if atom else 1.0) * (1 + 0.1 * (8 - ops) / 8) * fitness)
 
     pool.sort(key=prelim, reverse=True)
     kept_pnl = {aid: api.daily_pnl(aid) for aid in keep}
@@ -87,9 +107,9 @@ def select_today(api: BrainAPI, ledger: Ledger, config: FactoryConfig,
         prod = check_value(checks, "PROD_CORRELATION")
         self_corr = check_value(checks, "SELF_CORRELATION")
         with ledger.session() as s:
-            c = s.get(CandidateORM, cid)
-            assert c is not None
-            c.extra = {**c.extra, "submission_check": checks}
+            row = s.get(CandidateORM, cid)
+            assert row is not None
+            row.extra = {**row.extra, "submission_check": checks}
         if fails:
             continue
         pnl = api.daily_pnl(alpha_id)
@@ -97,14 +117,22 @@ def select_today(api: BrainAPI, ledger: Ledger, config: FactoryConfig,
         if worst > config.thresholds.pnl_corr_max:
             continue
         description = _describe(ledger, llm, cid)
-        score = {"value": round(value, 3), "atom": atom, "operators": ops,
-                 "fitness": fitness, "prod_corr": prod, "self_corr": self_corr,
-                 "max_pnl_corr_vs_pool": round(worst, 3),
-                 "final": round(prelim((cid, alpha_id, value, atom, ops, fitness))
-                                * (1 - (prod or 0) / 2), 4)}
+        score = {
+            "value": round(value, 3),
+            "atom": atom,
+            "operators": ops,
+            "fitness": fitness,
+            "prod_corr": prod,
+            "self_corr": self_corr,
+            "max_pnl_corr_vs_pool": round(worst, 3),
+            "final": round(
+                prelim((cid, alpha_id, value, atom, ops, fitness)) * (1 - (prod or 0) / 2), 4
+            ),
+        }
         with ledger.session() as s:
-            s.add(ReviewORM(candidate_id=cid, alpha_id=alpha_id, score=score,
-                            description=description))
+            s.add(
+                ReviewORM(candidate_id=cid, alpha_id=alpha_id, score=score, description=description)
+            )
             ledger.log(s, "review_created", alpha=alpha_id, score=score)
         kept_pnl[alpha_id] = pnl
         chosen.append(alpha_id)
@@ -117,10 +145,14 @@ def _describe(ledger: Ledger, llm: FactoryLLM | None, candidate_id: str) -> str:
         assert c is not None
         cell = s.get(CellORM, c.cell_id)
         h = s.get(HypothesisORM, c.hypothesis_id) if c.hypothesis_id else None
-        info = {"expression": c.expression, "settings": c.settings,
-                "dataset": cell.dataset_name if cell else c.cell_id,
-                "dataset_description": (cell.description[:800] if cell else ""),
-                "hypothesis": h.statement if h else None, "lineage_change": c.change}
+        info = {
+            "expression": c.expression,
+            "settings": c.settings,
+            "dataset": cell.dataset_name if cell else c.cell_id,
+            "dataset_description": (cell.description[:800] if cell else ""),
+            "hypothesis": h.statement if h else None,
+            "lineage_change": c.change,
+        }
     if llm is None:
         return ""
     try:

@@ -30,3 +30,8 @@ tests/tools/
 brain-session.json
 platform-brain.json
 .runtime/
+
+# alpha factory: real expressions, results and the ledger never leave this machine
+reports/
+factory.db*
+.alpha_factory/

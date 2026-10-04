@@ -56,14 +56,26 @@ class BrainAPI:
 
     # ---------- metadata ----------
     def datasets(self, region: str, delay: int, universe: str) -> list[dict[str, Any]]:
-        query = {"instrumentType": "EQUITY", "region": region, "delay": delay,
-                 "universe": universe, "limit": PAGE}
+        query = {
+            "instrumentType": "EQUITY",
+            "region": region,
+            "delay": delay,
+            "universe": universe,
+            "limit": PAGE,
+        }
         return self._paged("/data-sets", query)
 
-    def datafields(self, region: str, delay: int, universe: str,
-                   dataset_id: str) -> list[dict[str, Any]]:
-        query = {"instrumentType": "EQUITY", "region": region, "delay": delay,
-                 "universe": universe, "dataset.id": dataset_id, "limit": PAGE}
+    def datafields(
+        self, region: str, delay: int, universe: str, dataset_id: str
+    ) -> list[dict[str, Any]]:
+        query = {
+            "instrumentType": "EQUITY",
+            "region": region,
+            "delay": delay,
+            "universe": universe,
+            "dataset.id": dataset_id,
+            "limit": PAGE,
+        }
         return self._paged("/data-fields", query)
 
     def operators(self) -> list[dict[str, Any]]:
@@ -97,7 +109,7 @@ class BrainAPI:
         location = response.headers.get("Location")
         if response.status_code // 100 != 2 or not location:
             raise ValueError(f"Simulation refused ({response.status_code}): {response.text[:300]}")
-        return location
+        return str(location)
 
     def poll(self, location: str) -> SimulationProgress:
         """One look at a simulation. A multi returns child ids; a single returns its alpha."""
@@ -115,8 +127,12 @@ class BrainAPI:
 
     def child(self, child_id: str) -> ChildResult:
         data = self.client.wait_json(f"/simulations/{child_id}") or {}
-        return ChildResult(child_id=child_id, status=str(data.get("status", "ERROR")),
-                           alpha_id=data.get("alpha"), message=data.get("message"))
+        return ChildResult(
+            child_id=child_id,
+            status=str(data.get("status", "ERROR")),
+            alpha_id=data.get("alpha"),
+            message=data.get("message"),
+        )
 
     # ---------- results ----------
     def alpha(self, alpha_id: str) -> dict[str, Any]:
@@ -148,8 +164,14 @@ class BrainAPI:
         path = f"/users/self/alphas/{alpha_id}/before-and-after-performance"
         return dict(self.client.wait_json(path) or {})
 
-    def set_properties(self, alpha_id: str, *, name: str | None = None,
-                       description: str | None = None, tags: Iterable[str] = ()) -> None:
+    def set_properties(
+        self,
+        alpha_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        tags: Iterable[str] = (),
+    ) -> None:
         body: dict[str, Any] = {"tags": list(tags)}
         if name:
             body["name"] = name
@@ -184,6 +206,7 @@ class BrainAPI:
 
 def parse_simulation_options(children: Mapping[str, Any]) -> dict[str, Any]:
     """Flatten the OPTIONS tree into {region: {universes, delays, neutralizations}}."""
+
     def choices(name: str) -> Any:
         return children.get(name, {}).get("choices", {}).get("instrumentType", {}).get("EQUITY")
 

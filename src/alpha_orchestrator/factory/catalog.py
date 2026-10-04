@@ -21,9 +21,17 @@ from alpha_orchestrator.factory.models import CellORM, CellState
 from alpha_orchestrator.factory.scoring import CellStats
 
 PREFERRED_UNIVERSE = {
-    "USA": "TOP3000", "EUR": "TOP2500", "ASI": "MINVOL1M", "GLB": "TOP3000",
-    "CHN": "TOP2000U", "IND": "TOP500", "JPN": "TOP1600", "KOR": "TOP600",
-    "TWN": "TOP500", "HKG": "TOP500", "AMR": "TOP600",
+    "USA": "TOP3000",
+    "EUR": "TOP2500",
+    "ASI": "MINVOL1M",
+    "GLB": "TOP3000",
+    "CHN": "TOP2000U",
+    "IND": "TOP500",
+    "JPN": "TOP1600",
+    "KOR": "TOP600",
+    "TWN": "TOP500",
+    "HKG": "TOP500",
+    "AMR": "TOP600",
 }
 
 
@@ -35,22 +43,27 @@ def pick_universe(region: str, offered: list[str]) -> str | None:
     preferred = PREFERRED_UNIVERSE.get(region)
     if preferred in offered:
         return preferred
-    tops = sorted((u for u in offered if u.startswith("TOP") and u[3:].isdigit()),
-                  key=lambda u: -int(u[3:]))
+    tops = sorted(
+        (u for u in offered if u.startswith("TOP") and u[3:].isdigit()), key=lambda u: -int(u[3:])
+    )
     return tops[0] if tops else (offered[0] if offered else None)
 
 
-def upsert_cells(s: Session, rows: Iterable[Mapping[str, Any]], region: str, delay: int,
-                 universe: str) -> int:
+def upsert_cells(
+    s: Session, rows: Iterable[Mapping[str, Any]], region: str, delay: int, universe: str
+) -> int:
     now = utc_now()
     count = 0
     for row in rows:
         cid = cell_id(region, delay, universe, str(row["id"]))
-        cell = s.get(CellORM, cid) or CellORM(cell_id=cid, region=region, delay=delay,
-                                              universe=universe, dataset_id=str(row["id"]))
+        cell = s.get(CellORM, cid) or CellORM(
+            cell_id=cid, region=region, delay=delay, universe=universe, dataset_id=str(row["id"])
+        )
         category = row.get("category") or {}
         cell.dataset_name = str(row.get("name") or "")
-        cell.category = str(category.get("id") if isinstance(category, dict) else category or "other")
+        cell.category = str(
+            category.get("id") if isinstance(category, dict) else category or "other"
+        )
         cell.description = str(row.get("description") or "")[:4000]
         cell.multiplier = float(row.get("pyramidMultiplier") or 1.0)
         cell.value_score = float(row.get("valueScore") or 0.0)
@@ -80,15 +93,23 @@ def refresh(api: BrainAPI, ledger: Ledger, config: FactoryConfig) -> dict[str, A
         for delay in config.policy.delays:
             if delay not in offered["delays"]:
                 continue
-            rows = [r for r in api.datasets(region, delay, universe)
-                    if int(r.get("fieldCount") or 0) >= 3]
+            rows = [
+                r
+                for r in api.datasets(region, delay, universe)
+                if int(r.get("fieldCount") or 0) >= 3
+            ]
             with ledger.session() as s:
                 n = upsert_cells(s, rows, region, delay, universe)
                 ledger.log(s, "catalog", region=region, delay=delay, universe=universe, cells=n)
             summary["regions"][f"{region}/D{delay}/{universe}"] = n
     with ledger.session() as s:
-        ledger.log(s, "pyramids", counts={f"{k[0]}|{k[1]}|{k[2]}": v
-                                         for k, v in pyramid_counts(api.pyramid_alphas()).items()})
+        ledger.log(
+            s,
+            "pyramids",
+            counts={
+                f"{k[0]}|{k[1]}|{k[2]}": v for k, v in pyramid_counts(api.pyramid_alphas()).items()
+            },
+        )
     return summary
 
 
@@ -115,8 +136,9 @@ def pyramid_counts(records: Iterable[Mapping[str, Any]]) -> Counter[tuple[str, i
 def latest_pyramid_counts(s: Session) -> Counter[tuple[str, int, str]]:
     from alpha_orchestrator.factory.models import EventORM
 
-    event = s.scalar(select(EventORM).where(EventORM.kind == "pyramids")
-                     .order_by(EventORM.id.desc()).limit(1))
+    event = s.scalar(
+        select(EventORM).where(EventORM.kind == "pyramids").order_by(EventORM.id.desc()).limit(1)
+    )
     out: Counter[tuple[str, int, str]] = Counter()
     if event:
         for key, value in (event.payload.get("counts") or {}).items():
@@ -128,13 +150,22 @@ def latest_pyramid_counts(s: Session) -> Counter[tuple[str, int, str]]:
 def cell_stats(s: Session, since: datetime | None = None) -> list[CellStats]:
     pyramids = latest_pyramid_counts(s)
     out = []
-    for c in s.scalars(select(CellORM).where(CellORM.active.is_(True),
-                                             CellORM.state != CellState.KILLED)):
-        out.append(CellStats(
-            cell_id=c.cell_id, region=c.region, category=c.category.lower(), state=c.state,
-            multiplier=c.multiplier, alpha_count=c.alpha_count, themes=len(c.themes or []),
-            probes=c.probes, hits=c.hits,
-            pyramid_submitted=pyramids.get((c.region, c.delay, c.category.lower()), 0),
-            dataset_submitted=c.submitted,
-        ))
+    for c in s.scalars(
+        select(CellORM).where(CellORM.active.is_(True), CellORM.state != CellState.KILLED)
+    ):
+        out.append(
+            CellStats(
+                cell_id=c.cell_id,
+                region=c.region,
+                category=c.category.lower(),
+                state=c.state,
+                multiplier=c.multiplier,
+                alpha_count=c.alpha_count,
+                themes=len(c.themes or []),
+                probes=c.probes,
+                hits=c.hits,
+                pyramid_submitted=pyramids.get((c.region, c.delay, c.category.lower()), 0),
+                dataset_submitted=c.submitted,
+            )
+        )
     return out

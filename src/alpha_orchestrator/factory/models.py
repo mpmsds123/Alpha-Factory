@@ -33,11 +33,11 @@ class FactoryBase(DeclarativeBase):
 
 
 class CellState:
-    NEW = "NEW"            # known from the catalog, nothing spent yet
+    NEW = "NEW"  # known from the catalog, nothing spent yet
     PROFILED = "PROFILED"  # fields fetched and grouped into families
-    PROBING = "PROBING"    # first-order probe batch queued or running
-    SIGNAL = "SIGNAL"      # probe found signal; hypotheses and expansion allowed
-    KILLED = "KILLED"      # probe budget spent without signal
+    PROBING = "PROBING"  # first-order probe batch queued or running
+    SIGNAL = "SIGNAL"  # probe found signal; hypotheses and expansion allowed
+    KILLED = "KILLED"  # probe budget spent without signal
     SATURATED = "SATURATED"  # enough submissions from this dataset (concentration cap)
 
 
@@ -45,19 +45,19 @@ class CandidateStatus:
     QUEUED = "QUEUED"
     RUNNING = "RUNNING"
     DONE = "DONE"
-    FAILED = "FAILED"      # platform error (bad field, operator, etc.)
-    INVALID = "INVALID"    # rejected locally before any simulation was spent
+    FAILED = "FAILED"  # platform error (bad field, operator, etc.)
+    INVALID = "INVALID"  # rejected locally before any simulation was spent
 
 
 class Stage:
-    PROBE = "PROBE"        # first-order scan of family representatives
-    FIRST = "FIRST"        # first-order on all members of a live family
-    LLM = "LLM"            # written by the LLM from an approved hypothesis
-    SECOND = "SECOND"      # group operator wrapped around a survivor
-    THIRD = "THIRD"        # trade_when / timing wrapped around a survivor
-    REPAIR = "REPAIR"      # one-variable fix routed by the failing check
-    FLIP = "FLIP"          # multiply(-1, parent)
-    ROBUST = "ROBUST"      # stress variant of a candidate (rank, sign, perturbation, ...)
+    PROBE = "PROBE"  # first-order scan of family representatives
+    FIRST = "FIRST"  # first-order on all members of a live family
+    LLM = "LLM"  # written by the LLM from an approved hypothesis
+    SECOND = "SECOND"  # group operator wrapped around a survivor
+    THIRD = "THIRD"  # trade_when / timing wrapped around a survivor
+    REPAIR = "REPAIR"  # one-variable fix routed by the failing check
+    FLIP = "FLIP"  # multiply(-1, parent)
+    ROBUST = "ROBUST"  # stress variant of a candidate (rank, sign, perturbation, ...)
 
 
 class HypothesisStatus:

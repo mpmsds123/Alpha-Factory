@@ -1,5 +1,6 @@
 """Desktop notifications so an unattended run can call a human back."""
 
+import contextlib
 import subprocess
 import sys
 
@@ -9,10 +10,8 @@ def notify(message: str, title: str = "Alpha 工厂") -> None:
     if sys.platform != "darwin":
         return
     script = f"display notification {_quote(message)} with title {_quote(title)}"
-    try:
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
         subprocess.run(["osascript", "-e", script], timeout=10, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
 
 
 def _quote(text: str) -> str:

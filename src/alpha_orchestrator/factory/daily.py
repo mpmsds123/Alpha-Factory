@@ -50,9 +50,17 @@ def catalog_is_stale(ledger: Ledger, hours: float = 20.0) -> bool:
     return datetime.now(UTC) - last > timedelta(hours=hours)
 
 
-def run_day(config: FactoryConfig, api: BrainAPI, ledger: Ledger, llm: FactoryLLM | None,
-            *, minutes: float = 600.0, rng: random.Random | None = None,
-            meta: Metadata | None = None, sleep: Any = time.sleep) -> DayReport:
+def run_day(
+    config: FactoryConfig,
+    api: BrainAPI,
+    ledger: Ledger,
+    llm: FactoryLLM | None,
+    *,
+    minutes: float = 600.0,
+    rng: random.Random | None = None,
+    meta: Metadata | None = None,
+    sleep: Any = time.sleep,
+) -> DayReport:
     report = DayReport()
     deadline = time.monotonic() + minutes * 60
     meta = meta or Metadata.fetch(api)
@@ -73,20 +81,39 @@ def run_day(config: FactoryConfig, api: BrainAPI, ledger: Ledger, llm: FactoryLL
     factory = Factory(api, ledger, config, meta, llm, rng=rng)
     plan = plan_day(stats, config, budget, rng=rng)
     factory.cell_budget = {
-        a.cell_id: a.budget + (DEFAULT_CELL_BUDGET if a.mode == "explore" else 0) for a in plan}
+        a.cell_id: a.budget + (DEFAULT_CELL_BUDGET if a.mode == "explore" else 0) for a in plan
+    }
     for a in plan:
-        report.planned.append({"cell": a.cell_id, "mode": a.mode, "budget": a.budget,
-                               "ev": round(a.score, 4)})
+        report.planned.append(
+            {"cell": a.cell_id, "mode": a.mode, "budget": a.budget, "ev": round(a.score, 4)}
+        )
         with ledger.session() as s:
             cell = s.get(CellORM, a.cell_id)
             state = cell.state if cell else None
-            queued = int(s.scalar(select(func.count()).select_from(CandidateORM).where(
-                CandidateORM.cell_id == a.cell_id,
-                CandidateORM.status == CandidateStatus.QUEUED)) or 0)
-            has_hyp = s.scalar(select(HypothesisORM.id).where(
-                HypothesisORM.cell_id == a.cell_id,
-                HypothesisORM.status.in_([HypothesisStatus.PROPOSED, HypothesisStatus.APPROVED])
-            ).limit(1)) is not None
+            queued = int(
+                s.scalar(
+                    select(func.count())
+                    .select_from(CandidateORM)
+                    .where(
+                        CandidateORM.cell_id == a.cell_id,
+                        CandidateORM.status == CandidateStatus.QUEUED,
+                    )
+                )
+                or 0
+            )
+            has_hyp = (
+                s.scalar(
+                    select(HypothesisORM.id)
+                    .where(
+                        HypothesisORM.cell_id == a.cell_id,
+                        HypothesisORM.status.in_(
+                            [HypothesisStatus.PROPOSED, HypothesisStatus.APPROVED]
+                        ),
+                    )
+                    .limit(1)
+                )
+                is not None
+            )
         priority = 100 * max(a.score, 1e-4)
         if a.mode == "explore":
             if state == CellState.NEW:
@@ -114,7 +141,14 @@ def run_day(config: FactoryConfig, api: BrainAPI, ledger: Ledger, llm: FactoryLL
     factory.evaluate()
     report.reviews = select_today(api, ledger, config, llm)
     with ledger.session() as s:
-        ledger.log(s, "day_done", simulations=report.simulations, failed=report.failed,
-                   ready=report.ready, reviews=report.reviews, reason=report.stopped_because,
-                   quota=api.client.quota.remaining)
+        ledger.log(
+            s,
+            "day_done",
+            simulations=report.simulations,
+            failed=report.failed,
+            ready=report.ready,
+            reviews=report.reviews,
+            reason=report.stopped_because,
+            quota=api.client.quota.remaining,
+        )
     return report

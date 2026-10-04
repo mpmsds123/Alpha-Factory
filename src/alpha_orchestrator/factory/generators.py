@@ -14,18 +14,35 @@ from typing import Any
 from alpha_orchestrator.gates.sign_flip import negate
 
 WINDOWS = (5, 21, 63, 126, 252)
-SLOW_CATEGORIES = frozenset({"fundamental", "analyst", "model", "earnings", "institutions",
-                             "insiders", "shortinterest", "risk"})
+SLOW_CATEGORIES = frozenset(
+    {
+        "fundamental",
+        "analyst",
+        "model",
+        "earnings",
+        "institutions",
+        "insiders",
+        "shortinterest",
+        "risk",
+    }
+)
 PROBE_OPERATORS = ("ts_rank", "ts_zscore", "ts_delta", "ts_mean", "ts_av_diff", "ts_std_dev")
 GROUP_OPERATORS = ("group_rank", "group_zscore", "group_neutralize")
 GROUPS = ("industry", "subindustry", "sector")
-NEUTRALIZATION_BY_CATEGORY = {   # 官方 Neutralization 文档按数据类别的推荐
-    "fundamental": "INDUSTRY", "analyst": "INDUSTRY", "earnings": "INDUSTRY",
-    "news": "SUBINDUSTRY", "sentiment": "INDUSTRY", "socialmedia": "INDUSTRY",
-    "option": "MARKET", "pv": "MARKET", "institutions": "SECTOR", "macro": "SECTOR",
+NEUTRALIZATION_BY_CATEGORY = {  # 官方 Neutralization 文档按数据类别的推荐
+    "fundamental": "INDUSTRY",
+    "analyst": "INDUSTRY",
+    "earnings": "INDUSTRY",
+    "news": "SUBINDUSTRY",
+    "sentiment": "INDUSTRY",
+    "socialmedia": "INDUSTRY",
+    "option": "MARKET",
+    "pv": "MARKET",
+    "institutions": "SECTOR",
+    "macro": "SECTOR",
 }
 MAX_TRADE_REGIONS = frozenset({"ASI", "JPN", "HKG", "KOR", "TWN"})  # 规则: must be ON
-COUNTRY_FIRST = frozenset({"EUR", "ASI", "GLB"})                    # 官方新人指南
+COUNTRY_FIRST = frozenset({"EUR", "ASI", "GLB"})  # 官方新人指南
 HORIZON = re.compile(r"^(?:\d+[a-z]?|[a-z]{1,2}\d+[a-z]?|\d+[dwmqy]|fy\d|fq\d)$")
 
 
@@ -41,16 +58,26 @@ class Proposal:
 
 
 # ---------- settings ----------
-def base_settings(region: str, universe: str, delay: int, category: str,
-                  neutralizations: Sequence[str] = ()) -> dict[str, Any]:
-    neut = "COUNTRY" if region in COUNTRY_FIRST else NEUTRALIZATION_BY_CATEGORY.get(
-        category, "INDUSTRY")
+def base_settings(
+    region: str, universe: str, delay: int, category: str, neutralizations: Sequence[str] = ()
+) -> dict[str, Any]:
+    neut = (
+        "COUNTRY"
+        if region in COUNTRY_FIRST
+        else NEUTRALIZATION_BY_CATEGORY.get(category, "INDUSTRY")
+    )
     if neutralizations and neut not in neutralizations:
-        neut = next((n for n in ("INDUSTRY", "SUBINDUSTRY", "MARKET") if n in neutralizations),
-                    neutralizations[0])
+        neut = next(
+            (n for n in ("INDUSTRY", "SUBINDUSTRY", "MARKET") if n in neutralizations),
+            neutralizations[0],
+        )
     return {
-        "region": region, "universe": universe, "delay": delay, "decay": 0,
-        "neutralization": neut, "truncation": 0.08,
+        "region": region,
+        "universe": universe,
+        "delay": delay,
+        "decay": 0,
+        "neutralization": neut,
+        "truncation": 0.08,
         "maxTrade": "ON" if region in MAX_TRADE_REGIONS else "OFF",
     }
 
@@ -87,8 +114,9 @@ def prepared(field_id: str, field_type: str, backfill: int = 63) -> str:
 
 
 # ---------- order 1: probes ----------
-def probe_proposals(field_id: str, field_type: str, category: str,
-                    settings: dict[str, Any], stage: str = "PROBE") -> list[Proposal]:
+def probe_proposals(
+    field_id: str, field_type: str, category: str, settings: dict[str, Any], stage: str = "PROBE"
+) -> list[Proposal]:
     window = 63 if category in SLOW_CATEGORIES else 21
     x = prepared(field_id, field_type)
     out = [Proposal(f"rank({x})", settings, stage, role="level")]
@@ -98,13 +126,21 @@ def probe_proposals(field_id: str, field_type: str, category: str,
 
 
 # ---------- order 2 / 3 ----------
-def second_order(expression: str, settings: dict[str, Any],
-                 extra_groups: Sequence[str] = ()) -> list[Proposal]:
+def second_order(
+    expression: str, settings: dict[str, Any], extra_groups: Sequence[str] = ()
+) -> list[Proposal]:
     out = []
     for op in GROUP_OPERATORS:
         for group in (*GROUPS, *extra_groups):
-            out.append(Proposal(f"{op}({expression}, {group})", settings, "SECOND",
-                                role=op, change=f"wrap {op} by {group}"))
+            out.append(
+                Proposal(
+                    f"{op}({expression}, {group})",
+                    settings,
+                    "SECOND",
+                    role=op,
+                    change=f"wrap {op} by {group}",
+                )
+            )
     return out
 
 
@@ -118,8 +154,13 @@ THIRD_ORDER_EVENTS = (
 
 def third_order(expression: str, settings: dict[str, Any]) -> list[Proposal]:
     return [
-        Proposal(f"trade_when({entry}, {expression}, {exit_})", settings, "THIRD",
-                 role="trade_when", change=why)
+        Proposal(
+            f"trade_when({entry}, {expression}, {exit_})",
+            settings,
+            "THIRD",
+            role="trade_when",
+            change=why,
+        )
         for entry, exit_, why in THIRD_ORDER_EVENTS
     ]
 
@@ -129,36 +170,83 @@ def flip(expression: str, settings: dict[str, Any], sharpe: float) -> Proposal |
     negated = negate(expression)
     if negated is None:
         return None
-    return Proposal(negated, settings, "FLIP", role="flip",
-                    change=f"parent sharpe {sharpe:.2f}; negation mirrors the signal")
+    return Proposal(
+        negated,
+        settings,
+        "FLIP",
+        role="flip",
+        change=f"parent sharpe {sharpe:.2f}; negation mirrors the signal",
+    )
 
 
-def repair_proposals(expression: str, settings: dict[str, Any], fails: Iterable[str],
-                     turnover: float | None, neutralizations: Sequence[str],
-                     may_finetune: bool) -> list[Proposal]:
+def repair_proposals(
+    expression: str,
+    settings: dict[str, Any],
+    fails: Iterable[str],
+    turnover: float | None,
+    neutralizations: Sequence[str],
+    may_finetune: bool,
+) -> list[Proposal]:
     """One allowed fix per failing check, one variable at a time (设计 第 5 步)."""
     out: list[Proposal] = []
     fails = set(fails)
     if "HIGH_TURNOVER" in fails or (turnover or 0) > 0.4:
         new_decay = max(decay_for_turnover(turnover), int(settings.get("decay", 0)) * 2 or 4)
-        out.append(Proposal(expression, {**settings, "decay": new_decay}, "REPAIR",
-                            role="decay", change=f"decay {settings.get('decay', 0)}->{new_decay}"))
-        out.append(Proposal(f"hump({expression}, hump=0.01)", settings, "REPAIR",
-                            role="hump", change="hump to cut small rebalances"))
+        out.append(
+            Proposal(
+                expression,
+                {**settings, "decay": new_decay},
+                "REPAIR",
+                role="decay",
+                change=f"decay {settings.get('decay', 0)}->{new_decay}",
+            )
+        )
+        out.append(
+            Proposal(
+                f"hump({expression}, hump=0.01)",
+                settings,
+                "REPAIR",
+                role="hump",
+                change="hump to cut small rebalances",
+            )
+        )
     if "LOW_SUB_UNIVERSE_SHARPE" in fails:
-        split = (f"ts_decay_linear({expression}, 5) * rank(volume * close) + "
-                 f"ts_decay_linear({expression}, 10) * (1 - rank(volume * close))")
-        out.append(Proposal(split, settings, "REPAIR", role="liquidity_split",
-                            change="decay liquid and illiquid names separately"))
+        split = (
+            f"ts_decay_linear({expression}, 5) * rank(volume * close) + "
+            f"ts_decay_linear({expression}, 10) * (1 - rank(volume * close))"
+        )
+        out.append(
+            Proposal(
+                split,
+                settings,
+                "REPAIR",
+                role="liquidity_split",
+                change="decay liquid and illiquid names separately",
+            )
+        )
     if "CONCENTRATED_WEIGHT" in fails:
-        out.append(Proposal(f"rank({expression})", {**settings, "truncation": 0.05}, "REPAIR",
-                            role="rank_truncate", change="rank and truncation 0.05"))
+        out.append(
+            Proposal(
+                f"rank({expression})",
+                {**settings, "truncation": 0.05},
+                "REPAIR",
+                role="rank_truncate",
+                change="rank and truncation 0.05",
+            )
+        )
     if may_finetune and fails & {"LOW_SHARPE", "LOW_FITNESS"}:
         current = settings.get("neutralization")
         for neut in ("SUBINDUSTRY", "INDUSTRY", "SECTOR", "STATISTICAL", "SLOW_AND_FAST"):
             if neut != current and neut in neutralizations:
-                out.append(Proposal(expression, {**settings, "neutralization": neut}, "REPAIR",
-                                    role="neutralization", change=f"neutralization {current}->{neut}"))
+                out.append(
+                    Proposal(
+                        expression,
+                        {**settings, "neutralization": neut},
+                        "REPAIR",
+                        role="neutralization",
+                        change=f"neutralization {current}->{neut}",
+                    )
+                )
     return out
 
 
@@ -174,27 +262,42 @@ def perturb_windows(expression: str) -> list[str]:
         if w not in WINDOWS or w == 5:
             continue
         for nw in (round(w * 0.9), round(w * 1.1)):
-            out.append(expression[: m.start()] + str(nw) + expression[m.end():])
+            out.append(expression[: m.start()] + str(nw) + expression[m.end() :])
     return out
 
 
-def robustness_proposals(expression: str, settings: dict[str, Any],
-                         neutralizations: Sequence[str], universes: Sequence[str]
-                         ) -> list[Proposal]:
+def robustness_proposals(
+    expression: str,
+    settings: dict[str, Any],
+    neutralizations: Sequence[str],
+    universes: Sequence[str],
+) -> list[Proposal]:
     out = [
         Proposal(f"rank({expression})", settings, "ROBUST", role="rank"),
         Proposal(f"sign({expression})", settings, "ROBUST", role="sign"),
     ]
-    out += [Proposal(e, settings, "ROBUST", role="perturb") for e in perturb_windows(expression)[:2]]
-    alt = next((n for n in ("SUBINDUSTRY", "INDUSTRY", "MARKET", "SECTOR")
-                if n in neutralizations and n != settings.get("neutralization")), None)
+    out += [
+        Proposal(e, settings, "ROBUST", role="perturb") for e in perturb_windows(expression)[:2]
+    ]
+    alt = next(
+        (
+            n
+            for n in ("SUBINDUSTRY", "INDUSTRY", "MARKET", "SECTOR")
+            if n in neutralizations and n != settings.get("neutralization")
+        ),
+        None,
+    )
     if alt:
-        out.append(Proposal(expression, {**settings, "neutralization": alt}, "ROBUST",
-                            role="neutralization"))
+        out.append(
+            Proposal(
+                expression, {**settings, "neutralization": alt}, "ROBUST", role="neutralization"
+            )
+        )
     smaller = _smaller_universe(str(settings.get("universe")), universes)
     if smaller:
-        out.append(Proposal(expression, {**settings, "universe": smaller}, "ROBUST",
-                            role="sub_universe"))
+        out.append(
+            Proposal(expression, {**settings, "universe": smaller}, "ROBUST", role="sub_universe")
+        )
     return out
 
 
@@ -202,6 +305,12 @@ def _smaller_universe(current: str, universes: Sequence[str]) -> str | None:
     if not current.startswith("TOP") or not current[3:].isdigit():
         return None
     size = int(current[3:])
-    tops = sorted((int(u[3:]) for u in universes if u.startswith("TOP") and u[3:].isdigit()
-                   and int(u[3:]) < size), reverse=True)
+    tops = sorted(
+        (
+            int(u[3:])
+            for u in universes
+            if u.startswith("TOP") and u[3:].isdigit() and int(u[3:]) < size
+        ),
+        reverse=True,
+    )
     return f"TOP{tops[0]}" if tops else None

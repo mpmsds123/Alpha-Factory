@@ -59,8 +59,12 @@ class BrainClient:
         for attempt in range(self.max_attempts):
             try:
                 response = self.session.http.request(method, path, **kwargs)
-            except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError,
-                    httpx.TimeoutException):
+            except (
+                httpx.ConnectError,
+                httpx.ReadError,
+                httpx.RemoteProtocolError,
+                httpx.TimeoutException,
+            ):
                 self.sleep(min(5.0 * 2**attempt, 60.0))
                 continue
             self.quota.update(response.headers)

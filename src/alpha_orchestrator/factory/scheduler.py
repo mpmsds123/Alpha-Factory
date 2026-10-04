@@ -41,8 +41,12 @@ def metrics_from_alpha(alpha: dict[str, Any]) -> dict[str, Any]:
         return float(value) if isinstance(value, (int, float)) else None
 
     return {
-        "sharpe": num("sharpe"), "fitness": num("fitness"), "turnover": num("turnover"),
-        "returns": num("returns"), "margin": num("margin"), "drawdown": num("drawdown"),
+        "sharpe": num("sharpe"),
+        "fitness": num("fitness"),
+        "turnover": num("turnover"),
+        "returns": num("returns"),
+        "margin": num("margin"),
+        "drawdown": num("drawdown"),
         "long_count": int(is_["longCount"]) if isinstance(is_.get("longCount"), int) else None,
         "short_count": int(is_["shortCount"]) if isinstance(is_.get("shortCount"), int) else None,
         "checks": checks,
@@ -51,10 +55,16 @@ def metrics_from_alpha(alpha: dict[str, Any]) -> dict[str, Any]:
 
 
 class Simulator:
-    def __init__(self, api: BrainAPI, ledger: Ledger, config: FactoryConfig, *,
-                 sleep: Callable[[float], None] = time.sleep,
-                 clock: Callable[[], float] = time.monotonic,
-                 poll_interval: float = 5.0) -> None:
+    def __init__(
+        self,
+        api: BrainAPI,
+        ledger: Ledger,
+        config: FactoryConfig,
+        *,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+        poll_interval: float = 5.0,
+    ) -> None:
         self.api = api
         self.ledger = ledger
         self.config = config
@@ -92,9 +102,15 @@ class Simulator:
                     continue
             if not inflight:
                 if not can_start:
-                    stats.stopped_because = "budget" if started >= sim_budget else (
-                        "quota" if remaining_quota is not None and remaining_quota <= QUOTA_RESERVE
-                        else "deadline")
+                    stats.stopped_because = (
+                        "budget"
+                        if started >= sim_budget
+                        else (
+                            "quota"
+                            if remaining_quota is not None and remaining_quota <= QUOTA_RESERVE
+                            else "deadline"
+                        )
+                    )
                 else:
                     stats.stopped_because = "queue empty"
                 return stats
@@ -138,9 +154,9 @@ class Simulator:
             return REFUSED
         self._last_batch_at = self.clock()
         with self.ledger.session() as s:
-            row = s.get(BatchORM, batch_id)
-            assert row is not None
-            row.location = location
+            launched = s.get(BatchORM, batch_id)
+            assert launched is not None
+            launched.location = location
             self.ledger.log(s, "batch_started", batch=batch_id, size=len(payloads))
         return len(payloads)
 
@@ -160,9 +176,13 @@ class Simulator:
             row = s.get(BatchORM, batch_id)
             assert row is not None
             location = row.location
-            members = list(s.scalars(select(CandidateORM).where(CandidateORM.batch_id == batch_id)
-                                     .order_by(CandidateORM.priority.desc(),
-                                               CandidateORM.created_at)))
+            members = list(
+                s.scalars(
+                    select(CandidateORM)
+                    .where(CandidateORM.batch_id == batch_id)
+                    .order_by(CandidateORM.priority.desc(), CandidateORM.created_at)
+                )
+            )
             member_ids = [m.id for m in members]
             by_fp = {m.fingerprint: m.id for m in members}
         if not location:
@@ -180,18 +200,32 @@ class Simulator:
                 if child.alpha_id:
                     alpha = self.api.alpha(child.alpha_id)
                     code = (alpha.get("regular") or {}).get("code")
-                    settings = {k: alpha.get("settings", {}).get(k) for k in
-                                ("region", "universe", "delay", "decay", "neutralization",
-                                 "truncation", "maxTrade")}
+                    settings = {
+                        k: alpha.get("settings", {}).get(k)
+                        for k in (
+                            "region",
+                            "universe",
+                            "delay",
+                            "decay",
+                            "neutralization",
+                            "truncation",
+                            "maxTrade",
+                        )
+                    }
                     cid = by_fp.get(fingerprint(code, settings)) if code else None
                     results[cid or member_ids[min(index, len(member_ids) - 1)]] = {
-                        "alpha": alpha, "alpha_id": child.alpha_id}
+                        "alpha": alpha,
+                        "alpha_id": child.alpha_id,
+                    }
                 else:
                     results[member_ids[min(index, len(member_ids) - 1)]] = {
-                        "error": child.message or child.status}
+                        "error": child.message or child.status
+                    }
         elif progress.alpha_id and member_ids:
-            results[member_ids[0]] = {"alpha": self.api.alpha(progress.alpha_id),
-                                      "alpha_id": progress.alpha_id}
+            results[member_ids[0]] = {
+                "alpha": self.api.alpha(progress.alpha_id),
+                "alpha_id": progress.alpha_id,
+            }
         else:
             for mid in member_ids:
                 results[mid] = {"error": progress.message or progress.status}

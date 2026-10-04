@@ -20,10 +20,32 @@ from alpha_orchestrator.factory.models import IdeaORM
 
 WORD = re.compile(r"[a-z][a-z0-9_]{1,}")
 CJK = re.compile(r"[一-鿿]+")
-STOP = frozenset({"the", "and", "for", "with", "that", "this", "are", "from", "alpha",
-                  "alphas", "data", "brain", "worldquant", "https", "com", "www", "support"})
-BOOST = {"Research_Papers_for_Consultants": 1.6, "Research_Papers_for_Users": 1.5,
-         "BRAIN_TIPS": 1.2}
+STOP = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "with",
+        "that",
+        "this",
+        "are",
+        "from",
+        "alpha",
+        "alphas",
+        "data",
+        "brain",
+        "worldquant",
+        "https",
+        "com",
+        "www",
+        "support",
+    }
+)
+BOOST = {
+    "Research_Papers_for_Consultants": 1.6,
+    "Research_Papers_for_Users": 1.5,
+    "BRAIN_TIPS": 1.2,
+}
 MAX_BODY = 6000
 
 
@@ -31,7 +53,7 @@ def tokens(text: str) -> list[str]:
     low = text.lower()
     out = [w for w in WORD.findall(low) if w not in STOP]
     for run in CJK.findall(text):
-        out += [run[i:i + 2] for i in range(len(run) - 1)] or [run]
+        out += [run[i : i + 2] for i in range(len(run) - 1)] or [run]
     return out
 
 
@@ -117,7 +139,11 @@ class IdeaIndex:
                 f = tf.get(term)
                 if not f:
                     continue
-                norm = f * (self.k1 + 1) / (f + self.k1 * (1 - self.b + self.b * self.len[i] / self.avg))
+                norm = (
+                    f
+                    * (self.k1 + 1)
+                    / (f + self.k1 * (1 - self.b + self.b * self.len[i] / self.avg))
+                )
                 score += self.idf.get(term, 0.0) * norm
             if score:
                 scores.append((score * BOOST.get(self.docs[i].source, 1.0), i))
