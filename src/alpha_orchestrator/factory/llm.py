@@ -166,14 +166,19 @@ class FactoryLLM:
         fields: Sequence[dict[str, str]],
         papers: Sequence[dict[str, str]],
         tried: Sequence[str],
+        dead_ends: Sequence[str] = (),
+        worked: Sequence[str] = (),
     ) -> dict[str, Any]:
-        """第 3 步: one research idea grounded in this dataset's fields. No formula yet."""
+        """第 3 步: one research idea grounded in this dataset's fields. No formula yet.
+        Dead ends and what worked (the knowledge base) keep it off old paths."""
         prompt = {
             "task": "Propose ONE new research idea for an alpha on this dataset.",
             "dataset": dataset,
             "fields": list(fields),
             "papers_naming_this_dataset": list(papers),
             "ideas_already_tried_here": list(tried),
+            "dead_ends_elsewhere": list(dead_ends),
+            "what_worked_elsewhere": list(worked),
             "questions_to_ask_of_the_fields": [
                 "Which quantities are stable, and which change over time?",
                 "What would an anomalous value mean?",
@@ -260,6 +265,41 @@ class FactoryLLM:
             {"form": f["form"], "way": str(f.get("way", ""))[:120]}
             for f in (data.get("forms") or [])
             if isinstance(f, dict) and isinstance(f.get("form"), str)
+        ]
+
+    def formulas(
+        self,
+        idea: dict[str, Any],
+        fields: Sequence[dict[str, str]],
+        operators: Sequence[str],
+        n: int,
+    ) -> list[dict[str, str]]:
+        """Main arm: n formulas that state the idea itself, written with the idea's own
+        fields (one to three per formula). Not a template: no placeholder."""
+        prompt = {
+            "task": f"Write {n} DIFFERENT formulas that each state this idea's mechanism "
+            "directly. Use the fields by their exact id; a formula may combine one to three "
+            "of them when the mechanism involves a relation between quantities. Each "
+            "formula must express the mechanism in a different way.",
+            "idea": idea,
+            "fields": list(fields),
+            "operators": list(operators),
+            "rules": [
+                "Only listed operators and listed field ids. At most 4 operators.",
+                "Each formula must follow from the mechanism; say how in `why`.",
+                "No two formulas may differ only by a window length or a sign.",
+                "Fields are already cleaned: do not add filling or averaging.",
+            ],
+            "output_fields": {
+                "formulas": "list of objects with formula (string) and why (string, one "
+                "sentence linking it to the mechanism)"
+            },
+        }
+        data = self.ask("formulas", json.dumps(prompt, ensure_ascii=False), strong=True)
+        return [
+            {"form": f["formula"], "way": str(f.get("why", ""))[:200]}
+            for f in (data.get("formulas") or [])
+            if isinstance(f, dict) and isinstance(f.get("formula"), str)
         ]
 
     def improve(
