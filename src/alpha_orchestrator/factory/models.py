@@ -61,6 +61,8 @@ class Stage:
     REPAIR = "REPAIR"  # one-variable fix routed by the failing check
     FLIP = "FLIP"  # multiply(-1, parent)
     ROBUST = "ROBUST"  # stress variant of a candidate (rank, sign, perturbation, ...)
+    FIELD = "FIELD"  # 设计文档 第 5 步: one field in an idea's simplest form
+    IMPROVE = "IMPROVE"  # 设计文档 第 7 步: one-change variant of a parent
 
 
 class HypothesisStatus:

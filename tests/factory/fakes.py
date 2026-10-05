@@ -182,6 +182,7 @@ class FakePlatform(FakeBrainAPI):
                 "fieldCount": 10 + len(f),
                 "pyramidMultiplier": 1.3,
                 "alphaCount": 5,
+                "coverage": 0.9,
             }
             for ds, f in self._datasets.items()
         ]
