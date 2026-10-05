@@ -151,7 +151,7 @@ def rank(s: Session, config: FactoryConfig, rng: random.Random | None = None) ->
         c.rank_score, c.rank_reason = round(value * reason["chance"], 4), reason
         if c.state != CellState.NEW or c.submitted >= config.thresholds.dataset_cap:
             continue
-        if 0 < c.coverage < config.thresholds.min_filled_coverage:
+        if 0 < c.coverage < config.thresholds.min_coverage:
             continue  # the catalog already says too sparse: costs nothing to skip
         out.append(Ranked(c.cell_id, value * chance, reason))
     out.sort(key=lambda r: -r.score)

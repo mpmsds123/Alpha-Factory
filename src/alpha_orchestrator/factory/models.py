@@ -244,6 +244,48 @@ class IdeaORM(FactoryBase):
     __table_args__ = (UniqueConstraint("source", "title"),)
 
 
+class IdeaStatus:
+    TESTING = "TESTING"  # first fields being simulated
+    PROMISING = "PROMISING"  # a field reached the continue line; being improved
+    DEAD = "DEAD"  # nothing reached the continue line
+    DONE = "DONE"  # improvement finished
+
+
+class ResearchIdeaORM(FactoryBase):
+    """One research idea on one dataset (设计文档 第 3 步)."""
+
+    __tablename__ = "research_ideas"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    cell_id: Mapped[str] = mapped_column(ForeignKey("cells.cell_id"))
+    title: Mapped[str] = mapped_column(Text)
+    mechanism: Mapped[str] = mapped_column(Text, default="")  # who wins, who loses, why it lasts
+    long_side: Mapped[str] = mapped_column(Text, default="")
+    short_side: Mapped[str] = mapped_column(Text, default="")
+    horizon_days: Mapped[int] = mapped_column(Integer, default=21)
+    form: Mapped[str] = mapped_column(Text, default="")  # simplest expression, one {X}
+    query: Mapped[str] = mapped_column(Text, default="")  # search words for narrowing fields
+    status: Mapped[str] = mapped_column(String(16), default=IdeaStatus.TESTING)
+    best_sharpe: Mapped[float] = mapped_column(Float, default=0.0)
+    extra: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class IdeaFieldORM(FactoryBase):
+    """One field ranked for one idea (设计文档 第 4 步) and its first test (第 5 步)."""
+
+    __tablename__ = "idea_fields"
+    __table_args__ = (UniqueConstraint("idea_id", "field_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    idea_id: Mapped[str] = mapped_column(ForeignKey("research_ideas.id"))
+    field_id: Mapped[str] = mapped_column(String(255))
+    score: Mapped[int] = mapped_column(Integer, default=0)  # LLM relevance 0-10
+    reason: Mapped[str] = mapped_column(Text, default="")
+    rank: Mapped[int] = mapped_column(Integer, default=0)  # 1 = most relevant
+    candidate_id: Mapped[str | None] = mapped_column(ForeignKey("candidates.id"))
+
+
 class EventORM(FactoryBase):
     __tablename__ = "events"
 

@@ -45,6 +45,7 @@ class Thresholds:
     sprt_beta: float = 0.20  # P(miss a dataset with signal)
     sprt_extra_hits: float = 0.12  # a dataset worth working has this many more hits than noise
     min_filled_coverage: float = 0.50  # 默认值 (待你确认): coverage after filling one update period
+    min_coverage: float = 0.60  # 官方小贴士 10: drop data covering fewer than 60% of stocks
     suspicious_sharpe: float = 3.0  # 你定的: above this the result is checked, never mined
     suspicious_turnover: float = 0.70
     refine_min_gain: float = 0.15  # 默认值 (待你确认): smaller gains are noise between variants
