@@ -1,15 +1,19 @@
 """Health check and survey formulas.
 
-Health check (by sampling, neutralization NONE, decay 0, only long + short counts read):
+Health check (by sampling, neutralization NONE, decay 0, only long + short counts read).
+First, one probe per sampled family, in waves; a dataset whose first wave all fails stops:
+
+    maxcov  ts_backfill(x, 252)               the most stocks the field can ever cover
+
+Then, on a few families that pass:
 
     raw     x                                 how many stocks have a value on a day
     upd5    ts_std_dev(x, 5) != 0 ? 1 : 0     changed within a week
     upd22   ts_std_dev(x, 22) != 0 ? 1 : 0    changed within a month
     upd66   ts_std_dev(x, 66) != 0 ? 1 : 0    changed within a quarter
-    filled  ts_backfill(x, 1.5 x period)      stocks with a value at least once per period
 
-"Coverage" means the last one. A quarterly field that only has a value on its release
-day shows a tiny daily coverage; filled to one period it shows the real breadth.
+"Coverage" means maxcov. A quarterly field that only has a value on its release day
+shows a tiny daily coverage; carried forward it shows the real breadth.
 
 Survey: four fixed shapes per family, windows set from the measured update period, so
 every family is measured with the same ruler and compared with noise.
@@ -33,6 +37,11 @@ def health_probes(field_id: str, field_type: str) -> list[tuple[str, str]]:
         ("upd22", f"ts_std_dev({x}, 22) != 0 ? 1 : 0"),
         ("upd66", f"ts_std_dev({x}, 66) != 0 ? 1 : 0"),
     ]
+
+
+def coverage_probe(field_id: str, field_type: str) -> tuple[str, str]:
+    """The most coverage the field can reach: its last value carried for a full year."""
+    return "maxcov", f"ts_backfill({base(field_id, field_type)}, 252)"
 
 
 def fill_window(period_days: float) -> int:

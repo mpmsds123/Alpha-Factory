@@ -13,8 +13,8 @@ from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.models import CandidateORM, CellORM, CellState, FieldORM, Stage
 
 PHASE = {
-    "health_a": "体检：测更新周期",
-    "health_b": "体检：测补齐后的覆盖率",
+    "health_cov": "体检：先测覆盖率",
+    "health_period": "体检：测更新周期",
     "survey": "普查",
     "research": "按信号浓度挖",
     "done": "已结束",
@@ -22,7 +22,7 @@ PHASE = {
 OUTCOME = {
     "noise": "普查判定：和噪声没有区别",
     "signal": "有信号，已挖完",
-    "no_eligible": "补齐后覆盖率都不够",
+    "no_eligible": "覆盖率不够，没花更多回测",
     "no_fields": "没有可用字段",
     "budget": "用完了这个数据集的回测预算",
 }
@@ -62,11 +62,11 @@ def _health(s: Session, cell: CellORM) -> str:
         )
     )
     plan = cell.plan or {}
-    measured = [f for f in reps if (f.profile or {}).get("measured")]
+    measured = [f for f in reps if (f.profile or {}).get("max_coverage") is not None]
     eligible = sum(1 for f in reps if f.eligible and f.filled_coverage is not None)
     rows = "".join(
         f"<tr><td><code>{_e(f.field_id)}</code></td><td>{_e(f.stratum)}</td>"
-        f"<td class='n'>{f.profile.get('period_days')}</td>"
+        f"<td class='n'>{f.profile.get('period_days', '–')}</td>"
         f"<td class='n'>{float(f.profile.get('raw_coverage') or 0):.0%}</td>"
         f"<td class='n'>{float(f.profile.get('filled_coverage') or 0):.0%}</td>"
         f"<td>{'合格' if f.eligible else '不合格'}</td></tr>"

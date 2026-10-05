@@ -55,7 +55,7 @@ def test_signal_is_found_dug_and_handed_over() -> None:
     plan = c.plan
     # health by sampling: every family probed here (24 < 40), 5 probes each
     assert plan["family_count"] == 24 and plan["strata"] == 6
-    assert stages(ledger, "est")["PROFILE"] == 24 * 5
+    assert stages(ledger, "est")["PROFILE"] == 24 + 12 * 4  # coverage on all, period on 12
     # survey: a small dataset is surveyed whole, 4 shapes per family; signal is found
     assert plan["verdict"] == "signal"
     # the eps families (where the signal is) were dug; a noise family may be tried once
@@ -166,3 +166,45 @@ def test_one_dataset_at_a_time_and_failures_feed_back() -> None:
     assert len(opened) == len(set(opened)) == 2
     states = {k: v.plan.get("outcome") for k, v in cells(ledger).items()}
     assert states == {"flat": "noise", "est": "signal"}
+
+
+def sparse_fields(prefix: str, n: int = 30) -> dict[str, FieldSpec]:
+    """Warrant-like data: only a few stocks ever have a value."""
+    return {f"{prefix}_w{i:02d}_px": FieldSpec(raw=0.05, filled=0.07, period=1.0) for i in range(n)}
+
+
+def test_a_sparse_dataset_costs_ten_probes() -> None:
+    ledger, *_ = run(World({"wrnt": sparse_fields("wrnt")}))
+    c = cells(ledger)["wrnt"]
+    assert c.plan["outcome"] == "no_eligible"
+    assert stages(ledger, "wrnt") == {"PROFILE": 10}  # first wave only, nothing else
+
+
+def test_sparse_outcomes_steer_selection_away() -> None:
+    world = World(
+        {
+            "wrnt1": sparse_fields("wa"),
+            "wrnt2": sparse_fields("wb"),
+            "wrnt3": sparse_fields("wc"),
+            "est": analyst_fields("eps", signal_stats=("mean", "median", "high", "low")),
+        }
+    )
+    ledger, *_ = run(world, minutes=10)
+    spent = {k: v.sims_used for k, v in cells(ledger).items()}
+    assert cells(ledger)["est"].plan["verdict"] == "signal"
+    assert sum(v for k, v in spent.items() if k.startswith("wrnt")) <= 30
+
+
+def test_catalog_coverage_below_the_floor_is_never_opened() -> None:
+    from alpha_orchestrator.factory import datasets as ds
+
+    ledger = Ledger("sqlite://")
+    with ledger.session() as s:
+        for name, cov in (("thin", 0.2), ("wide", 0.9)):
+            s.add(
+                CellORM(cell_id=f"USA|1|TOP3000|{name}", region="USA", delay=1,
+                        universe="TOP3000", dataset_id=name, category="other", coverage=cov)
+            )
+    with ledger.session() as s:
+        names = [r.cell_id.split("|")[-1] for r in ds.rank(s, FactoryConfig())]
+    assert names == ["wide"]
