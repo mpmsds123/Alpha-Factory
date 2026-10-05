@@ -19,12 +19,36 @@ FILL_DAYS = 63  # 第 2 步: quarterly data carried one quarter (官方小贴士
 NUMERIC_TYPES = ("MATRIX", "VECTOR")
 
 
+# ---------- before the first run ----------
+def reset_old_verdicts(ledger: Ledger) -> int:
+    """Datasets closed by the logic before design v1 go back to NEW and their verdicts stop
+    counting as evidence (that logic was wrong). Their simulations stay in the ledger and
+    are reused when the same formula comes up again."""
+    n = 0
+    with ledger.session() as s:
+        for c in s.scalars(select(CellORM).where(CellORM.state != CellState.NEW)):
+            plan = c.plan or {}
+            if plan.get("design") == "v1":
+                continue
+            c.plan = {"legacy": plan}
+            c.state, c.stop_reason = CellState.NEW, ""
+            n += 1
+        if n:
+            ledger.log(s, "old_verdicts_reset", count=n)
+    return n
+
+
 # ---------- 第 1 步 选数据集 ----------
 def choose_dataset(s: Session, config: FactoryConfig) -> str | None:
-    """The best-scoring dataset not yet worked whose catalog coverage is at least
-    `min_coverage` (datasets.rank applies both), or None when none is left."""
-    ranked = datasets.rank(s, config)
-    return ranked[0].cell_id if ranked else None
+    """The best-scoring dataset not yet worked whose catalog coverage is known and at least
+    `min_coverage`, or None when none is left. Unknown coverage (0 in the catalog) is not
+    taken on trust."""
+    floor = config.thresholds.min_coverage
+    for r in datasets.rank(s, config):
+        cell = s.get(CellORM, r.cell_id)
+        if cell is not None and cell.coverage >= floor:
+            return r.cell_id
+    return None
 
 
 # ---------- 第 2 步 读字段 ----------

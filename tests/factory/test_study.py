@@ -26,9 +26,31 @@ def cell(name: str, coverage: float, multiplier: float = 1.0) -> CellORM:
 def test_step1_skips_datasets_below_sixty_percent_coverage() -> None:
     ledger = Ledger("sqlite://")
     with ledger.session() as s:
-        s.add_all([cell("thin", 0.55, multiplier=3.0), cell("wide", 0.9)])
+        s.add_all(
+            [
+                cell("thin", 0.55, multiplier=3.0),
+                cell("unknown", 0.0, multiplier=3.0),
+                cell("wide", 0.9),
+            ]
+        )
     with ledger.session() as s:
         assert study.choose_dataset(s, FactoryConfig()) == "USA|1|TOP3000|wide"
+
+
+def test_old_verdicts_are_reset_and_stop_counting() -> None:
+    from alpha_orchestrator.factory import datasets
+
+    ledger = Ledger("sqlite://")
+    with ledger.session() as s:
+        old = cell("old", 0.9)
+        old.state, old.plan = CellState.EXHAUSTED, {"verdict": "noise", "outcome": "noise"}
+        s.add_all([old, cell("other", 0.9)])
+    assert study.reset_old_verdicts(ledger) == 1
+    assert study.reset_old_verdicts(ledger) == 0  # idempotent
+    with ledger.session() as s:
+        c = s.get(CellORM, "USA|1|TOP3000|old")
+        assert c is not None and c.state == CellState.NEW
+        assert datasets.outcome_of(c) is None  # the old "noise" no longer counts
 
 
 def test_step2_keeps_numeric_fields_covering_sixty_percent() -> None:
