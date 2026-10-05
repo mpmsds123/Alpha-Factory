@@ -212,8 +212,6 @@ class Engine:
             tried = list(
                 s.scalars(select(ResearchIdeaORM.title).where(ResearchIdeaORM.cell_id == cell_id))
             )
-            types = {f.field_id: f.type for f in fields}
-            sample_field = next((f.field_id for f in fields if f.type == "MATRIX"), None)
         ops = sorted(f"{k}: {v}"[:160] for k, v in self.meta.definitions.items())
         card: dict[str, Any] | None = None
         for _ in range(2):
@@ -221,7 +219,7 @@ class Engine:
                 answer = self.llm.idea(brief, lines, papers, tried, ops)
             except RuntimeError:
                 continue
-            if _form_ok(answer.get("form"), sample_field, types, self.meta.operators):
+            if _form_ok(answer.get("form"), self.meta.operators):
                 card = answer
                 break
         with self.ledger.session() as s:
@@ -743,10 +741,15 @@ def _int(v: Any, default: int) -> int:
         return default
 
 
-def _form_ok(form: Any, sample: str | None, types: dict[str, str], operators: set[str]) -> bool:
-    if not isinstance(form, str) or form.count("{X}") != 1 or sample is None:
+FORM_PROBE = "form_probe_field"  # stands for {X}: every field enters already prepared
+
+
+def _form_ok(form: Any, operators: set[str]) -> bool:
+    """One {X}, valid syntax and operators, at most MAX_FORM_OPERATORS. {X} is checked as a
+    plain numeric field: vector fields are already reduced by their prep (第 2 步)."""
+    if not isinstance(form, str) or form.count("{X}") != 1:
         return False
-    v = check(form.replace("{X}", sample), operators=operators, fields=types)
+    v = check(form.replace("{X}", FORM_PROBE), operators=operators, fields={FORM_PROBE: "MATRIX"})
     return v.ok and v.operator_count <= MAX_FORM_OPERATORS
 
 

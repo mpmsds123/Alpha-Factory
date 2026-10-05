@@ -130,6 +130,13 @@ def test_record_page_lists_every_step(tmp_path) -> None:  # type: ignore[no-unty
         assert marker in text
 
 
+def test_a_form_is_valid_even_when_the_dataset_has_only_vector_fields() -> None:
+    ops = {"rank", "ts_delta", "ts_backfill", "vec_avg"}
+    assert eng._form_ok("rank(ts_delta({X}, 21))", ops)
+    assert not eng._form_ok("rank({X}) - rank({X})", ops)  # two placeholders
+    assert not eng._form_ok("madeup({X})", ops)
+
+
 def test_luck_line_grows_slowly() -> None:
     assert round(eng.luck_line(10, 0.40), 2) == 1.12
     assert round(eng.luck_line(40, 0.40), 2) == 1.29
