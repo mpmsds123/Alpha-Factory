@@ -13,6 +13,9 @@ well-supported datasets are picked most, untried ones still get picked sometimes
 dataset that failed elsewhere falls back on its own. Payoff is what a found alpha is worth:
 pyramid multiplier and gap, crowding, regional cost and sharpe floor.
 
+A dataset the catalog already shows as below the coverage floor is never opened, and one
+found too sparse at the health check counts as a failure like a "noise" survey does.
+
 `rank()` gives the same numbers without the random draw, for the dashboard.
 """
 
@@ -74,9 +77,14 @@ def count_paper_refs(s: Session, dataset_ids: list[str]) -> dict[str, int]:
 
 
 def outcome_of(cell: CellORM) -> str | None:
-    """'signal' / 'noise' once a dataset's survey has decided, else None."""
-    verdict = (cell.plan or {}).get("verdict")
-    return verdict if verdict in ("signal", "noise") else None
+    """'signal' once a survey found signal; 'noise' when it found none, or when the data was
+    too sparse to survey at all. Both are lessons for datasets like this one."""
+    plan = cell.plan or {}
+    if plan.get("verdict") in ("signal", "noise"):
+        return str(plan["verdict"])
+    if plan.get("outcome") in ("no_eligible", "no_fields"):
+        return "noise"
+    return None
 
 
 def evidence(cells: list[CellORM], refs: dict[str, int]) -> dict[str, tuple[float, float]]:
@@ -143,6 +151,8 @@ def rank(s: Session, config: FactoryConfig, rng: random.Random | None = None) ->
         c.rank_score, c.rank_reason = round(value * reason["chance"], 4), reason
         if c.state != CellState.NEW or c.submitted >= config.thresholds.dataset_cap:
             continue
+        if 0 < c.coverage < config.thresholds.min_filled_coverage:
+            continue  # the catalog already says too sparse: costs nothing to skip
         out.append(Ranked(c.cell_id, value * chance, reason))
     out.sort(key=lambda r: -r.score)
     return out

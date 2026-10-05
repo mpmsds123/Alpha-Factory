@@ -63,6 +63,8 @@ STAGE_WEIGHT = {
 }
 FIXABLE = {"HIGH_TURNOVER", "CONCENTRATED_WEIGHT", "LOW_SUB_UNIVERSE_SHARPE"}
 SURVEY_ALL_BELOW = 40  # eligible families; fewer than this are surveyed whole
+FIRST_WAVE = 10  # coverage probes before deciding a dataset is too sparse to work
+PERIOD_SAMPLE = 12  # families whose update period is measured (4 probes each)
 TOKEN = re.compile(r"[a-z0-9]+")
 
 
@@ -165,11 +167,13 @@ class Factory:
                     s.add(f)
             s.flush()
             sample = self._health_sample(s, cell_id)
-            queued = self._queue_health(s, cell, sample)
+            first = sample[:FIRST_WAVE]
+            queued = self._queue_coverage(s, cell, first)
             cell.state = CellState.STUDYING
             cell.plan = {
-                "phase": "health_a",
+                "phase": "health_cov",
                 "health_sample": sample,
+                "cov_queued": first,
                 "family_count": len(families),
                 "strata": len(set(strata.values())),
             }
@@ -228,69 +232,116 @@ class Factory:
             depth += 1
         return out
 
-    def _queue_health(self, s: Session, cell: CellORM, families: Sequence[str]) -> int:
+    def _queue_coverage(self, s: Session, cell: CellORM, families: Sequence[str]) -> int:
+        """One probe per family: coverage once filled for a year, the most the field can
+        reach. Cheap, and it decides whether anything else is worth measuring."""
         settings = {**self._settings(cell), "neutralization": "NONE", "decay": 0}
         added = 0
         wanted = set(families)
         for f in self._reps(s, cell.cell_id):
             if f.family not in wanted:
                 continue
-            ids = {}
-            for name, expr in prof.health_probes(f.field_id, f.type):
-                row, created = self._add(s, cell, expr, settings, Stage.PROFILE, name)
-                if row is not None:
-                    ids[name] = row.id
-                    added += created
-            f.profile = {"probes": ids}
+            name, expr = prof.coverage_probe(f.field_id, f.type)
+            row, created = self._add(s, cell, expr, settings, Stage.PROFILE, name)
+            f.profile = {"probes": {name: row.id} if row else {}}
+            added += created
         return added
 
-    def _health_b(self, s: Session, cell: CellORM) -> None:
-        """Update period known for the sample -> queue the filled-coverage probe."""
+    def _coverage_of(self, s: Session, cell: CellORM, f: FieldORM) -> float | None:
+        cid = ((f.profile or {}).get("probes") or {}).get("maxcov")
+        count = _count(s, cid)
+        if count is None:
+            return None
+        size = prof.universe_size(cell.universe) or max(count, 1)
+        return round(min(count / size, 1.0), 3)
+
+    def _health_coverage(self, s: Session, cell: CellORM) -> None:
+        """Coverage wave finished. First wave all below the floor -> stop the dataset;
+        otherwise measure the rest of the sample, then the update period of the ones that
+        pass."""
+        floor = self.config.thresholds.min_filled_coverage
+        plan = dict(cell.plan)
+        reps = {f.family: f for f in self._reps(s, cell.cell_id)}
+        queued = plan.get("cov_queued", [])
+        covs = {fam: self._coverage_of(s, cell, reps[fam]) for fam in queued if fam in reps}
+        for fam, cov in covs.items():
+            reps[fam].profile = {**reps[fam].profile, "max_coverage": cov}
+        passing = [fam for fam, cov in covs.items() if cov is not None and cov >= floor]
+        rest = [fam for fam in plan.get("health_sample", []) if fam not in queued]
+        if not passing and (len(queued) >= FIRST_WAVE or not rest):
+            best = max((c for c in covs.values() if c is not None), default=0.0)
+            self._finish(
+                s,
+                cell,
+                "no_eligible",
+                f"{len(covs)} sampled families: coverage even when filled for a year at most "
+                f"{best:.0%}, below {floor:.0%}",
+            )
+            return
+        if rest:
+            self._queue_coverage(s, cell, rest)
+            cell.plan = {**plan, "cov_queued": [*queued, *rest]}
+            return
+        # update period on a stratified few of the families that pass
+        by_stratum: dict[str, list[str]] = defaultdict(list)
+        for fam in passing:
+            by_stratum[reps[fam].stratum].append(fam)
+        chosen: list[str] = []
+        while len(chosen) < PERIOD_SAMPLE and any(by_stratum.values()):
+            for k in list(by_stratum):
+                if by_stratum[k] and len(chosen) < PERIOD_SAMPLE:
+                    chosen.append(by_stratum[k].pop(0))
         settings = {**self._settings(cell), "neutralization": "NONE", "decay": 0}
-        for f in self._reps(s, cell.cell_id):
-            ids = (f.profile or {}).get("probes") or {}
-            if not ids or "filled" in ids:
-                continue
-            counts = {name: _count(s, cid) for name, cid in ids.items()}
-            period = prof.period_from(counts)
-            name, expr = prof.filled_probe(f.field_id, f.type, period)
-            row, _ = self._add(s, cell, expr, settings, Stage.PROFILE, name)
-            f.profile = {
-                **f.profile,
-                "period_days": round(min(period, 999.0), 1),
-                "probes": {**ids, **({"filled": row.id} if row else {})},
-            }
-        cell.plan = {**cell.plan, "phase": "health_b"}
+        for fam in chosen:
+            f = reps[fam]
+            ids = dict((f.profile or {}).get("probes") or {})
+            for name, expr in prof.health_probes(f.field_id, f.type):
+                row, _ = self._add(s, cell, expr, settings, Stage.PROFILE, name)
+                if row is not None:
+                    ids[name] = row.id
+            f.profile = {**f.profile, "probes": ids}
+        cell.plan = {**plan, "phase": "health_period", "period_sample": chosen}
 
     def _finish_health(self, s: Session, cell: CellORM) -> None:
-        """Measured on the sample, inferred for every family of the same stratum."""
+        """Coverage measured on the sample, update period on a few; inferred for every
+        other family from its stratum (or the whole dataset when its stratum was not hit)."""
         size = prof.universe_size(cell.universe) or 0
         reps = self._reps(s, cell.cell_id)
-        measured: dict[str, list[dict[str, float]]] = defaultdict(list)
+        cov_by: dict[str, list[float]] = defaultdict(list)
+        period_by: dict[str, list[float]] = defaultdict(list)
         for f in reps:
-            ids = (f.profile or {}).get("probes") or {}
-            if "filled" not in ids:
-                continue
-            raw = _count(s, ids.get("raw")) or 0
-            filled = _count(s, ids.get("filled")) or 0
-            denom = size or max(raw, filled, 1)
-            reading = {
-                "period_days": float(f.profile.get("period_days", 999.0)),
-                "raw_coverage": round(min(raw / denom, 1.0), 3),
-                "filled_coverage": round(min(filled / denom, 1.0), 3),
-            }
-            f.profile = {**f.profile, **reading, "measured": True}
-            measured[f.stratum].append(reading)
-        everything = [r for rs in measured.values() for r in rs]
+            prof_ = f.profile or {}
+            cov = prof_.get("max_coverage")
+            if cov is not None:
+                cov_by[f.stratum].append(float(cov))
+            ids = prof_.get("probes") or {}
+            if "upd66" in ids:
+                counts = {n: _count(s, ids.get(n)) for n in ("raw", "upd5", "upd22", "upd66")}
+                period = prof.period_from(counts)
+                raw = (counts.get("raw") or 0) / (size or max(counts.get("raw") or 0, 1))
+                f.profile = {**prof_, "period_days": round(min(period, 999.0), 1),
+                             "raw_coverage": round(min(raw, 1.0), 3)}
+                period_by[f.stratum].append(min(period, 999.0))
+        all_cov = [c for cs in cov_by.values() for c in cs]
+        all_period = [p for ps in period_by.values() for p in ps]
         floor = self.config.thresholds.min_filled_coverage
         eligible = 0
         for f in reps:
-            if not (f.profile or {}).get("measured"):
-                pool = measured.get(f.stratum) or everything
-                f.profile = {**(f.profile or {}), **_infer(f.coverage, pool)}
-                f.profile["inferred_from"] = "stratum" if measured.get(f.stratum) else "dataset"
-            f.filled_coverage = float(f.profile.get("filled_coverage") or 0.0)
-            f.eligible = f.filled_coverage >= floor
+            prof_ = dict(f.profile or {})
+            if prof_.get("max_coverage") is not None:
+                cov, how = float(prof_["max_coverage"]), "measured"
+            elif cov_by.get(f.stratum):
+                cov, how = statistics.median(cov_by[f.stratum]), "stratum"
+            else:
+                cov, how = (statistics.median(all_cov) if all_cov else 0.0), "dataset"
+            if "period_days" not in prof_:
+                pool = period_by.get(f.stratum) or all_period
+                prof_["period_days"] = round(statistics.median(pool), 1) if pool else 66.0
+            prof_.setdefault("raw_coverage", round(f.coverage, 3))
+            prof_.update(filled_coverage=round(cov, 3), coverage_from=how)
+            f.profile = prof_
+            f.filled_coverage = cov
+            f.eligible = cov >= floor
             f.prep = prof.prep_for(f.field_id, f.type, f.profile)
             eligible += f.eligible
             for m in s.scalars(
@@ -308,7 +359,8 @@ class Factory:
             s,
             "health_done",
             cell.cell_id,
-            sampled=len(everything),
+            coverage_measured=len(all_cov),
+            period_measured=len(all_period),
             families=len(reps),
             eligible=eligible,
         )
@@ -719,10 +771,12 @@ class Factory:
                     continue
                 phase = (cell.plan or {}).get("phase")
                 pending = self._pending(s, cell_id)
-                if phase == "health_a" and not pending:
-                    self._health_b(s, cell)
+                if phase == "health_cov" and not pending:
+                    self._health_coverage(s, cell)
                     moved["health"] += 1
-                elif phase == "health_b" and not pending:
+                    if cell.state == CellState.EXHAUSTED:
+                        moved["finished"] += 1
+                elif phase == "health_period" and not pending:
                     self._finish_health(s, cell)
                     moved["health"] += 1
                 elif phase in ("survey", "research"):
@@ -1032,30 +1086,6 @@ class Factory:
             cell.category.lower(),
             self.meta.neutralizations(cell.region),
         )
-
-
-def _infer(platform_coverage: float, pool: list[dict[str, float]]) -> dict[str, float]:
-    """A family that was not probed takes its stratum's update period and its stratum's
-    ratio of filled to daily coverage, applied to its own daily coverage when known."""
-    if not pool:
-        return {
-            "period_days": 66.0,
-            "raw_coverage": platform_coverage,
-            "filled_coverage": platform_coverage,
-        }
-    period = statistics.median(r["period_days"] for r in pool)
-    ratios = [r["filled_coverage"] / r["raw_coverage"] for r in pool if r["raw_coverage"] > 0]
-    ratio = statistics.median(ratios) if ratios else 1.0
-    filled = (
-        min(platform_coverage * ratio, 1.0)
-        if platform_coverage > 0
-        else statistics.median(r["filled_coverage"] for r in pool)
-    )
-    return {
-        "period_days": round(period, 1),
-        "raw_coverage": round(platform_coverage, 3),
-        "filled_coverage": round(filled, 3),
-    }
 
 
 def _count(s: Session, cid: str | None) -> int | None:
