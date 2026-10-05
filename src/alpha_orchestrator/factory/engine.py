@@ -53,8 +53,10 @@ COARSE = 300
 SCORE_BATCH = 100
 KEEP_SCORE = 6
 # 第 5 步 (2026-10-05 修改)
-TEST_FIELDS = 4  # most relevant fields, one per measured quantity
-FORMS = 5  # 官方课: AI picks the 5 most relevant templates
+FORMULAS = 5  # per idea; a batch of 10 holds two ideas (scheduler mixes ideas in a batch)
+FORMULA_FIELDS = 8  # distinct quantities the LLM may combine in its formulas
+CONTROL_SHARE = 0.2  # ideas run the cnhkmcp-style way, for the comparison
+CONTROL_FIELDS = 5  # random fields a control template is expanded over
 # 第 6 步 (2026-10-05 修改): no first-test gate; the best go to step 7
 PASS_SHARPE = 1.0  # an idea dies only if step 7 ends below this
 DEAD_IN_ROW = 3  # 提议
@@ -64,15 +66,17 @@ PARENTS = 2
 VARIANTS = 3
 DRY_ROUNDS = 2  # 提议
 MAX_ROUNDS = 4  # 提议
-CHANGES = (
-    "change a window to 5, 21, 63 or 252 days",
-    "compare within industry or subindustry: group_rank(x, industry) / group_rank(x, subindustry)",
-    "wrap in rank()",
-    "raise the decay setting (smooths the signal, lowers turnover)",
-    "fix the failing check: HIGH_TURNOVER -> raise decay; CONCENTRATED_WEIGHT -> rank() or "
-    "fewer fields; LOW_SUB_UNIVERSE_SHARPE -> compare within cap buckets: "
-    'group_rank(x, bucket(rank(cap), range="0.1,1,0.1"))',
+CHANGES = (  # 你的 DECISION_LAYER: fix the first failing check; never tune only to pass
+    "HIGH_TURNOVER: raise the decay setting, or smooth the signal over time",
+    "LOW_TURNOVER: use a shorter window",
+    "CONCENTRATED_WEIGHT: rank the signal, or use fewer fields",
+    "LOW_SUB_UNIVERSE_SHARPE: compare within size buckets, or scale by trading volume",
+    "LOW_SHARPE or LOW_FITNESS: turn a raw value into a ratio or a comparison with peers or "
+    "with its own history; or make it robust to outliers once",
+    "SELF_CORRELATION or PROD_CORRELATION: change the structure or the field, not parameters",
+    "change a window to one matching the idea's horizon",
 )
+SAME_FAIL_LIMIT = 3  # alpha-mining: 3 variants failing the same check -> change the formula
 # 第 5 节
 ACTIVE_IDEAS = 2  # 提议
 CHUNK = 20  # simulations between decisions
@@ -210,10 +214,13 @@ class Engine:
             tried = list(
                 s.scalars(select(ResearchIdeaORM.title).where(ResearchIdeaORM.cell_id == cell_id))
             )
+            dead_ends, worked = _knowledge(s)
+            n_ideas = len(tried)
+        arm = "control" if self.rng.random() < CONTROL_SHARE else "main"
         card: dict[str, Any] | None = None
         for _ in range(2):
             try:
-                answer = self.llm.idea(brief, lines, papers, tried)
+                answer = self.llm.idea(brief, lines, papers, tried, dead_ends, worked)
             except RuntimeError:
                 continue
             if str(answer.get("title", "")).strip() and str(answer.get("mechanism", "")).strip():
@@ -231,12 +238,12 @@ class Engine:
                 short_side=str(card.get("short", "")),
                 horizon_days=_int(card.get("horizon_days"), 21),
                 query=str(card.get("query", "")),
-                extra={"papers": [p["title"] for p in papers]},
+                extra={"papers": [p["title"] for p in papers], "arm": arm, "n": n_ideas},
             )
             s.add(idea)
             s.flush()
             idea_id = idea.id
-            self.ledger.log(s, "idea_created", cell_id, idea=idea_id, title=idea.title)
+            self.ledger.log(s, "idea_created", cell_id, idea=idea_id, title=idea.title, arm=arm)
         self._narrow(idea_id)
         self._queue_tests(idea_id)
         return True
@@ -286,8 +293,8 @@ class Engine:
                 idea.status = IdeaStatus.DEAD
                 idea.extra = {**idea.extra, "why_dead": f"no field scored {KEEP_SCORE}+"}
 
-    # ======================= 第 5 步 4 个字段 x 5 种公式 =======================
-    def _test_fields(self, s: Session, idea_id: str) -> list[IdeaFieldORM]:
+    # ======================= 第 5 步 写公式、送回测 =======================
+    def _distinct_fields(self, s: Session, idea_id: str, limit: int) -> list[IdeaFieldORM]:
         """The most relevant fields, one per measured quantity: versions of the same
         quantity (e.g. nine "total assets" fields) are one piece of evidence, not nine."""
         chosen: list[IdeaFieldORM] = []
@@ -302,33 +309,51 @@ class Engine:
                 continue
             seen.add(key)
             chosen.append(r)
-            if len(chosen) >= TEST_FIELDS:
+            if len(chosen) >= limit:
                 break
         return chosen
 
     def _queue_tests(self, idea_id: str) -> int:
+        """Main arm: the LLM writes FORMULAS formulas stating the idea with its own fields.
+        Control arm (cnhkmcp style, for the comparison): one template with a slot, expanded
+        over randomly drawn usable fields."""
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
             assert idea is not None
             if idea.status == IdeaStatus.DEAD:
                 return 0
-            chosen = self._test_fields(s, idea_id)
+            arm = idea.extra.get("arm", "main")
             usable = {f.field_id: f for f in study.usable_fields(s, idea.cell_id)}
-            info = [
-                {"id": r.field_id, "description": usable[r.field_id].description[:200]}
-                for r in chosen
-                if r.field_id in usable
-            ]
+            if arm == "main":
+                rows = self._distinct_fields(s, idea_id, FORMULA_FIELDS)
+                pool = [usable[r.field_id] for r in rows if r.field_id in usable]
+            else:
+                pool = list(usable.values())
+                self.rng.shuffle(pool)
+                pool = pool[:CONTROL_FIELDS]
+            info = [{"id": f.field_id, "description": f.description[:200]} for f in pool]
             card = _card(idea)
+            types = {f.field_id: f.type for f in pool}
+            preps = {f.field_id: f.prep for f in pool}
         ops = sorted(f"{k}: {v}"[:160] for k, v in self.meta.definitions.items())
-        forms: list[dict[str, str]] = []
+        exprs: list[tuple[str, str, str | None]] = []  # (expression, why, field)
         for _ in range(2):
             try:
-                proposed = self.llm.forms(card, info, ops, FORMS)
+                if arm == "main":
+                    proposed = self.llm.formulas(card, info, ops, FORMULAS)
+                    exprs = _main_formulas(proposed, types, preps, self.meta.operators)[:FORMULAS]
+                else:
+                    proposed = self.llm.forms(card, info, ops, 1)
+                    forms = _distinct_forms(proposed, self.meta.operators)[:1]
+                    expanded: list[tuple[str, str, str | None]] = [
+                        (fm["form"].replace("{X}", preps[fid]), fm["way"], fid)
+                        for fm in forms
+                        for fid in preps
+                    ]
+                    exprs = expanded[:FORMULAS]
             except RuntimeError:
                 continue
-            forms = _distinct_forms(proposed, self.meta.operators)[:FORMS]
-            if forms:
+            if exprs:
                 break
         added = 0
         with self.ledger.session() as s:
@@ -336,37 +361,29 @@ class Engine:
             assert idea is not None
             cell = s.get(CellORM, idea.cell_id)
             assert cell is not None
-            if not forms:
+            if not exprs:
                 idea.status = IdeaStatus.DEAD
                 idea.extra = {**idea.extra, "why_dead": "no valid formula after 2 tries"}
-                self.ledger.log(s, "idea_dead", idea.cell_id, idea=idea_id, reason="no forms")
+                self.ledger.log(s, "idea_dead", idea.cell_id, idea=idea_id, reason="no formulas")
                 return 0
-            idea.form = forms[0]["form"]
-            idea.extra = {**idea.extra, "forms": forms, "test_fields": [i["id"] for i in info]}
+            idea.form = exprs[0][0]
+            idea.extra = {
+                **idea.extra,
+                "formulas": [{"expression": e, "why": w, "field": f} for e, w, f in exprs],
+                "test_fields": [i["id"] for i in info],
+            }
             settings = self._settings(cell)
-            usable = {f.field_id: f for f in study.usable_fields(s, idea.cell_id)}
-            rows = {r.field_id: r for r in self._test_fields(s, idea_id)}
-            for fid, r in rows.items():
-                f = usable.get(fid)
-                if f is None:
-                    continue
-                for k, fm in enumerate(forms):
-                    expr = fm["form"].replace("{X}", f.prep)
-                    c = self._add(
-                        s, cell, expr, settings, Stage.FIELD, idea_id, field=fid, change=fm["way"]
-                    )
-                    if c is not None:
-                        added += 1
-                        if k == 0:
-                            r.candidate_id = c.id
+            for expr, why, fid in exprs:
+                if self._add(s, cell, expr, settings, Stage.FIELD, idea_id, field=fid, change=why):
+                    added += 1
             self.ledger.log(
                 s,
                 "tests_queued",
                 idea.cell_id,
                 idea=idea_id,
-                fields=len(rows),
-                forms=[f["form"] for f in forms],
+                arm=arm,
                 queued=added,
+                formulas=[e for e, _, _ in exprs],
             )
         return added
 
@@ -549,6 +566,15 @@ class Engine:
                     p["dry"] += 1
                 p["rounds"] += 1
                 p["pending"] = []
+                # the same first failing check on every variant, SAME_FAIL_LIMIT times: the
+                # structure is blocked, stop fixing this one (alpha-mining 停止条件)
+                first_fails = {(k.fails or "").split(",")[0] for k in kids if k.fails}
+                if len(first_fails) == 1:
+                    fail = first_fails.pop()
+                    p["same_fail"] = p.get("same_fail", 0) + 1 if p.get("last_fail") == fail else 1
+                    p["last_fail"] = fail
+                    if p["same_fail"] >= SAME_FAIL_LIMIT:
+                        p["dry"] = DRY_ROUNDS
             idea.extra = {**idea.extra, "parents": plist}
             self.ledger.log(
                 s,
@@ -821,6 +847,50 @@ def _distinct_forms(proposed: list[dict[str, str]], operators: set[str]) -> list
         seen.add(shape)
         out.append({"form": form, "way": f.get("way", "")})
     return out
+
+
+def _main_formulas(
+    proposed: list[dict[str, str]],
+    types: dict[str, str],
+    preps: dict[str, str],
+    operators: set[str],
+) -> list[tuple[str, str, str | None]]:
+    """Formulas written with field ids: valid, at most MAX_FORM_OPERATORS as written, no
+    window-only duplicates; each field id is then replaced by its prepared form."""
+    plain = {
+        fid: "MATRIX" for fid in types
+    }  # checked as written; vectors get their reducer in prep
+    out: list[tuple[str, str, str | None]] = []
+    seen: set[str] = set()
+    for f in proposed:
+        text = f["form"].strip()
+        v = check(text, operators=operators, fields=plain)
+        if not v.ok or v.operator_count > MAX_FORM_OPERATORS or not (v.fields_used & set(types)):
+            continue
+        shape = re.sub(r"\d+(\.\d+)?", "#", re.sub(r"\s+", "", text))
+        if shape in seen:
+            continue
+        seen.add(shape)
+        expr = text
+        for fid in sorted(v.fields_used & set(types), key=len, reverse=True):
+            expr = re.sub(rf"(?<![\w]){re.escape(fid)}(?![\w])", preps[fid], expr)
+        first = sorted(v.fields_used & set(types))[0]
+        out.append((expr, f.get("way", ""), first))
+    return out
+
+
+def _knowledge(s: Session) -> tuple[list[str], list[str]]:
+    """第 9 步 fed back to 第 3 步: recent dead ends and what reached Sharpe 1."""
+    dead: list[str] = []
+    worked: list[str] = []
+    for i in s.scalars(
+        select(ResearchIdeaORM).order_by(ResearchIdeaORM.created_at.desc()).limit(200)
+    ):
+        if i.status == IdeaStatus.DEAD and len(dead) < 20:
+            dead.append(f"{i.title}: {i.extra.get('why_dead', '')}"[:200])
+        elif i.status == IdeaStatus.DONE and len(worked) < 20:
+            worked.append(f"{i.title} (best Sharpe {i.best_sharpe:.2f}): {i.form}"[:300])
+    return dead, worked
 
 
 def _form_ok(form: Any, operators: set[str]) -> bool:

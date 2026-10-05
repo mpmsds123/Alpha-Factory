@@ -44,11 +44,53 @@ def choose_dataset(s: Session, config: FactoryConfig) -> str | None:
     `min_coverage`, or None when none is left. Unknown coverage (0 in the catalog) is not
     taken on trust."""
     floor = config.thresholds.min_coverage
+    evidence = region_evidence(s)
+    best: tuple[float, str] | None = None
     for r in datasets.rank(s, config):
         cell = s.get(CellORM, r.cell_id)
-        if cell is not None and cell.coverage >= floor:
-            return r.cell_id
-    return None
+        if cell is None or cell.coverage < floor:
+            continue
+        score = r.score * evidence.get(cell.region, 1.0)
+        if best is None or score > best[0]:
+            best = (score, r.cell_id)
+    return best[1] if best else None
+
+
+PRIOR_TESTS = 20  # weight of the overall rate for a region: about two batches of tests
+
+
+def region_evidence(s: Session) -> dict[str, float]:
+    """How often a backtest in each region reached Sharpe > 1 and Fitness > 0.5 in this
+    ledger, relative to all regions (1.0 = average). Shrunk toward the overall rate so a
+    region with few tests is neither favoured nor ruled out on noise."""
+    from alpha_orchestrator.factory.models import CandidateORM
+
+    rows = s.execute(
+        select(CellORM.region, CandidateORM.sharpe, CandidateORM.fitness, CandidateORM.turnover)
+        .join(CellORM, CellORM.cell_id == CandidateORM.cell_id)
+        .where(
+            CandidateORM.status == "DONE",
+            CandidateORM.sharpe.is_not(None),
+            CandidateORM.stage.not_in(["PROFILE", "ROBUST"]),
+        )
+    ).all()
+    hits: dict[str, int] = {}
+    tests: dict[str, int] = {}
+    for region, sh_, fit, turn in rows:
+        sh = float(sh_ or 0.0)
+        if abs(sh) > 3 or (turn or 0) > 0.7:
+            continue
+        tests[region] = tests.get(region, 0) + 1
+        hits[region] = hits.get(region, 0) + int(
+            abs(sh) > 1 and abs(fit or 0) > 0.5 and sh * (fit or 0) > 0
+        )
+    total = sum(tests.values())
+    if not total:
+        return {}
+    overall = (sum(hits.values()) + 1) / (total + 2)
+    return {
+        r: ((hits[r] + PRIOR_TESTS * overall) / (tests[r] + PRIOR_TESTS)) / overall for r in tests
+    }
 
 
 # ---------- 第 2 步 读字段 ----------

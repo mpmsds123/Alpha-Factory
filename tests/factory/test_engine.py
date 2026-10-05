@@ -55,7 +55,7 @@ def honest_llm(model: str, system: str, user: str) -> tuple[str, int, int]:
             for f in p["fields"]
         ]
         return json.dumps({"scores": scores}), 800, 300
-    if task.startswith("Write 5 DIFFERENT"):
+    if "DIFFERENT expressions" in task:
         forms = [
             {"form": "rank(ts_delta({X}, 21))", "way": "change"},
             {"form": "rank(ts_delta({X}, 63))", "way": "same shape, other window"},
@@ -66,6 +66,19 @@ def honest_llm(model: str, system: str, user: str) -> tuple[str, int, int]:
             {"form": "ts_rank({X}, 21)", "way": "recent rank"},
         ]
         return json.dumps({"forms": forms}), 400, 150
+    if "DIFFERENT formulas" in task:
+        ids = sorted((f["id"] for f in p["fields"]), key=lambda i: "_mean_" not in i)
+        a, b = ids[0], ids[1]
+        formulas = [
+            {"formula": f"rank(ts_delta({a}, 21))", "why": "revision"},
+            {"formula": f"rank(ts_delta({a}, 63))", "why": "same shape, other window"},
+            {"formula": f"rank(ts_delta({a}, 21)) - rank({b})", "why": "spread"},
+            {"formula": f"rank({b})", "why": "level"},
+            {"formula": f"madeup({a})", "why": "invalid operator"},
+            {"formula": f"group_rank(ts_delta({b}, 21), industry)", "why": "peers"},
+            {"formula": f"ts_zscore({a}, 63)", "why": "own history"},
+        ]
+        return json.dumps({"formulas": formulas}), 400, 150
     if task.startswith("For each parent"):
         out = []
         for par in p["parents"]:
@@ -96,11 +109,13 @@ def run(world: World, minutes: float = 10, **budget: Any):  # type: ignore[no-un
     return ledger, api, report
 
 
-def test_signal_is_found_improved_and_handed_over_never_submitted() -> None:
+def test_signal_is_found_improved_and_handed_over_never_submitted(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(eng, "CONTROL_SHARE", 0.0)
     ledger, api, report = run(World({"est": analyst_fields("eps")}))
     with ledger.session() as s:
         idea = s.scalars(select(ResearchIdeaORM)).first()
-        assert idea is not None and idea.status in (IdeaStatus.PROMISING, IdeaStatus.DONE)
+        assert idea is not None, report
+        assert idea.status in (IdeaStatus.PROMISING, IdeaStatus.DONE), idea.extra
         ranked = list(s.scalars(select(IdeaFieldORM).where(IdeaFieldORM.rank > 0)))
         assert ranked and all("_eps_" in r.field_id for r in ranked)  # step 4 kept only eps
         first = [c for c in s.scalars(select(CandidateORM)) if c.stage == Stage.FIELD]
@@ -124,31 +139,31 @@ def test_noise_dataset_ideas_die_and_the_dataset_closes() -> None:
     assert cell is not None and cell.plan.get("outcome") == "noise"
 
 
-def test_first_tests_are_four_distinct_quantities_times_five_distinct_forms() -> None:
+def test_main_arm_formulas_state_the_idea_with_its_own_fields(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(eng, "CONTROL_SHARE", 0.0)
     ledger, _api, _ = run(World({"flat": analyst_fields(None)}), minutes=10)
     with ledger.session() as s:
         idea = s.scalars(select(ResearchIdeaORM)).first()
-        assert idea is not None
-        forms = [f["form"] for f in idea.extra["forms"]]
-        assert forms == [
-            "rank(ts_delta({X}, 21))",
-            "rank({X})",
-            "rank(ts_zscore({X}, 63))",
-            "group_rank({X}, industry)",
-            "ts_rank({X}, 21)",
-        ]  # the window-only duplicate and the invalid operator are dropped
+        assert idea is not None and idea.extra["arm"] == "main"
+        exprs = [f["expression"] for f in idea.extra["formulas"]]
+        assert len(exprs) == eng.FORMULAS  # the window-only duplicate and madeup() dropped
+        assert not any("madeup" in e for e in exprs)
+        assert any(e.count("ts_backfill(") == 2 for e in exprs)  # a two-field formula
+        assert all("{X}" not in e for e in exprs)  # no template slot
         tested = idea.extra["test_fields"]
-        assert len(tested) == eng.TEST_FIELDS
         quantities = {" ".join(f.split("_")[1:3]) for f in tested}
-        assert len(quantities) == eng.TEST_FIELDS  # never fy1 and fy2 of the same thing
-        first = [
-            c
-            for c in s.scalars(select(CandidateORM))
-            if (c.extra or {}).get("idea") == idea.id
-            and c.stage == Stage.FIELD
-            and c.change != "mirrored"
-        ]
-        assert len(first) == eng.TEST_FIELDS * eng.FORMS
+        assert len(quantities) == len(tested)  # never fy1 and fy2 of the same thing
+
+
+def test_control_arm_expands_one_template_over_random_fields(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(eng, "CONTROL_SHARE", 1.0)
+    ledger, _api, _ = run(World({"flat": analyst_fields(None)}), minutes=10)
+    with ledger.session() as s:
+        idea = s.scalars(select(ResearchIdeaORM)).first()
+        assert idea is not None and idea.extra["arm"] == "control"
+        exprs = [f["expression"] for f in idea.extra["formulas"]]
+        shapes = {e.split("ts_backfill")[0] for e in exprs}
+        assert len(exprs) == eng.CONTROL_FIELDS and len(shapes) == 1  # one template, k fields
 
 
 def test_no_example_formula_in_any_prompt() -> None:
@@ -166,7 +181,7 @@ def test_no_example_formula_in_any_prompt() -> None:
     eng.run_day(cfg, api, ledger, llm, minutes=3, rng=random.Random(1), sleep=lambda _s: None)
     assert seen
     for prompt in seen:
-        if json.loads(prompt)["task"].startswith(("Propose ONE", "Write 5", "Rate how")):
+        if json.loads(prompt)["task"].startswith(("Propose ONE", "Write 5", "Write 1", "Rate how")):
             data = json.loads(prompt)
             # no formula anywhere in what we write (operators are listed by name only)
             ours = json.dumps({k: v for k, v in data.items() if k != "operators"})
