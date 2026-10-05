@@ -96,9 +96,7 @@ def load_fields(api: BrainAPI, ledger: Ledger, cell_id: str, config: FactoryConf
 
 def usable_fields(s: Session, cell_id: str) -> list[FieldORM]:
     return list(
-        s.scalars(
-            select(FieldORM).where(FieldORM.cell_id == cell_id, FieldORM.eligible.is_(True))
-        )
+        s.scalars(select(FieldORM).where(FieldORM.cell_id == cell_id, FieldORM.eligible.is_(True)))
     )
 
 

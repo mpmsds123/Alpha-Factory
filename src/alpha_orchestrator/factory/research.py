@@ -319,8 +319,11 @@ class Factory:
                 counts = {n: _count(s, ids.get(n)) for n in ("raw", "upd5", "upd22", "upd66")}
                 period = prof.period_from(counts)
                 raw = (counts.get("raw") or 0) / (size or max(counts.get("raw") or 0, 1))
-                f.profile = {**prof_, "period_days": round(min(period, 999.0), 1),
-                             "raw_coverage": round(min(raw, 1.0), 3)}
+                f.profile = {
+                    **prof_,
+                    "period_days": round(min(period, 999.0), 1),
+                    "raw_coverage": round(min(raw, 1.0), 3),
+                }
                 period_by[f.stratum].append(min(period, 999.0))
         all_cov = [c for cs in cov_by.values() for c in cs]
         all_period = [p for ps in period_by.values() for p in ps]

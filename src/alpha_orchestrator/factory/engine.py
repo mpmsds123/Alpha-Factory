@@ -4,6 +4,7 @@ Every rule below names its step in the design document. Numbers marked 提议 th
 module constants here; nothing else decides.
 """
 
+import copy
 import math
 import random
 import re
@@ -51,16 +52,15 @@ MAX_FORM_OPERATORS = 4
 COARSE = 300
 SCORE_BATCH = 100
 KEEP_SCORE = 6
-# 第 5 步
-FIRST_TESTS = 10
-MAX_FIELDS = 60
-# 第 6 步 (官方 API 课)
-CONTINUE_SHARPE = 1.0
-CONTINUE_FITNESS = 0.5
+# 第 5 步 (2026-10-05 修改)
+TEST_FIELDS = 4  # most relevant fields, one per measured quantity
+FORMS = 5  # 官方课: AI picks the 5 most relevant templates
+# 第 6 步 (2026-10-05 修改): no first-test gate; the best go to step 7
+PASS_SHARPE = 1.0  # an idea dies only if step 7 ends below this
 DEAD_IN_ROW = 3  # 提议
 IDEAS_PER_DATASET = 10  # 提议
 # 第 7 步
-PARENTS = 5
+PARENTS = 2
 VARIANTS = 3
 DRY_ROUNDS = 2  # 提议
 MAX_ROUNDS = 4  # 提议
@@ -182,14 +182,12 @@ class Engine:
             ideas = list(
                 s.scalars(select(ResearchIdeaORM).where(ResearchIdeaORM.cell_id == cell_id))
             )
-            worked = any(
-                i.status == IdeaStatus.DONE and i.best_sharpe >= CONTINUE_SHARPE for i in ideas
-            )
+            worked = any(i.status == IdeaStatus.DONE for i in ideas)
             outcome = "signal" if worked else "noise"
             cell.state = CellState.EXHAUSTED
             cell.plan = {**(cell.plan or {}), "verdict": outcome, "outcome": outcome}
             cell.stop_reason = f"{len(ideas)} ideas, " + (
-                "some promising" if worked else "none promising"
+                "some reached Sharpe 1" if worked else "none reached Sharpe 1"
             )
             self.ledger.log(s, "dataset_closed", cell_id, outcome=outcome, ideas=len(ideas))
 
@@ -212,23 +210,18 @@ class Engine:
             tried = list(
                 s.scalars(select(ResearchIdeaORM.title).where(ResearchIdeaORM.cell_id == cell_id))
             )
-        ops = sorted(f"{k}: {v}"[:160] for k, v in self.meta.definitions.items())
         card: dict[str, Any] | None = None
         for _ in range(2):
             try:
-                answer = self.llm.idea(brief, lines, papers, tried, ops)
+                answer = self.llm.idea(brief, lines, papers, tried)
             except RuntimeError:
                 continue
-            if _form_ok(answer.get("form"), self.meta.operators):
+            if str(answer.get("title", "")).strip() and str(answer.get("mechanism", "")).strip():
                 card = answer
                 break
         with self.ledger.session() as s:
             if card is None:
-                self.ledger.log(s, "idea_failed", cell_id, reason="no valid idea after 2 tries")
-                idea = ResearchIdeaORM(
-                    cell_id=cell_id, title="(no valid idea)", status=IdeaStatus.DEAD
-                )
-                s.add(idea)
+                self.ledger.log(s, "idea_failed", cell_id, reason="no idea after 2 tries")
                 return False
             idea = ResearchIdeaORM(
                 cell_id=cell_id,
@@ -237,18 +230,15 @@ class Engine:
                 long_side=str(card.get("long", "")),
                 short_side=str(card.get("short", "")),
                 horizon_days=_int(card.get("horizon_days"), 21),
-                form=str(card["form"]),
                 query=str(card.get("query", "")),
                 extra={"papers": [p["title"] for p in papers]},
             )
             s.add(idea)
             s.flush()
             idea_id = idea.id
-            self.ledger.log(
-                s, "idea_created", cell_id, idea=idea_id, title=idea.title, form=idea.form
-            )
+            self.ledger.log(s, "idea_created", cell_id, idea=idea_id, title=idea.title)
         self._narrow(idea_id)
-        self._queue_fields(idea_id, 1, FIRST_TESTS)
+        self._queue_tests(idea_id)
         return True
 
     # ======================= 第 4 步 缩字段 =======================
@@ -259,9 +249,9 @@ class Engine:
             fields = study.usable_fields(s, idea.cell_id)
             query = f"{idea.query} {idea.title} {idea.mechanism}"
             coarse = _bm25(query, fields)[:COARSE]
-            card = {"title": idea.title, "mechanism": idea.mechanism, "form": idea.form}
+            card = _card(idea)
             rows = [{"id": f.field_id, "description": f.description[:200]} for f in coarse]
-        scores: dict[str, tuple[int, str]] = {}
+        scores: dict[str, tuple[int, str, str]] = {}
         for i in range(0, len(rows), SCORE_BATCH):
             try:
                 scores.update(self.llm.score_fields(card, rows[i : i + SCORE_BATCH]))
@@ -269,19 +259,20 @@ class Engine:
                 continue
         order = {r["id"]: k for k, r in enumerate(rows)}
         kept = sorted(
-            (fid for fid, (sc, _) in scores.items() if sc >= KEEP_SCORE),
+            (fid for fid, v in scores.items() if v[0] >= KEEP_SCORE),
             key=lambda fid: (-scores[fid][0], order[fid]),
         )
         rank = {fid: k + 1 for k, fid in enumerate(kept)}
         with self.ledger.session() as s:
             for r in rows:
-                sc, why = scores.get(r["id"], (0, ""))
+                sc, why, measures = scores.get(r["id"], (0, "", ""))
                 s.add(
                     IdeaFieldORM(
                         idea_id=idea_id,
                         field_id=r["id"],
                         score=sc,
                         reason=why,
+                        measures=measures,
                         rank=rank.get(r["id"], 0),
                     )
                 )
@@ -295,36 +286,88 @@ class Engine:
                 idea.status = IdeaStatus.DEAD
                 idea.extra = {**idea.extra, "why_dead": f"no field scored {KEEP_SCORE}+"}
 
-    # ======================= 第 5 步 测前 10 =======================
-    def _queue_fields(self, idea_id: str, first: int, last: int) -> int:
+    # ======================= 第 5 步 4 个字段 x 5 种公式 =======================
+    def _test_fields(self, s: Session, idea_id: str) -> list[IdeaFieldORM]:
+        """The most relevant fields, one per measured quantity: versions of the same
+        quantity (e.g. nine "total assets" fields) are one piece of evidence, not nine."""
+        chosen: list[IdeaFieldORM] = []
+        seen: set[str] = set()
+        for r in s.scalars(
+            select(IdeaFieldORM)
+            .where(IdeaFieldORM.idea_id == idea_id, IdeaFieldORM.rank > 0)
+            .order_by(IdeaFieldORM.rank)
+        ):
+            key = (r.measures or r.field_id).strip().lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            chosen.append(r)
+            if len(chosen) >= TEST_FIELDS:
+                break
+        return chosen
+
+    def _queue_tests(self, idea_id: str) -> int:
+        with self.ledger.session() as s:
+            idea = s.get(ResearchIdeaORM, idea_id)
+            assert idea is not None
+            if idea.status == IdeaStatus.DEAD:
+                return 0
+            chosen = self._test_fields(s, idea_id)
+            usable = {f.field_id: f for f in study.usable_fields(s, idea.cell_id)}
+            info = [
+                {"id": r.field_id, "description": usable[r.field_id].description[:200]}
+                for r in chosen
+                if r.field_id in usable
+            ]
+            card = _card(idea)
+        ops = sorted(f"{k}: {v}"[:160] for k, v in self.meta.definitions.items())
+        forms: list[dict[str, str]] = []
+        for _ in range(2):
+            try:
+                proposed = self.llm.forms(card, info, ops, FORMS)
+            except RuntimeError:
+                continue
+            forms = _distinct_forms(proposed, self.meta.operators)[:FORMS]
+            if forms:
+                break
         added = 0
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
             assert idea is not None
             cell = s.get(CellORM, idea.cell_id)
             assert cell is not None
-            rows = list(
-                s.scalars(
-                    select(IdeaFieldORM)
-                    .where(
-                        IdeaFieldORM.idea_id == idea_id,
-                        IdeaFieldORM.rank >= first,
-                        IdeaFieldORM.rank <= last,
-                    )
-                    .order_by(IdeaFieldORM.rank)
-                )
-            )
-            fields = {f.field_id: f for f in study.usable_fields(s, idea.cell_id)}
+            if not forms:
+                idea.status = IdeaStatus.DEAD
+                idea.extra = {**idea.extra, "why_dead": "no valid formula after 2 tries"}
+                self.ledger.log(s, "idea_dead", idea.cell_id, idea=idea_id, reason="no forms")
+                return 0
+            idea.form = forms[0]["form"]
+            idea.extra = {**idea.extra, "forms": forms, "test_fields": [i["id"] for i in info]}
             settings = self._settings(cell)
-            for r in rows:
-                f = fields.get(r.field_id)
-                if f is None or r.candidate_id:
+            usable = {f.field_id: f for f in study.usable_fields(s, idea.cell_id)}
+            rows = {r.field_id: r for r in self._test_fields(s, idea_id)}
+            for fid, r in rows.items():
+                f = usable.get(fid)
+                if f is None:
                     continue
-                expr = idea.form.replace("{X}", f.prep)
-                c = self._add(s, cell, expr, settings, Stage.FIELD, idea_id, field=r.field_id)
-                if c is not None:
-                    r.candidate_id = c.id
-                    added += 1
+                for k, fm in enumerate(forms):
+                    expr = fm["form"].replace("{X}", f.prep)
+                    c = self._add(
+                        s, cell, expr, settings, Stage.FIELD, idea_id, field=fid, change=fm["way"]
+                    )
+                    if c is not None:
+                        added += 1
+                        if k == 0:
+                            r.candidate_id = c.id
+            self.ledger.log(
+                s,
+                "tests_queued",
+                idea.cell_id,
+                idea=idea_id,
+                fields=len(rows),
+                forms=[f["form"] for f in forms],
+                queued=added,
+            )
         return added
 
     # ======================= 第 6-7 步 =======================
@@ -347,35 +390,26 @@ class Engine:
         return 0
 
     def _judge(self, idea_id: str) -> None:
-        """第 6 步: any of the first fields with Sharpe > 1 and Fitness > 0.5 -> continue."""
+        """第 6 步 (修改后): no gate. The best results go to step 7; a negative one is
+        mirrored first (never in CHN)."""
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
             assert idea is not None
             cell = s.get(CellORM, idea.cell_id)
             assert cell is not None
-            done = self._results(s, idea_id, Stage.FIELD)
-            good = [c for c in done if self._continues(c, cell.region)]
-            idea.best_sharpe = max(
-                (abs(c.sharpe or 0) for c in done if not self._suspicious(c)), default=0.0
-            )
-            if not good:
+            done = [c for c in self._results(s, idea_id, Stage.FIELD) if not self._suspicious(c)]
+            usable = [c for c in done if (c.sharpe or 0) > 0 or cell.region not in NO_FLIP_REGIONS]
+            usable.sort(key=lambda c: -abs(c.sharpe or 0))
+            best = usable[:PARENTS]
+            idea.best_sharpe = max((abs(c.sharpe or 0) for c in usable), default=0.0)
+            if not best:
                 idea.status = IdeaStatus.DEAD
-                idea.extra = {
-                    **idea.extra,
-                    "why_dead": f"none of {len(done)} fields reached Sharpe > 1 and Fitness > 0.5",
-                }
-                self.ledger.log(
-                    s,
-                    "idea_dead",
-                    idea.cell_id,
-                    idea=idea_id,
-                    tested=len(done),
-                    best=idea.best_sharpe,
-                )
+                idea.extra = {**idea.extra, "why_dead": f"no usable result among {len(done)}"}
+                self.ledger.log(s, "idea_dead", idea.cell_id, idea=idea_id, tested=len(done))
                 return
             idea.status = IdeaStatus.PROMISING
-            for c in good:
-                if (c.sharpe or 0) < 0:  # mirror it; never in CHN (good excludes it there)
+            for c in best:
+                if (c.sharpe or 0) < 0:
                     self._add(
                         s,
                         cell,
@@ -385,32 +419,37 @@ class Engine:
                         idea_id,
                         field=c.extra.get("field"),
                         parent=c,
+                        change="mirrored",
                     )
+            idea.extra = {**idea.extra, "parents_from": [c.id for c in best]}
             self.ledger.log(
                 s,
-                "idea_promising",
+                "idea_to_improve",
                 idea.cell_id,
                 idea=idea_id,
-                good=len(good),
+                tested=len(done),
                 best=idea.best_sharpe,
             )
-        self._queue_fields(idea_id, FIRST_TESTS + 1, MAX_FIELDS)  # 第 6 步: test the rest
 
     def _start_improving(self, idea_id: str) -> None:
-        """第 7 步: the five best become parents."""
+        """第 7 步: the best of step 6 become parents (their mirror when negative)."""
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
             assert idea is not None
-            done = [
-                c
-                for c in self._results(s, idea_id, Stage.FIELD)
-                if (c.sharpe or 0) > 0 and not self._suspicious(c)
-            ]
-            done.sort(key=lambda c: -(c.sharpe or 0))
-            parents: list[dict[str, Any]] = [
-                {"id": c.id, "best": c.sharpe, "dry": 0, "rounds": 0, "pending": []}
-                for c in done[:PARENTS]
-            ]
+            parents: list[dict[str, Any]] = []
+            for cid in idea.extra.get("parents_from", []):
+                c = s.get(CandidateORM, cid)
+                if c is None:
+                    continue
+                if (c.sharpe or 0) < 0:
+                    c = s.scalar(
+                        select(CandidateORM).where(
+                            CandidateORM.parent_id == c.id, CandidateORM.change == "mirrored"
+                        )
+                    )
+                if c is None or c.sharpe is None or self._suspicious(c):
+                    continue
+                parents.append({"id": c.id, "best": c.sharpe, "dry": 0, "rounds": 0, "pending": []})
             idea.extra = {**idea.extra, "phase": "improve", "parents": parents}
         self._queue_round(idea_id)
 
@@ -426,10 +465,9 @@ class Engine:
                 if p["dry"] < DRY_ROUNDS and p["rounds"] < MAX_ROUNDS
             ]
             if not parents:
-                idea.status = IdeaStatus.DONE
-                self.ledger.log(s, "idea_done", idea.cell_id, idea=idea_id, best=idea.best_sharpe)
+                self._finish_idea(s, idea)
                 return
-            card = {"title": idea.title, "mechanism": idea.mechanism}
+            card = _card(idea)
             rows = {p["id"]: s.get(CandidateORM, p["id"]) for p in parents}
             payload = [
                 {
@@ -454,7 +492,7 @@ class Engine:
             assert idea is not None
             cell = s.get(CellORM, idea.cell_id)
             assert cell is not None
-            plist = idea.extra.get("parents", [])
+            plist = copy.deepcopy(idea.extra.get("parents", []))  # a new object, so it is saved
             by_id = {p["id"]: p for p in plist}
             counts: dict[str, int] = {}
             for v in variants:
@@ -485,8 +523,7 @@ class Engine:
                     p["rounds"] += 1
             idea.extra = {**idea.extra, "parents": plist}
             if not any(p.get("pending") for p in plist):
-                idea.status = IdeaStatus.DONE
-                self.ledger.log(s, "idea_done", idea.cell_id, idea=idea_id, best=idea.best_sharpe)
+                self._finish_idea(s, idea)
 
     def _settle_round(self, idea_id: str) -> None:
         """第 7 步: a variant replaces its parent only when it is 0.15 better."""
@@ -494,7 +531,7 @@ class Engine:
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
             assert idea is not None
-            plist = idea.extra.get("parents", [])
+            plist = copy.deepcopy(idea.extra.get("parents", []))  # a new object, so it is saved
             for p in plist:
                 if not p.get("pending"):
                     continue
@@ -661,6 +698,10 @@ class Engine:
         )
         if not created and row.status == CandidateStatus.INVALID:
             row.status, row.error = CandidateStatus.QUEUED, None
+        if idea_id:  # an earlier identical simulation counts for this idea too
+            idea = s.get(ResearchIdeaORM, idea_id)
+            if idea is not None and row.id not in idea.extra.get("rows", []):
+                idea.extra = {**idea.extra, "rows": [*idea.extra.get("rows", []), row.id]}
         return row
 
     def _settings(self, cell: CellORM) -> dict[str, Any]:
@@ -674,13 +715,12 @@ class Engine:
 
     @staticmethod
     def _idea_rows(s: Session, idea_id: str) -> list[CandidateORM]:
-        return list(
-            s.scalars(
-                select(CandidateORM).where(
-                    func.json_extract(CandidateORM.extra, "$.idea") == idea_id
-                )
-            )
-        )
+        """Every simulation this idea asked for, including identical ones it reused."""
+        idea = s.get(ResearchIdeaORM, idea_id)
+        ids = list((idea.extra or {}).get("rows", [])) if idea is not None else []
+        if not ids:
+            return []
+        return list(s.scalars(select(CandidateORM).where(CandidateORM.id.in_(ids))))
 
     def _pending(self, s: Session, idea_id: str) -> int:
         return sum(
@@ -711,15 +751,29 @@ class Engine:
         t = self.config.thresholds
         return abs(c.sharpe or 0) > t.suspicious_sharpe or (c.turnover or 0) > t.suspicious_turnover
 
-    def _continues(self, c: CandidateORM, region: str) -> bool:
-        if self._suspicious(c) or c.sharpe is None or c.fitness is None:
-            return False
-        sharpe, fit = c.sharpe, c.fitness
-        if sharpe < 0:
-            if region in NO_FLIP_REGIONS:
-                return False
-            sharpe, fit = -sharpe, -fit
-        return sharpe > CONTINUE_SHARPE and fit > CONTINUE_FITNESS
+    def _finish_idea(self, s: Session, idea: ResearchIdeaORM) -> None:
+        """第 6 步 (修改后): after step 7, an idea with no version at Sharpe 1 is dead."""
+        best = max(
+            (
+                c.sharpe or 0.0
+                for c in self._idea_rows(s, idea.id)
+                if c.stage in (Stage.FIELD, Stage.IMPROVE)
+                and c.status == CandidateStatus.DONE
+                and not self._suspicious(c)
+            ),
+            default=0.0,
+        )
+        idea.best_sharpe = best
+        if best >= PASS_SHARPE:
+            idea.status = IdeaStatus.DONE
+            self.ledger.log(s, "idea_done", idea.cell_id, idea=idea.id, best=best)
+        else:
+            idea.status = IdeaStatus.DEAD
+            idea.extra = {
+                **idea.extra,
+                "why_dead": f"after improvement the best Sharpe is {best:.2f} < {PASS_SHARPE}",
+            }
+            self.ledger.log(s, "idea_dead", idea.cell_id, idea=idea.id, best=best)
 
     def _passes_floor(self, c: CandidateORM, cell: CellORM) -> bool:
         t = self.config.thresholds
@@ -742,6 +796,31 @@ def _int(v: Any, default: int) -> int:
 
 
 FORM_PROBE = "form_probe_field"  # stands for {X}: every field enters already prepared
+
+
+def _card(idea: ResearchIdeaORM) -> dict[str, Any]:
+    return {
+        "title": idea.title,
+        "mechanism": idea.mechanism,
+        "long": idea.long_side,
+        "short": idea.short_side,
+        "horizon_days": idea.horizon_days,
+    }
+
+
+def _distinct_forms(proposed: list[dict[str, str]], operators: set[str]) -> list[dict[str, str]]:
+    """Valid forms only, and no two that differ only by numbers (window lengths)."""
+    out, seen = [], set()
+    for f in proposed:
+        form = f["form"].strip()
+        if not _form_ok(form, operators):
+            continue
+        shape = re.sub(r"\d+(\.\d+)?", "#", re.sub(r"\s+", "", form))
+        if shape in seen:
+            continue
+        seen.add(shape)
+        out.append({"form": form, "way": f.get("way", "")})
+    return out
 
 
 def _form_ok(form: Any, operators: set[str]) -> bool:

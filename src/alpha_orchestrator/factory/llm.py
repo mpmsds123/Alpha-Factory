@@ -158,22 +158,22 @@ class FactoryLLM:
         ]
 
     # ---------- 设计文档 v1 ----------
+    # No example expression appears in any prompt: the model copies examples (v2 wrote only
+    # group_rank, v1 copied rank(ts_delta({X}, 21)) into 11 of 36 ideas).
     def idea(
         self,
         dataset: dict[str, Any],
         fields: Sequence[dict[str, str]],
         papers: Sequence[dict[str, str]],
         tried: Sequence[str],
-        operators: Sequence[str],
     ) -> dict[str, Any]:
-        """第 3 步: one research idea grounded in this dataset's fields."""
+        """第 3 步: one research idea grounded in this dataset's fields. No formula yet."""
         prompt = {
             "task": "Propose ONE new research idea for an alpha on this dataset.",
             "dataset": dataset,
             "fields": list(fields),
             "papers_naming_this_dataset": list(papers),
             "ideas_already_tried_here": list(tried),
-            "operators": list(operators),
             "questions_to_ask_of_the_fields": [
                 "Which quantities are stable, and which change over time?",
                 "What would an anomalous value mean?",
@@ -182,37 +182,40 @@ class FactoryLLM:
             ],
             "rules": [
                 "The idea must be something these fields can measure.",
-                "Do not repeat an idea already tried here.",
-                "`form` is the simplest expression of the idea with exactly one placeholder "
-                "{X} standing for a field, at most 4 operators, only listed operators.",
-                "`query` is 5-15 English keywords describing the fields the idea needs.",
+                "Do not repeat or rephrase an idea already tried here.",
+                "Do not write any formula.",
             ],
-            "output": {
-                "title": "short name",
-                "mechanism": "who wins, who loses, why it persists",
-                "long": "which stocks to buy",
-                "short": "which stocks to sell",
-                "horizon_days": 21,
-                "form": "rank(ts_delta({X}, 21))",
-                "query": "keywords",
+            "output_fields": {
+                "title": "string: short name",
+                "mechanism": "string: who wins, who loses, why it persists",
+                "long": "string: which stocks to buy",
+                "short": "string: which stocks to sell",
+                "horizon_days": "integer: how many trading days the effect takes",
+                "query": "string: 5-15 English keywords describing the fields the idea needs",
             },
         }
         return self.ask("idea", json.dumps(prompt, ensure_ascii=False), strong=True)
 
     def score_fields(
         self, idea: dict[str, Any], fields: Sequence[dict[str, str]]
-    ) -> dict[str, tuple[int, str]]:
-        """第 4 步: relevance 0-10 and a one-line reason for each field."""
+    ) -> dict[str, tuple[int, str, str]]:
+        """第 4 步: relevance 0-10, a one-line reason, and what the field measures (so
+        versions of the same quantity can be told apart)."""
         prompt = {
             "task": "Rate how well each field can carry this idea, 0 (unrelated) to 10 "
-            "(exactly what the idea needs), with a one-line reason.",
+            "(exactly what the idea needs). Also name what the field measures in 2-4 "
+            "English words; fields measuring the same quantity from different sources or "
+            "versions must get exactly the same name.",
             "idea": idea,
             "fields": list(fields),
-            "output": {"scores": [{"id": "field id", "score": 7, "reason": "..."}]},
+            "output_fields": {
+                "scores": "list of objects with id (string), score (integer 0-10), "
+                "reason (string, one line), measures (string, 2-4 words)"
+            },
         }
         data = self.ask("score_fields", json.dumps(prompt, ensure_ascii=False))
         known = {f["id"] for f in fields}
-        out: dict[str, tuple[int, str]] = {}
+        out: dict[str, tuple[int, str, str]] = {}
         for row in data.get("scores") or []:
             if not isinstance(row, dict) or row.get("id") not in known:
                 continue
@@ -220,8 +223,44 @@ class FactoryLLM:
                 score = max(0, min(10, int(row.get("score", 0))))
             except (TypeError, ValueError):
                 continue
-            out[str(row["id"])] = (score, str(row.get("reason", ""))[:300])
+            measures = str(row.get("measures") or row["id"]).strip().lower()[:80]
+            out[str(row["id"])] = (score, str(row.get("reason", ""))[:300], measures)
         return out
+
+    def forms(
+        self,
+        idea: dict[str, Any],
+        fields: Sequence[dict[str, str]],
+        operators: Sequence[str],
+        n: int,
+    ) -> list[dict[str, str]]:
+        """第 5 步: n different expressions of the idea, each with one {X} for a field."""
+        prompt = {
+            "task": f"Write {n} DIFFERENT expressions of this idea. Each uses exactly one "
+            "placeholder {X} that will be replaced by one of the fields listed, already "
+            "cleaned (filled and averaged). Each expression must express the idea in a "
+            "different way: for example a change over time, a comparison with the stock's "
+            "own history, a comparison with peers, the level itself, a change of the "
+            "change. Choose windows from the idea's horizon.",
+            "idea": idea,
+            "fields_it_will_be_applied_to": list(fields),
+            "operators": list(operators),
+            "rules": [
+                "Only listed operators. At most 4 operators per expression.",
+                "Exactly one {X} per expression; no other field names.",
+                "No two expressions may differ only by a window length.",
+            ],
+            "output_fields": {
+                "forms": "list of objects with form (string, the expression with {X}) "
+                "and way (string: which way of expressing the idea it is)"
+            },
+        }
+        data = self.ask("forms", json.dumps(prompt, ensure_ascii=False), strong=True)
+        return [
+            {"form": f["form"], "way": str(f.get("way", ""))[:120]}
+            for f in (data.get("forms") or [])
+            if isinstance(f, dict) and isinstance(f.get("form"), str)
+        ]
 
     def improve(
         self, idea: dict[str, Any], parents: Sequence[dict[str, Any]], changes: Sequence[str]
@@ -240,10 +279,9 @@ class FactoryLLM:
                 "`decay` is the simulation setting (0-512); set it only when the change "
                 "is the decay change, otherwise omit it.",
             ],
-            "output": {
-                "variants": [
-                    {"parent": "parent id", "expression": "...", "change": "...", "decay": 5}
-                ]
+            "output_fields": {
+                "variants": "list of objects with parent (string id), expression (string), "
+                "change (string), and decay (integer, only for the decay change)"
             },
         }
         data = self.ask("improve", json.dumps(prompt, ensure_ascii=False), strong=True)

@@ -6,6 +6,7 @@ and improves a parent by comparing within subindustry (worth +0.35 Sharpe in thi
 
 import json
 import random
+import re
 from typing import Any
 
 from sqlalchemy import select
@@ -39,7 +40,6 @@ def honest_llm(model: str, system: str, user: str) -> tuple[str, int, int]:
             "long": "upward revisions",
             "short": "downward revisions",
             "horizon_days": 21,
-            "form": "rank(ts_delta({X}, 21))",
             "query": "eps earnings per share estimate revision",
         }
         return json.dumps(card), 500, 100
@@ -49,10 +49,23 @@ def honest_llm(model: str, system: str, user: str) -> tuple[str, int, int]:
                 "id": f["id"],
                 "score": 9 if "_eps_" in f["id"] else 2,
                 "reason": "eps" if "_eps_" in f["id"] else "other",
+                # fy1 and fy2 versions measure the same quantity
+                "measures": " ".join(f["id"].split("_")[1:3]),
             }
             for f in p["fields"]
         ]
         return json.dumps({"scores": scores}), 800, 300
+    if task.startswith("Write 5 DIFFERENT"):
+        forms = [
+            {"form": "rank(ts_delta({X}, 21))", "way": "change"},
+            {"form": "rank(ts_delta({X}, 63))", "way": "same shape, other window"},
+            {"form": "rank({X})", "way": "level"},
+            {"form": "rank(ts_zscore({X}, 63))", "way": "own history"},
+            {"form": "group_rank({X}, industry)", "way": "peers"},
+            {"form": "madeup({X})", "way": "invalid"},
+            {"form": "ts_rank({X}, 21)", "way": "recent rank"},
+        ]
+        return json.dumps({"forms": forms}), 400, 150
     if task.startswith("For each parent"):
         out = []
         for par in p["parents"]:
@@ -111,14 +124,63 @@ def test_noise_dataset_ideas_die_and_the_dataset_closes() -> None:
     assert cell is not None and cell.plan.get("outcome") == "noise"
 
 
-def test_each_idea_first_tests_at_most_ten_fields() -> None:
+def test_first_tests_are_four_distinct_quantities_times_five_distinct_forms() -> None:
     ledger, _api, _ = run(World({"flat": analyst_fields(None)}), minutes=10)
     with ledger.session() as s:
-        for idea in s.scalars(select(ResearchIdeaORM)):
-            n = sum(
-                1 for c in s.scalars(select(CandidateORM)) if (c.extra or {}).get("idea") == idea.id
-            )
-            assert n <= eng.FIRST_TESTS
+        idea = s.scalars(select(ResearchIdeaORM)).first()
+        assert idea is not None
+        forms = [f["form"] for f in idea.extra["forms"]]
+        assert forms == [
+            "rank(ts_delta({X}, 21))",
+            "rank({X})",
+            "rank(ts_zscore({X}, 63))",
+            "group_rank({X}, industry)",
+            "ts_rank({X}, 21)",
+        ]  # the window-only duplicate and the invalid operator are dropped
+        tested = idea.extra["test_fields"]
+        assert len(tested) == eng.TEST_FIELDS
+        quantities = {" ".join(f.split("_")[1:3]) for f in tested}
+        assert len(quantities) == eng.TEST_FIELDS  # never fy1 and fy2 of the same thing
+        first = [
+            c
+            for c in s.scalars(select(CandidateORM))
+            if (c.extra or {}).get("idea") == idea.id
+            and c.stage == Stage.FIELD
+            and c.change != "mirrored"
+        ]
+        assert len(first) == eng.TEST_FIELDS * eng.FORMS
+
+
+def test_no_example_formula_in_any_prompt() -> None:
+    seen: list[str] = []
+
+    def spy(model: str, system: str, user: str) -> tuple[str, int, int]:
+        seen.append(user)
+        return honest_llm(model, system, user)
+
+    ledger = Ledger("sqlite://")
+    api = World({"est": analyst_fields("eps")}).platform()
+    cfg = FactoryConfig()
+    cfg.budget.min_batch_interval_s = 0
+    llm = FactoryLLM(cfg, ledger, complete=spy)
+    eng.run_day(cfg, api, ledger, llm, minutes=3, rng=random.Random(1), sleep=lambda _s: None)
+    assert seen
+    for prompt in seen:
+        if json.loads(prompt)["task"].startswith(("Propose ONE", "Write 5", "Rate how")):
+            data = json.loads(prompt)
+            # no formula anywhere in what we write (operators are listed by name only)
+            ours = json.dumps({k: v for k, v in data.items() if k != "operators"})
+            assert not re.search(r"[a-z_]+\(", ours), ours[:300]
+
+
+def test_an_idea_dies_only_after_improvement_fails() -> None:
+    ledger, _api, _ = run(World({"flat": analyst_fields(None)}), minutes=10)
+    with ledger.session() as s:
+        ideas = list(s.scalars(select(ResearchIdeaORM)))
+        improved = [c for c in s.scalars(select(CandidateORM)) if c.stage == Stage.IMPROVE]
+    assert improved  # ideas reach step 7 before any verdict
+    dead = [i for i in ideas if i.status == IdeaStatus.DEAD]
+    assert dead and all("after improvement" in i.extra.get("why_dead", "") for i in dead)
 
 
 def test_record_page_lists_every_step(tmp_path) -> None:  # type: ignore[no-untyped-def]
