@@ -121,6 +121,15 @@ def test_each_idea_first_tests_at_most_ten_fields() -> None:
             assert n <= eng.FIRST_TESTS
 
 
+def test_record_page_lists_every_step(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from alpha_orchestrator.factory.record import render_record
+
+    ledger, _api, _ = run(World({"est": analyst_fields("eps")}))
+    text = render_record(ledger, tmp_path / "record.html").read_text(encoding="utf-8")
+    for marker in ("第1-2步", "第3步", "第4步", "第7-8步", "第8步", "EPS revision drift"):
+        assert marker in text
+
+
 def test_luck_line_grows_slowly() -> None:
     assert round(eng.luck_line(10, 0.40), 2) == 1.12
     assert round(eng.luck_line(40, 0.40), 2) == 1.29
