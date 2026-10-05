@@ -251,6 +251,7 @@ class IdeaStatus:
     PROMISING = "PROMISING"  # a field reached the continue line; being improved
     DEAD = "DEAD"  # nothing reached the continue line
     DONE = "DONE"  # improvement finished
+    RETIRED = "RETIRED"  # judged under an earlier design; ignored
 
 
 class ResearchIdeaORM(FactoryBase):

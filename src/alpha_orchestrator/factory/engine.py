@@ -130,7 +130,7 @@ class Engine:
     def _current_dataset(self) -> str | None:
         with self.ledger.session() as s:
             for c in s.scalars(select(CellORM).where(CellORM.state == CellState.RESEARCH)):
-                if (c.plan or {}).get("design") == "v1":
+                if (c.plan or {}).get("design") == study.DESIGN:
                     return c.cell_id
         return None
 
@@ -167,7 +167,10 @@ class Engine:
             ideas = list(
                 s.scalars(
                     select(ResearchIdeaORM)
-                    .where(ResearchIdeaORM.cell_id == cell_id)
+                    .where(
+                        ResearchIdeaORM.cell_id == cell_id,
+                        ResearchIdeaORM.status != IdeaStatus.RETIRED,
+                    )
                     .order_by(ResearchIdeaORM.created_at)
                 )
             )
@@ -184,7 +187,12 @@ class Engine:
             if cell is None:
                 return
             ideas = list(
-                s.scalars(select(ResearchIdeaORM).where(ResearchIdeaORM.cell_id == cell_id))
+                s.scalars(
+                    select(ResearchIdeaORM).where(
+                        ResearchIdeaORM.cell_id == cell_id,
+                        ResearchIdeaORM.status != IdeaStatus.RETIRED,
+                    )
+                )
             )
             worked = any(i.status == IdeaStatus.DONE for i in ideas)
             outcome = "signal" if worked else "noise"
@@ -212,7 +220,12 @@ class Engine:
             lines = _family_lines(fields)
             papers = _papers_naming(s, cell.dataset_id)
             tried = list(
-                s.scalars(select(ResearchIdeaORM.title).where(ResearchIdeaORM.cell_id == cell_id))
+                s.scalars(
+                    select(ResearchIdeaORM.title).where(
+                        ResearchIdeaORM.cell_id == cell_id,
+                        ResearchIdeaORM.status != IdeaStatus.RETIRED,
+                    )
+                )
             )
             dead_ends, worked = _knowledge(s)
             n_ideas = len(tried)
@@ -884,7 +897,10 @@ def _knowledge(s: Session) -> tuple[list[str], list[str]]:
     dead: list[str] = []
     worked: list[str] = []
     for i in s.scalars(
-        select(ResearchIdeaORM).order_by(ResearchIdeaORM.created_at.desc()).limit(200)
+        select(ResearchIdeaORM)
+        .where(ResearchIdeaORM.status != IdeaStatus.RETIRED)
+        .order_by(ResearchIdeaORM.created_at.desc())
+        .limit(200)
     ):
         if i.status == IdeaStatus.DEAD and len(dead) < 20:
             dead.append(f"{i.title}: {i.extra.get('why_dead', '')}"[:200])

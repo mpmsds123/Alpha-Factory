@@ -18,6 +18,7 @@ from alpha_orchestrator.factory.models import (
     ReviewORM,
     Stage,
 )
+from alpha_orchestrator.factory.study import DESIGN
 
 STATUS = {"TESTING": "测试中", "PROMISING": "有苗头，改进中", "DEAD": "死胡同", "DONE": "做完"}
 CSS = """
@@ -54,7 +55,7 @@ def render_record(ledger: Ledger, path: Path) -> Path:
         f"<h1>研究记录</h1><div class=soft>生成于 {now}。每一行都是数据库里的原始数据。</div>"
     )
     with ledger.session() as s:
-        cells = [c for c in s.scalars(select(CellORM)) if (c.plan or {}).get("design") == "v1"]
+        cells = [c for c in s.scalars(select(CellORM)) if (c.plan or {}).get("design") == DESIGN]
         cells.sort(key=lambda c: c.updated_at or datetime.min.replace(tzinfo=UTC), reverse=True)
         for cell in cells:
             ideas = list(
