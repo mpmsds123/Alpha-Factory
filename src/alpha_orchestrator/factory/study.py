@@ -69,6 +69,10 @@ def choose_dataset(s: Session, config: FactoryConfig) -> str | None:
 
 
 PRIOR_TESTS = 20  # weight of the overall rate for a region: about two batches of tests
+# Like for like: only first formulas of an idea, never improved ones. Improvement (DIG,
+# REFINE, ...) ran in some regions and not others, so it would credit the region with
+# what the method did.
+FIRST_PASS = ("IDEA", "SURVEY", "FIELD")
 
 
 def region_evidence(s: Session) -> dict[str, float]:
@@ -83,7 +87,7 @@ def region_evidence(s: Session) -> dict[str, float]:
         .where(
             CandidateORM.status == "DONE",
             CandidateORM.sharpe.is_not(None),
-            CandidateORM.stage.not_in(["PROFILE", "ROBUST"]),
+            CandidateORM.stage.in_(FIRST_PASS),
         )
     ).all()
     hits: dict[str, int] = {}
