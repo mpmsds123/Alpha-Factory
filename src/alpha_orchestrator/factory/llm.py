@@ -289,6 +289,8 @@ class FactoryLLM:
                 "Each formula must follow from the mechanism; say how in `why`.",
                 "No two formulas may differ only by a window length or a sign.",
                 "Fields are already cleaned: do not add filling or averaging.",
+                "Do not multiply three or more terms together; products of several "
+                "ranked signals overfit and collapse out of sample.",
             ],
             "output_fields": {
                 "formulas": "list of objects with formula (string) and why (string, one "
