@@ -93,10 +93,21 @@ def run(
     minutes: Annotated[float, typer.Option(help="最长运行分钟数")] = 720,
     config: ConfigOpt = DEFAULT_CONFIG,
 ) -> None:
-    """跑一天：抽签选数据集 → 抽样体检 → 抽样普查 → 按信号浓度挖 → 按试的次数确认 → 选出待确认。"""
-    from alpha_orchestrator.factory.daily import run_day
+    """跑一天（设计文档 v1）：选数据集 → 读字段 → 想点子 → 缩字段 → 测前 10 → 判断 → 改进 →
+    排除运气 → 待确认。"""
+    from alpha_orchestrator.factory.engine import run_day
+    from alpha_orchestrator.factory.record import render_record
 
     cfg, ledger = _ctx(config)
+    llm = _llm(cfg, ledger)
+    if llm is None:
+        typer.echo("设计文档 v1 需要 DeepSeek 想点子、挑字段；找不到密钥就不跑。")
+        raise typer.Exit(1)
+    record_path = Path(cfg.reports_dir) / "record.html"
+
+    def refresh_record() -> None:
+        render_record(ledger, record_path)
+
     api = _api()
     try:
         api.client.session.ensure()
@@ -104,26 +115,27 @@ def run(
             cfg,
             api,
             ledger,
-            _llm(cfg, ledger),
+            llm,
             minutes=minutes,
-            on_progress=lambda: render(ledger, cfg, _dashboard_path(cfg)),
+            on_progress=refresh_record,
         )
     except NeedBiometric:
         notify("平台要求刷脸：运行 alpha-factory login --then-run，会从断点继续")
-        render(ledger, cfg, _dashboard_path(cfg))
+        render_record(ledger, record_path)
         raise typer.Exit(2) from None
     except (AuthenticationFailed, SessionExpired, RateLimited) as exc:
         notify(f"运行暂停：{exc}。进度已保存，稍后重跑 alpha-factory run 会接着来")
-        render(ledger, cfg, _dashboard_path(cfg))
+        render_record(ledger, record_path)
         raise typer.Exit(3) from None
     finally:
         api.client.session.close()
-    render(ledger, cfg, _dashboard_path(cfg))
+    render_record(ledger, record_path)
     msg = (
         f"今日回测 {report.simulations}（失败 {report.failed}），过门槛 {report.ready}，"
         f"新增待确认 {len(report.reviews)}"
     )
     typer.echo(msg + f"；停止原因：{report.stopped_because or '完成'}")
+    typer.echo(f"研究记录：{record_path}")
     notify(msg)
 
 
