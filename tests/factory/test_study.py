@@ -53,6 +53,24 @@ def test_old_verdicts_are_reset_and_stop_counting() -> None:
         assert datasets.outcome_of(c) is None  # the old "noise" no longer counts
 
 
+def test_ideas_judged_under_an_earlier_design_are_retired() -> None:
+    from alpha_orchestrator.factory.models import IdeaStatus, ResearchIdeaORM
+
+    ledger = Ledger("sqlite://")
+    with ledger.session() as s:
+        old = cell("old", 0.9)
+        old.state, old.plan = CellState.EXHAUSTED, {"design": "v1", "outcome": "noise"}
+        s.add(old)
+        s.flush()
+        s.add(ResearchIdeaORM(cell_id=old.cell_id, title="t", status=IdeaStatus.DEAD))
+    study.reset_old_verdicts(ledger)
+    with ledger.session() as s:
+        idea = s.scalars(select(ResearchIdeaORM)).one()
+        assert idea.status == IdeaStatus.RETIRED
+        c = s.get(CellORM, "USA|1|TOP3000|old")
+        assert c is not None and c.state == CellState.NEW
+
+
 def test_step2_keeps_numeric_fields_covering_sixty_percent() -> None:
     ledger = Ledger("sqlite://")
     with ledger.session() as s:
@@ -73,6 +91,13 @@ def test_step2_keeps_numeric_fields_covering_sixty_percent() -> None:
         assert fields["eps_list"].prep == "ts_backfill(vec_avg(eps_list), 63)"
         assert not fields["rare"].eligible and not fields["sector_code"].eligible
         assert s.get(CellORM, "USA|1|TOP3000|est").state == CellState.RESEARCH  # type: ignore[union-attr]
+
+
+def test_news_is_never_carried_forward_but_fundamentals_are() -> None:
+    assert study.prep("sent", "VECTOR", "news") == "vec_avg(sent)"
+    assert study.prep("px", "MATRIX", "pv") == "px"
+    assert study.prep("assets", "MATRIX", "fundamental") == "ts_backfill(assets, 63)"
+    assert study.prep("eps", "MATRIX", "analyst") == "ts_backfill(eps, 63)"
 
 
 def test_step2_dataset_without_usable_fields_is_closed() -> None:

@@ -15,24 +15,36 @@ from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ledger import Ledger
 from alpha_orchestrator.factory.models import CellORM, CellState, FieldORM
 
+DESIGN = "v2"  # verdicts reached under an earlier design do not count (reset_old_verdicts)
 FILL_DAYS = 63  # 第 2 步: quarterly data carried one quarter (官方小贴士 10)
 NUMERIC_TYPES = ("MATRIX", "VECTOR")
 
 
 # ---------- before the first run ----------
 def reset_old_verdicts(ledger: Ledger) -> int:
-    """Datasets closed by the logic before design v1 go back to NEW and their verdicts stop
-    counting as evidence (that logic was wrong). Their simulations stay in the ledger and
-    are reused when the same formula comes up again."""
+    """Datasets judged under an earlier design go back to NEW and their verdicts stop
+    counting as evidence (that logic was wrong); their ideas are retired, so they are
+    neither repeated as "already tried" nor fed back as dead ends. Simulations stay in the
+    ledger and are reused when the same formula comes up again."""
+    from alpha_orchestrator.factory.models import IdeaStatus, ResearchIdeaORM
+
     n = 0
     with ledger.session() as s:
+        reset: set[str] = set()
         for c in s.scalars(select(CellORM).where(CellORM.state != CellState.NEW)):
             plan = c.plan or {}
-            if plan.get("design") == "v1":
+            if plan.get("design") == DESIGN:
                 continue
             c.plan = {"legacy": plan}
             c.state, c.stop_reason = CellState.NEW, ""
+            reset.add(c.cell_id)
             n += 1
+        for i in s.scalars(
+            select(ResearchIdeaORM).where(ResearchIdeaORM.status != IdeaStatus.RETIRED)
+        ):
+            cell = s.get(CellORM, i.cell_id)
+            if cell is None or (cell.plan or {}).get("design") != DESIGN or i.cell_id in reset:
+                i.status = IdeaStatus.RETIRED
         if n:
             ledger.log(s, "old_verdicts_reset", count=n)
     return n
@@ -94,11 +106,21 @@ def region_evidence(s: Session) -> dict[str, float]:
 
 
 # ---------- 第 2 步 读字段 ----------
-def prep(field_id: str, field_type: str) -> str:
-    """How a field enters every formula: vectors averaged (官方课), then carried for one
-    quarter so quarterly data is not empty between releases (官方小贴士 10)."""
+# Released a few times a year: carried forward so they are not empty between releases
+# (官方小贴士 10). Everything else (news, sentiment, price-volume, ...) is used as is:
+# "新闻是最讲时效性的东西，你把它填充过来干嘛呢……不是什么都该填的" (官方零基础课).
+LOW_FREQUENCY = frozenset(
+    {"fundamental", "analyst", "earnings", "insiders", "institutions", "shortinterest"}
+)
+
+
+def prep(field_id: str, field_type: str, category: str = "fundamental") -> str:
+    """How a field enters every formula: vectors averaged (官方课); low-frequency data
+    carried for one quarter, everything else left as is."""
     base = f"vec_avg({field_id})" if field_type == "VECTOR" else field_id
-    return f"ts_backfill({base}, {FILL_DAYS})"
+    if category.lower() in LOW_FREQUENCY:
+        return f"ts_backfill({base}, {FILL_DAYS})"
+    return base
 
 
 def load_fields(api: BrainAPI, ledger: Ledger, cell_id: str, config: FactoryConfig) -> int:
@@ -107,6 +129,7 @@ def load_fields(api: BrainAPI, ledger: Ledger, cell_id: str, config: FactoryConf
     with ledger.session() as s:
         cell = _cell(s, cell_id)
         region, delay, universe, dataset = cell.region, cell.delay, cell.universe, cell.dataset_id
+        category = cell.category
     rows = api.datafields(region, delay, universe, dataset)
     floor = config.thresholds.min_coverage
     usable = 0
@@ -124,12 +147,12 @@ def load_fields(api: BrainAPI, ledger: Ledger, cell_id: str, config: FactoryConf
             f.coverage = coverage
             f.alpha_count = int(r.get("alphaCount") or 0)
             f.eligible = ok
-            f.prep = prep(f.field_id, field_type) if ok else ""
+            f.prep = prep(f.field_id, field_type, category) if ok else ""
             s.add(f)
             usable += ok
         cell = _cell(s, cell_id)
         cell.state = CellState.RESEARCH if usable else CellState.EXHAUSTED
-        cell.plan = {**(cell.plan or {}), "design": "v1", "usable_fields": usable}
+        cell.plan = {**(cell.plan or {}), "design": DESIGN, "usable_fields": usable}
         if not usable:
             cell.stop_reason = f"no numeric field covers {floor:.0%} of the universe"
         ledger.log(s, "fields_loaded", cell_id, total=len(rows), usable=usable)
