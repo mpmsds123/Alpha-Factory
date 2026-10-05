@@ -202,8 +202,15 @@ def test_catalog_coverage_below_the_floor_is_never_opened() -> None:
     with ledger.session() as s:
         for name, cov in (("thin", 0.2), ("wide", 0.9)):
             s.add(
-                CellORM(cell_id=f"USA|1|TOP3000|{name}", region="USA", delay=1,
-                        universe="TOP3000", dataset_id=name, category="other", coverage=cov)
+                CellORM(
+                    cell_id=f"USA|1|TOP3000|{name}",
+                    region="USA",
+                    delay=1,
+                    universe="TOP3000",
+                    dataset_id=name,
+                    category="other",
+                    coverage=cov,
+                )
             )
     with ledger.session() as s:
         names = [r.cell_id.split("|")[-1] for r in ds.rank(s, FactoryConfig())]

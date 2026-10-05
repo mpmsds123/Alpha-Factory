@@ -284,6 +284,7 @@ class IdeaFieldORM(FactoryBase):
     field_id: Mapped[str] = mapped_column(String(255))
     score: Mapped[int] = mapped_column(Integer, default=0)  # LLM relevance 0-10
     reason: Mapped[str] = mapped_column(Text, default="")
+    measures: Mapped[str] = mapped_column(Text, default="")  # what it measures, per the LLM
     rank: Mapped[int] = mapped_column(Integer, default=0)  # 1 = most relevant
     candidate_id: Mapped[str | None] = mapped_column(ForeignKey("candidates.id"))
 
