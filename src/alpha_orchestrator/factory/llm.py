@@ -157,6 +157,109 @@ class FactoryLLM:
             if isinstance(c, dict) and isinstance(c.get("expression"), str)
         ]
 
+    # ---------- 设计文档 v1 ----------
+    def idea(
+        self,
+        dataset: dict[str, Any],
+        fields: Sequence[dict[str, str]],
+        papers: Sequence[dict[str, str]],
+        tried: Sequence[str],
+        operators: Sequence[str],
+    ) -> dict[str, Any]:
+        """第 3 步: one research idea grounded in this dataset's fields."""
+        prompt = {
+            "task": "Propose ONE new research idea for an alpha on this dataset.",
+            "dataset": dataset,
+            "fields": list(fields),
+            "papers_naming_this_dataset": list(papers),
+            "ideas_already_tried_here": list(tried),
+            "operators": list(operators),
+            "questions_to_ask_of_the_fields": [
+                "Which quantities are stable, and which change over time?",
+                "What would an anomalous value mean?",
+                "What should a value be compared with: its own history, peers, another field?",
+                "Who wins and who loses when this quantity moves, and why does it persist?",
+            ],
+            "rules": [
+                "The idea must be something these fields can measure.",
+                "Do not repeat an idea already tried here.",
+                "`form` is the simplest expression of the idea with exactly one placeholder "
+                "{X} standing for a field, at most 4 operators, only listed operators.",
+                "`query` is 5-15 English keywords describing the fields the idea needs.",
+            ],
+            "output": {
+                "title": "short name",
+                "mechanism": "who wins, who loses, why it persists",
+                "long": "which stocks to buy",
+                "short": "which stocks to sell",
+                "horizon_days": 21,
+                "form": "rank(ts_delta({X}, 21))",
+                "query": "keywords",
+            },
+        }
+        return self.ask("idea", json.dumps(prompt, ensure_ascii=False), strong=True)
+
+    def score_fields(
+        self, idea: dict[str, Any], fields: Sequence[dict[str, str]]
+    ) -> dict[str, tuple[int, str]]:
+        """第 4 步: relevance 0-10 and a one-line reason for each field."""
+        prompt = {
+            "task": "Rate how well each field can carry this idea, 0 (unrelated) to 10 "
+            "(exactly what the idea needs), with a one-line reason.",
+            "idea": idea,
+            "fields": list(fields),
+            "output": {"scores": [{"id": "field id", "score": 7, "reason": "..."}]},
+        }
+        data = self.ask("score_fields", json.dumps(prompt, ensure_ascii=False))
+        known = {f["id"] for f in fields}
+        out: dict[str, tuple[int, str]] = {}
+        for row in data.get("scores") or []:
+            if not isinstance(row, dict) or row.get("id") not in known:
+                continue
+            try:
+                score = max(0, min(10, int(row.get("score", 0))))
+            except (TypeError, ValueError):
+                continue
+            out[str(row["id"])] = (score, str(row.get("reason", ""))[:300])
+        return out
+
+    def improve(
+        self, idea: dict[str, Any], parents: Sequence[dict[str, Any]], changes: Sequence[str]
+    ) -> list[dict[str, str]]:
+        """第 7 步: up to 3 one-change variants per parent."""
+        prompt = {
+            "task": "For each parent expression propose up to 3 variants. Each variant "
+            "makes exactly ONE change, chosen from the allowed changes, aimed at the "
+            "parent's weakness (failing checks, low fitness, high turnover).",
+            "idea": idea,
+            "parents": list(parents),
+            "allowed_changes": list(changes),
+            "rules": [
+                "Keep the same fields. Do not invent fields or operators.",
+                "Change only one thing per variant and name it in `change`.",
+                "`decay` is the simulation setting (0-512); set it only when the change "
+                "is the decay change, otherwise omit it.",
+            ],
+            "output": {
+                "variants": [
+                    {"parent": "parent id", "expression": "...", "change": "...", "decay": 5}
+                ]
+            },
+        }
+        data = self.ask("improve", json.dumps(prompt, ensure_ascii=False), strong=True)
+        out = []
+        for v in data.get("variants") or []:
+            if isinstance(v, dict) and isinstance(v.get("expression"), str) and v.get("parent"):
+                item = {
+                    "parent": str(v["parent"]),
+                    "expression": v["expression"],
+                    "change": str(v.get("change", ""))[:200],
+                }
+                if isinstance(v.get("decay"), int):
+                    item["decay"] = str(v["decay"])
+                out.append(item)
+        return out
+
     def describe(self, alpha: dict[str, Any]) -> str:
         prompt = {
             "task": "Write the alpha description for submission: 'Idea:' then 'Rationale:', "

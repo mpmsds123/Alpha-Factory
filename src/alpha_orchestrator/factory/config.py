@@ -22,6 +22,7 @@ DEFAULT_CONFIG = REPO_ROOT / "factory.yaml"
 class Budget:
     # 10 simulations in flight x 12 hours x 20 per hour (about 3 minutes each) = 2,400.
     daily_sim_cap: int = 2400
+    v1_daily_cap: int = 500  # 设计文档 第 5 节【提议】: keep the daily scale modest
     active_datasets: int = 1  # 你定的: one dataset at a time
     dataset_sim_cap: int = 2000  # a 4,000-field dataset with signal needs ~1,500
     health_sample: int = 40  # families sampled for the health check (update period, coverage)
