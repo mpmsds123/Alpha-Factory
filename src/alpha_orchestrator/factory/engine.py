@@ -787,8 +787,9 @@ class Engine:
         )
 
     def _suspicious(self, c: CandidateORM) -> bool:
-        t = self.config.thresholds
-        return abs(c.sharpe or 0) > t.suspicious_sharpe or (c.turnover or 0) > t.suspicious_turnover
+        """A fake: |Sharpe| above the line the user set. High turnover is not a fake, it is
+        a failing check that step 7 fixes (raise decay, DECISION_LAYER)."""
+        return abs(c.sharpe or 0) > self.config.thresholds.suspicious_sharpe
 
     def _finish_idea(self, s: Session, idea: ResearchIdeaORM) -> None:
         """第 6 步 (修改后): after step 7, an idea with no version at Sharpe 1 is dead."""

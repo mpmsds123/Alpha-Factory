@@ -214,6 +214,15 @@ def test_a_form_is_valid_even_when_the_dataset_has_only_vector_fields() -> None:
     assert not eng._form_ok("madeup({X})", ops)
 
 
+def test_high_turnover_is_fixed_not_discarded() -> None:
+    from alpha_orchestrator.factory.models import CandidateORM as C
+
+    e = eng.Engine.__new__(eng.Engine)
+    e.config = FactoryConfig()
+    assert not e._suspicious(C(sharpe=0.7, turnover=0.8))  # goes to step 7: raise decay
+    assert e._suspicious(C(sharpe=4.6, turnover=0.1))  # the user's line: a fake
+
+
 def test_luck_line_grows_slowly() -> None:
     assert round(eng.luck_line(10, 0.40), 2) == 1.12
     assert round(eng.luck_line(40, 0.40), 2) == 1.29
