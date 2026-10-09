@@ -37,6 +37,25 @@ def test_step1_skips_datasets_below_sixty_percent_coverage() -> None:
         assert study.choose_dataset(s, FactoryConfig()) == "USA|1|TOP3000|wide"
 
 
+def test_step1_prefers_datasets_the_scanner_judged(tmp_path) -> None:
+    """提案 1: the factory works first on datasets the template scanner already judged,
+    so the two methods are compared on the same datasets."""
+    progress = tmp_path / "数据集进度.csv"
+    progress.write_text(
+        "region,universe,dataset,result\n"
+        "USA,TOP3000,judged,止损\n"
+        "USA,TOP3000,nofields,没有可用字段\n",
+        encoding="utf-8",
+    )
+    ledger = Ledger("sqlite://")
+    with ledger.session() as s:
+        s.add_all([cell("best", 0.9, multiplier=3.0), cell("judged", 0.9), cell("nofields", 0.9)])
+    with ledger.session() as s:
+        cfg = FactoryConfig(scanner_progress=str(progress))
+        assert study.choose_dataset(s, cfg) == "USA|1|TOP3000|judged"
+        assert study.choose_dataset(s, FactoryConfig()) == "USA|1|TOP3000|best"  # off by default
+
+
 def test_old_verdicts_are_reset_and_stop_counting() -> None:
     from alpha_orchestrator.factory import datasets
 

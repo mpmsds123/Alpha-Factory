@@ -4,6 +4,8 @@ Every decision here cites the step of the design document it implements. A decis
 document does not contain does not belong in this file.
 """
 
+import csv
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -57,7 +59,9 @@ def choose_dataset(s: Session, config: FactoryConfig) -> str | None:
     taken on trust."""
     floor = config.thresholds.min_coverage
     evidence = region_evidence(s)
+    judged = scanner_judged(config.scanner_progress)
     best: tuple[float, str] | None = None
+    best_judged: tuple[float, str] | None = None
     for r in datasets.rank(s, config):
         cell = s.get(CellORM, r.cell_id)
         if cell is None or cell.coverage < floor:
@@ -65,7 +69,31 @@ def choose_dataset(s: Session, config: FactoryConfig) -> str | None:
         score = r.score * evidence.get(cell.region, 1.0)
         if best is None or score > best[0]:
             best = (score, r.cell_id)
-    return best[1] if best else None
+        if (cell.region, cell.universe, cell.dataset_id) in judged and (
+            best_judged is None or score > best_judged[0]
+        ):
+            best_judged = (score, r.cell_id)
+    pick = best_judged or best  # 提案 1: datasets the scanner already judged come first
+    return pick[1] if pick else None
+
+
+SCANNER_JUDGED = ("止损", "值得跑")  # 提案 1: scanner verdicts that count for the comparison
+
+
+def scanner_judged(path: str) -> set[tuple[str, str, str]]:
+    """(region, universe, dataset) the template scanner has judged, read from its
+    数据集进度.csv, so both methods are compared on the same datasets. Empty if no file."""
+    if not path:
+        return set()
+    p = Path(path).expanduser()
+    if not p.exists():
+        return set()
+    with p.open(encoding="utf-8", newline="") as f:
+        return {
+            (r["region"], r["universe"], r["dataset"])
+            for r in csv.DictReader(f)
+            if r.get("result") in SCANNER_JUDGED
+        }
 
 
 PRIOR_TESTS = 20  # weight of the overall rate for a region: about two batches of tests
