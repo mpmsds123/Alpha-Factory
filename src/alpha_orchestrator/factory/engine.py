@@ -55,7 +55,8 @@ KEEP_SCORE = 6
 # 第 5 步 (2026-10-05 修改)
 FORMULAS = 5  # per idea; a batch of 10 holds two ideas (scheduler mixes ideas in a batch)
 FORMULA_FIELDS = 8  # distinct quantities the LLM may combine in its formulas
-CONTROL_SHARE = 0.2  # ideas run the cnhkmcp-style way, for the comparison
+# 提案 1 (2026-10-08, approved): no control arm; compared with the template scanner instead
+CONTROL_SHARE = 0.0
 CONTROL_FIELDS = 5  # random fields a control template is expanded over
 # 第 6 步 (2026-10-05 修改): no first-test gate; the best go to step 7
 PASS_SHARPE = 1.0  # an idea dies only if step 7 ends below this

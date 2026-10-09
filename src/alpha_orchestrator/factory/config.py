@@ -86,6 +86,7 @@ class Policy:
 class FactoryConfig:
     db_path: str = "~/.alpha_factory/factory.db"
     reports_dir: str = "reports"
+    scanner_progress: str = ""  # 提案 1: the template scanner's 数据集进度.csv; empty = off
     budget: Budget = field(default_factory=Budget)
     thresholds: Thresholds = field(default_factory=Thresholds)
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -101,6 +102,7 @@ class FactoryConfig:
         return cls(
             db_path=raw.get("db_path", cls.db_path),
             reports_dir=str(reports if reports.is_absolute() else source.parent / reports),
+            scanner_progress=raw.get("scanner_progress", cls.scanner_progress),
             budget=Budget(**raw.get("budget", {})),
             thresholds=Thresholds(**raw.get("thresholds", {})),
             llm=LLMConfig(**raw.get("llm", {})),
