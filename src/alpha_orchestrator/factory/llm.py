@@ -52,6 +52,17 @@ class FactoryLLM:
         self.config = config
         self.ledger = ledger
         self._complete = complete or self._deepseek
+        self.idea_id: str | None = (
+            None  # 第 9 问: set by the engine so each call is billed to an idea
+        )
+        self.unbilled: list[str] = []  # calls made while no idea existed yet (想点子)
+
+    def cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> float:
+        """第 9 问: tokens x the official price (peak, per million tokens, from factory.yaml)."""
+        price = self.config.llm.prices.get(model)
+        if not price:
+            return 0.0
+        return (prompt_tokens * price[0] + completion_tokens * price[1]) / 1_000_000
 
     # ---------- transport ----------
     def _deepseek(self, model: str, system: str, user: str) -> tuple[str, int, int]:
@@ -87,14 +98,29 @@ class FactoryLLM:
             except Exception as exc:  # network, quota, malformed JSON: all recorded
                 last_error = f"{type(exc).__name__}: {exc}"[:500]
                 with self.ledger.session() as s:
-                    s.add(LLMCallORM(purpose=purpose, model=model, ok=False, error=last_error))
+                    s.add(
+                        LLMCallORM(
+                            purpose=purpose,
+                            model=model,
+                            ok=False,
+                            error=last_error,
+                            idea_id=self.idea_id,
+                        )
+                    )
                 continue
             with self.ledger.session() as s:
-                s.add(
-                    LLMCallORM(
-                        purpose=purpose, model=model, prompt_tokens=p_tok, completion_tokens=c_tok
-                    )
+                row = LLMCallORM(
+                    purpose=purpose,
+                    model=model,
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    cost_usd=self.cost(model, p_tok, c_tok),
+                    idea_id=self.idea_id,
                 )
+                s.add(row)
+                s.flush()
+                if self.idea_id is None:
+                    self.unbilled.append(row.id)
             return data
         raise RuntimeError(f"LLM {purpose} failed twice: {last_error}")
 
@@ -164,31 +190,31 @@ class FactoryLLM:
         self,
         dataset: dict[str, Any],
         fields: Sequence[dict[str, str]],
-        papers: Sequence[dict[str, str]],
+        cards: dict[str, str],
+        documents: Sequence[dict[str, str]],
         tried: Sequence[str],
         dead_ends: Sequence[str] = (),
         worked: Sequence[str] = (),
+        rejected: str = "",
     ) -> dict[str, Any]:
-        """第 3 步: one research idea grounded in this dataset's fields. No formula yet.
-        Dead ends and what worked (the knowledge base) keep it off old paths."""
-        prompt = {
+        """第 3 步 + 第 2 问: one research idea grounded in this dataset's fields, citing
+        exactly one piece of evidence the program can check. No formula yet."""
+        prompt: dict[str, Any] = {
             "task": "Propose ONE new research idea for an alpha on this dataset.",
             "dataset": dataset,
             "fields": list(fields),
-            "papers_naming_this_dataset": list(papers),
+            "method_cards": cards,
+            "official_documents": list(documents),
             "ideas_already_tried_here": list(tried),
             "dead_ends_elsewhere": list(dead_ends),
             "what_worked_elsewhere": list(worked),
-            "questions_to_ask_of_the_fields": [
-                "Which quantities are stable, and which change over time?",
-                "What would an anomalous value mean?",
-                "What should a value be compared with: its own history, peers, another field?",
-                "Who wins and who loses when this quantity moves, and why does it persist?",
-            ],
             "rules": [
                 "The idea must be something these fields can measure.",
                 "Do not repeat or rephrase an idea already tried here.",
                 "Do not write any formula.",
+                "Cite exactly one piece of evidence: either one method card by its id, or one "
+                "official document by its id with a quote of 20-400 characters copied word "
+                "for word from that document's text. The quote must support the mechanism.",
             ],
             "output_fields": {
                 "title": "string: short name",
@@ -197,9 +223,24 @@ class FactoryLLM:
                 "short": "string: which stocks to sell",
                 "horizon_days": "integer: how many trading days the effect takes",
                 "query": "string: 5-15 English keywords describing the fields the idea needs",
+                "evidence": "object: {type: card, id} or {type: paper, id, quote}",
             },
         }
+        if rejected:
+            prompt["your_last_answer_was_rejected_because"] = rejected
         return self.ask("idea", json.dumps(prompt, ensure_ascii=False), strong=True)
+
+    def supports(self, mechanism: str, quote: str) -> tuple[bool, str]:
+        """第 2 问 决定 B: does the quoted passage support the stated mechanism?"""
+        prompt = {
+            "task": "Judge whether the quoted passage supports the claim. A passage about a "
+            "different outcome (for example risk instead of returns) does not support it.",
+            "claim": mechanism,
+            "quote": quote,
+            "output_fields": {"supports": "boolean", "why": "string, one sentence"},
+        }
+        data = self.ask("supports", json.dumps(prompt, ensure_ascii=False))
+        return bool(data.get("supports") is True), str(data.get("why", ""))[:300]
 
     def score_fields(
         self, idea: dict[str, Any], fields: Sequence[dict[str, str]]
@@ -231,41 +272,6 @@ class FactoryLLM:
             measures = str(row.get("measures") or row["id"]).strip().lower()[:80]
             out[str(row["id"])] = (score, str(row.get("reason", ""))[:300], measures)
         return out
-
-    def forms(
-        self,
-        idea: dict[str, Any],
-        fields: Sequence[dict[str, str]],
-        operators: Sequence[str],
-        n: int,
-    ) -> list[dict[str, str]]:
-        """第 5 步: n different expressions of the idea, each with one {X} for a field."""
-        prompt = {
-            "task": f"Write {n} DIFFERENT expressions of this idea. Each uses exactly one "
-            "placeholder {X} that will be replaced by one of the fields listed, already "
-            "cleaned (filled and averaged). Each expression must express the idea in a "
-            "different way: for example a change over time, a comparison with the stock's "
-            "own history, a comparison with peers, the level itself, a change of the "
-            "change. Choose windows from the idea's horizon.",
-            "idea": idea,
-            "fields_it_will_be_applied_to": list(fields),
-            "operators": list(operators),
-            "rules": [
-                "Only listed operators. At most 4 operators per expression.",
-                "Exactly one {X} per expression; no other field names.",
-                "No two expressions may differ only by a window length.",
-            ],
-            "output_fields": {
-                "forms": "list of objects with form (string, the expression with {X}) "
-                "and way (string: which way of expressing the idea it is)"
-            },
-        }
-        data = self.ask("forms", json.dumps(prompt, ensure_ascii=False), strong=True)
-        return [
-            {"form": f["form"], "way": str(f.get("way", ""))[:120]}
-            for f in (data.get("forms") or [])
-            if isinstance(f, dict) and isinstance(f.get("form"), str)
-        ]
 
     def formulas(
         self,
@@ -305,39 +311,46 @@ class FactoryLLM:
         ]
 
     def improve(
-        self, idea: dict[str, Any], parents: Sequence[dict[str, Any]], changes: Sequence[str]
+        self, idea: dict[str, Any], parents: Sequence[dict[str, Any]], steps: dict[str, str]
     ) -> list[dict[str, str]]:
-        """第 7 步: up to 3 one-change variants per parent."""
+        """第 7 步 + 第 5 问: up to 3 one-change variants per parent, each naming the step of
+        the logic chain it applies (the change's evidence)."""
         prompt = {
             "task": "For each parent expression propose up to 3 variants. Each variant "
-            "makes exactly ONE change, chosen from the allowed changes, aimed at the "
-            "parent's weakness (failing checks, low fitness, high turnover).",
+            "makes exactly ONE change, aimed at the parent's weakness (failing checks, low "
+            "fitness, high turnover), and applies one step of the logic chain.",
             "idea": idea,
             "parents": list(parents),
-            "allowed_changes": list(changes),
+            "logic_chain": steps,
             "rules": [
                 "Keep the same fields. Do not invent fields or operators.",
-                "Change only one thing per variant and name it in `change`.",
+                "Change only one thing per variant; name the step id in `step` and the "
+                "change in `change`.",
                 "`decay` is the simulation setting (0-512); set it only when the change "
                 "is the decay change, otherwise omit it.",
             ],
             "output_fields": {
                 "variants": "list of objects with parent (string id), expression (string), "
-                "change (string), and decay (integer, only for the decay change)"
+                "step (string, a logic_chain id), change (string), and decay (integer, only "
+                "for the decay change)"
             },
         }
         data = self.ask("improve", json.dumps(prompt, ensure_ascii=False), strong=True)
         out = []
         for v in data.get("variants") or []:
-            if isinstance(v, dict) and isinstance(v.get("expression"), str) and v.get("parent"):
-                item = {
-                    "parent": str(v["parent"]),
-                    "expression": v["expression"],
-                    "change": str(v.get("change", ""))[:200],
-                }
-                if isinstance(v.get("decay"), int):
-                    item["decay"] = str(v["decay"])
-                out.append(item)
+            if not (isinstance(v, dict) and isinstance(v.get("expression"), str)):
+                continue
+            step = str(v.get("step", "")).strip().upper()
+            if not v.get("parent") or step not in steps:
+                continue  # a change without a step on the list has no evidence
+            item = {
+                "parent": str(v["parent"]),
+                "expression": v["expression"],
+                "change": f"{step}: {str(v.get('change', ''))[:180]}",
+            }
+            if isinstance(v.get("decay"), int):
+                item["decay"] = str(v["decay"])
+            out.append(item)
         return out
 
     def describe(self, alpha: dict[str, Any]) -> str:

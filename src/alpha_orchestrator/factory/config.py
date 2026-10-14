@@ -22,9 +22,9 @@ DEFAULT_CONFIG = REPO_ROOT / "factory.yaml"
 class Budget:
     # 10 simulations in flight x 12 hours x 20 per hour (about 3 minutes each) = 2,400.
     daily_sim_cap: int = 2400
-    v1_daily_cap: int = 500  # 设计文档 第 5 节【提议】: keep the daily scale modest
+    v1_daily_cap: int = 1000  # 10/12 定: 工厂每天 1000 次（扫描器 4000）
     active_datasets: int = 1  # 你定的: one dataset at a time
-    dataset_sim_cap: int = 2000  # a 4,000-field dataset with signal needs ~1,500
+    dataset_sim_cap: int = 1000  # 第 6 问: 每个数据集一样的 1000 次，才能和扫描器一对一比
     health_sample: int = 40  # families sampled for the health check (update period, coverage)
     survey_per_stratum: int = 2  # families sampled per stratum for the survey
     survey_max_families: int = 100
@@ -38,7 +38,7 @@ class Budget:
 
 @dataclass
 class Thresholds:
-    noise_sigma: float = 0.40  # measured on this ledger: spread of |Sharpe| for no-signal formulas
+    noise_sigma: float = 0.316  # 第 5 问: 1/sqrt(10 年); 扫描器无信号数据集实测 0.25-0.33
     screen_line: float = (
         0.8  # survey queueing line (not a pass line): noise reaches it 13% of the time
     )
@@ -49,7 +49,7 @@ class Thresholds:
     min_coverage: float = 0.60  # 官方小贴士 10: drop data covering fewer than 60% of stocks
     suspicious_sharpe: float = 3.0  # 你定的: above this the result is checked, never mined
     suspicious_turnover: float = 0.70
-    refine_min_gain: float = 0.15  # 默认值 (待你确认): smaller gains are noise between variants
+    refine_min_gain: float = 0.35  # 第 5 问: 3 个相关 0.7-0.87 的变体里挑最好，噪音就能差 0.34-0.50
     refine_max_rounds: int = 3  # 默认值 (待你确认)
     submit_sharpe: float = 1.58  # 规则手册: consultant D1
     submit_sharpe_chn: float = 2.08
@@ -72,6 +72,10 @@ class LLMConfig:
     key_file: str = "~/secrets/deepseek.json"
     temperature: float = 0.4
     timeout_s: float = 120.0
+    # 第 9 问: peak price per million tokens [input, output], DeepSeek official page 2026-10-14
+    prices: dict[str, list[float]] = field(
+        default_factory=lambda: {"deepseek-v4-pro": [1.32, 3.96], "deepseek-flash": [0.3, 1.2]}
+    )
 
 
 @dataclass
@@ -87,6 +91,8 @@ class FactoryConfig:
     db_path: str = "~/.alpha_factory/factory.db"
     reports_dir: str = "reports"
     scanner_progress: str = ""  # 提案 1: the template scanner's 数据集进度.csv; empty = off
+    # 第 3 问: the scanner's runs folder; the factory only digs datasets it found worth digging
+    scanner_runs: str = ""
     budget: Budget = field(default_factory=Budget)
     thresholds: Thresholds = field(default_factory=Thresholds)
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -103,6 +109,7 @@ class FactoryConfig:
             db_path=raw.get("db_path", cls.db_path),
             reports_dir=str(reports if reports.is_absolute() else source.parent / reports),
             scanner_progress=raw.get("scanner_progress", cls.scanner_progress),
+            scanner_runs=raw.get("scanner_runs", cls.scanner_runs),
             budget=Budget(**raw.get("budget", {})),
             thresholds=Thresholds(**raw.get("thresholds", {})),
             llm=LLMConfig(**raw.get("llm", {})),

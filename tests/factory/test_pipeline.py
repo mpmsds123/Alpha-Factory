@@ -26,6 +26,8 @@ def run(world: World, *, llm: bool = True, minutes: float = 5, **cfg_kw: Any):  
     api = world.platform(**cfg_kw.pop("api", {}))
     cfg = FactoryConfig()
     cfg.budget.min_batch_interval_s = 0
+    cfg.thresholds.noise_sigma = 0.40  # the older research pipeline was calibrated on 0.40
+    cfg.budget.dataset_sim_cap = 2000
     for k, v in cfg_kw.items():
         setattr(cfg.budget, k, v)
     model = FactoryLLM(cfg, ledger, complete=scripted_llm) if llm else None

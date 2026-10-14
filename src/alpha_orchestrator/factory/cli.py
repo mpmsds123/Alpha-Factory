@@ -147,8 +147,9 @@ def run(
     render_record(ledger, record_path)
     msg = (
         f"今日回测 {report.simulations}（失败 {report.failed}），过门槛 {report.ready}，"
-        f"新增待确认 {len(report.reviews)}"
+        f"新存入待挑选 {len(report.reviews)} 条"
     )
+    typer.echo(f"待挑选表格：{Path(cfg.reports_dir) / '工厂_待挑选.csv'}")
     typer.echo(msg + f"；停止原因：{report.stopped_because or '完成'}")
     typer.echo(f"研究记录：{record_path}")
     notify(msg)
