@@ -127,6 +127,25 @@ def test_signal_is_found_improved_and_handed_over_never_submitted(monkeypatch) -
     assert api.submitted == []  # handed over, never submitted
 
 
+def test_llm_only_stops_after_one_idea_and_five_formulas() -> None:
+    ledger = Ledger("sqlite://")
+    api = World({"est": analyst_fields("eps")}).platform()
+    cfg = FactoryConfig()
+    llm = FactoryLLM(cfg, ledger, complete=honest_llm)
+
+    report = eng.run_llm_only(cfg, api, ledger, llm, rng=random.Random(3))
+
+    assert report is not None
+    assert report.title.startswith("EPS revision drift")
+    assert len(report.formulas) == eng.FORMULAS
+    assert report.simulations == 0
+    with ledger.session() as s:
+        candidates = list(s.scalars(select(CandidateORM)))
+    assert len(candidates) == eng.FORMULAS
+    assert all(candidate.status == "QUEUED" for candidate in candidates)
+    assert not api.sims
+
+
 def test_noise_dataset_ideas_die_and_the_dataset_closes() -> None:
     ledger, _api, _report = run(World({"flat": analyst_fields(None)}), minutes=10)
     with ledger.session() as s:
@@ -153,6 +172,27 @@ def test_main_arm_formulas_state_the_idea_with_its_own_fields(monkeypatch) -> No
         tested = idea.extra["test_fields"]
         quantities = {" ".join(f.split("_")[1:3]) for f in tested}
         assert len(quantities) == len(tested)  # never fy1 and fy2 of the same thing
+
+
+def test_main_formulas_deduplicate_outer_rank_and_zscore_shells() -> None:
+    proposed = [
+        {"form": "rank(ts_delta(signal, 21))", "why": "rank shell"},
+        {"form": "zscore(ts_delta(signal, 21))", "why": "zscore shell"},
+        {"form": "ts_delta(signal, 63)", "why": "same shape and other window"},
+        {"form": "subtract(signal, benchmark)", "why": "different relation"},
+    ]
+
+    formulas = eng._main_formulas(
+        proposed,
+        {"signal": "MATRIX", "benchmark": "MATRIX"},
+        {"signal": "signal", "benchmark": "benchmark"},
+        {"rank", "zscore", "ts_delta", "subtract"},
+    )
+
+    assert [formula for formula, _why, _field in formulas] == [
+        "rank(ts_delta(signal, 21))",
+        "subtract(signal, benchmark)",
+    ]
 
 
 def test_control_arm_expands_one_template_over_random_fields(monkeypatch) -> None:  # type: ignore[no-untyped-def]
