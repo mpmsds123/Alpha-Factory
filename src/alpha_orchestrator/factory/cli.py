@@ -91,11 +91,15 @@ def login(
 @app.command()
 def run(
     minutes: Annotated[float, typer.Option(help="最长运行分钟数")] = 720,
+    llm_only: Annotated[
+        bool,
+        typer.Option("--llm-only", help="只生成 1 个点子和 5 个公式，不发起回测"),
+    ] = False,
     config: ConfigOpt = DEFAULT_CONFIG,
 ) -> None:
     """跑一天（设计文档 v1）：选数据集 → 读字段 → 想点子 → 缩字段 → 测前 10 → 判断 → 改进 →
     排除运气 → 待确认。"""
-    from alpha_orchestrator.factory.engine import run_day
+    from alpha_orchestrator.factory.engine import run_day, run_llm_only
     from alpha_orchestrator.factory.record import render_record
 
     cfg, ledger = _ctx(config)
@@ -111,6 +115,17 @@ def run(
     api = _api()
     try:
         api.client.session.ensure()
+        if llm_only:
+            preview = run_llm_only(cfg, api, ledger, llm)
+            if preview is None:
+                typer.echo("没有可生成点子的数据集；回测次数 = 0")
+                return
+            typer.echo(f"点子：{preview.title}")
+            typer.echo(f"机制：{preview.mechanism}")
+            for index, formula in enumerate(preview.formulas, 1):
+                typer.echo(f"公式 {index}：{formula}")
+            typer.echo("回测次数 = 0")
+            return
         report = run_day(
             cfg,
             api,

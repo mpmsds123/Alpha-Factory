@@ -128,6 +128,13 @@ class Engine:
             self._close_dataset(cell_id)
         return moved
 
+    def generate_one(self) -> str | None:
+        """Create exactly one idea through formulas, without running a simulation."""
+        cell_id = self._current_dataset() or self._open_dataset()
+        if cell_id is None or self._dataset_finished(cell_id):
+            return None
+        return self._new_idea(cell_id)
+
     def _current_dataset(self) -> str | None:
         with self.ledger.session() as s:
             for c in s.scalars(select(CellORM).where(CellORM.state == CellState.RESEARCH)):
@@ -205,7 +212,7 @@ class Engine:
             self.ledger.log(s, "dataset_closed", cell_id, outcome=outcome, ideas=len(ideas))
 
     # ======================= 第 3 步 想点子 =======================
-    def _new_idea(self, cell_id: str) -> bool:
+    def _new_idea(self, cell_id: str) -> str | None:
         with self.ledger.session() as s:
             cell = s.get(CellORM, cell_id)
             assert cell is not None
@@ -243,7 +250,7 @@ class Engine:
         with self.ledger.session() as s:
             if card is None:
                 self.ledger.log(s, "idea_failed", cell_id, reason="no idea after 2 tries")
-                return False
+                return None
             idea = ResearchIdeaORM(
                 cell_id=cell_id,
                 title=str(card.get("title", ""))[:300],
@@ -260,7 +267,7 @@ class Engine:
             self.ledger.log(s, "idea_created", cell_id, idea=idea_id, title=idea.title, arm=arm)
         self._narrow(idea_id)
         self._queue_tests(idea_id)
-        return True
+        return idea_id
 
     # ======================= 第 4 步 缩字段 =======================
     def _narrow(self, idea_id: str) -> None:
@@ -871,7 +878,7 @@ def _main_formulas(
     operators: set[str],
 ) -> list[tuple[str, str, str | None]]:
     """Formulas written with field ids: valid, at most MAX_FORM_OPERATORS as written, no
-    window-only duplicates; each field id is then replaced by its prepared form."""
+    window-only or outer rank/zscore duplicates; fields are then replaced by their prep."""
     plain = {
         fid: "MATRIX" for fid in types
     }  # checked as written; vectors get their reducer in prep
@@ -882,7 +889,7 @@ def _main_formulas(
         v = check(text, operators=operators, fields=plain)
         if not v.ok or v.operator_count > MAX_FORM_OPERATORS or not (v.fields_used & set(types)):
             continue
-        shape = re.sub(r"\d+(\.\d+)?", "#", re.sub(r"\s+", "", text))
+        shape = _formula_shape(text)
         if shape in seen:
             continue
         seen.add(shape)
@@ -892,6 +899,30 @@ def _main_formulas(
         first = sorted(v.fields_used & set(types))[0]
         out.append((expr, f.get("way", ""), first))
     return out
+
+
+def _formula_shape(expression: str) -> str:
+    """Canonical comparison shape, ignoring windows and cosmetic outer scaling."""
+    shape = re.sub(r"\s+", "", expression)
+    while True:
+        match = re.fullmatch(r"(?:rank|zscore)\((.*)\)", shape, flags=re.IGNORECASE)
+        if match is None:
+            break
+        inner = match.group(1)
+        depth = 0
+        encloses_whole_expression = True
+        for char in inner:
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            elif char == "," and depth == 0:
+                encloses_whole_expression = False
+                break
+        if not encloses_whole_expression:
+            break
+        shape = inner
+    return re.sub(r"\d+(\.\d+)?", "#", shape)
 
 
 def _knowledge(s: Session) -> tuple[list[str], list[str]]:
@@ -976,6 +1007,47 @@ class DayReport:
     ready: int = 0
     reviews: list[str] = field(default_factory=list)
     stopped_because: str = ""
+
+
+@dataclass
+class LLMOnlyReport:
+    idea_id: str
+    title: str
+    mechanism: str
+    formulas: list[str]
+    simulations: int = 0
+
+
+def run_llm_only(
+    config: FactoryConfig,
+    api: BrainAPI,
+    ledger: Ledger,
+    llm: FactoryLLM,
+    *,
+    rng: random.Random | None = None,
+    meta: Metadata | None = None,
+) -> LLMOnlyReport | None:
+    """Generate one idea and its formulas, deliberately never invoking Simulator."""
+    from alpha_orchestrator.factory.daily import catalog_is_stale
+
+    meta = meta or Metadata.fetch(api)
+    if catalog_is_stale(ledger):
+        catalog.refresh(api, ledger, config)
+    study.reset_old_verdicts(ledger)
+    idea_id = Engine(api, ledger, config, meta, llm, rng).generate_one()
+    if idea_id is None:
+        return None
+    with ledger.session() as s:
+        idea = s.get(ResearchIdeaORM, idea_id)
+        assert idea is not None
+        formulas = [str(row["expression"]) for row in (idea.extra or {}).get("formulas", [])]
+        ledger.log(s, "llm_only_done", idea.cell_id, idea=idea_id, formulas=len(formulas))
+        return LLMOnlyReport(
+            idea_id=idea_id,
+            title=idea.title,
+            mechanism=idea.mechanism,
+            formulas=formulas,
+        )
 
 
 def run_day(

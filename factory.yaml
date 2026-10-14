@@ -1,8 +1,10 @@
 # Alpha 工厂配置。每个数字的出处见 src/alpha_orchestrator/factory/config.py。
 db_path: ~/.alpha_factory/factory.db     # 账本，放在仓库外
 reports_dir: reports                     # 面板（含真实表达式，已 gitignore）
+scanner_progress: ~/Desktop/因子挖掘/scanner/runs/数据集进度.csv   # 提案 1：先做扫描器已判过的数据集，便于两种方法对比
 
 budget:
+  v1_daily_cap: 1500         # 2026-10-05 临时上限：当日已用约 1,150 次，首跑只放行小批量
   daily_sim_cap: 2400        # 并发 10 × 12 小时 × 每小时 20 次（约 3 分钟一次）
   active_datasets: 1         # 你定的：一次只做一个数据集
   dataset_sim_cap: 2000      # 一个数据集最多花多少次回测
