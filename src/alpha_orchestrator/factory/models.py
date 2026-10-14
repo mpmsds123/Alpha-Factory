@@ -232,6 +232,7 @@ class LLMCallORM(FactoryBase):
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     ok: Mapped[bool] = mapped_column(Boolean, default=True)
     error: Mapped[str | None] = mapped_column(Text)
+    idea_id: Mapped[str | None] = mapped_column(String(36))  # 第 9 问: which idea paid for it
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 

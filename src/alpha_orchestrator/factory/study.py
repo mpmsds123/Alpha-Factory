@@ -5,6 +5,7 @@ document does not contain does not belong in this file.
 """
 
 import csv
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ledger import Ledger
 from alpha_orchestrator.factory.models import CellORM, CellState, FieldORM
 
-DESIGN = "v2"  # verdicts reached under an earlier design do not count (reset_old_verdicts)
+DESIGN = "v3"  # 10/14 统计题设计; earlier verdicts do not count (reset_old_verdicts)
 FILL_DAYS = 63  # 第 2 步: quarterly data carried one quarter (官方小贴士 10)
 NUMERIC_TYPES = ("MATRIX", "VECTOR")
 
@@ -54,9 +55,18 @@ def reset_old_verdicts(ledger: Ledger) -> int:
 
 # ---------- 第 1 步 选数据集 ----------
 def choose_dataset(s: Session, config: FactoryConfig) -> str | None:
-    """The best-scoring dataset not yet worked whose catalog coverage is known and at least
-    `min_coverage`, or None when none is left. Unknown coverage (0 in the catalog) is not
-    taken on trust."""
+    """第 3 问: only datasets the template scanner found worth digging (first-pass hit rate
+    >= 2%), highest hit rate first, each once under this design. Without the scanner's
+    folder, the old ranking (best score, coverage known and >= min_coverage)."""
+    if config.scanner_runs:
+        for w in scanner_worth(config.scanner_runs):
+            cell = s.get(CellORM, f"{w['region']}|1|{w['universe']}|{w['dataset']}")
+            if cell is None:
+                continue
+            if cell.state != CellState.NEW and (cell.plan or {}).get("design") == DESIGN:
+                continue  # already dug under this design
+            return cell.cell_id
+        return None
     floor = config.thresholds.min_coverage
     evidence = region_evidence(s)
     judged = scanner_judged(config.scanner_progress)
@@ -73,8 +83,59 @@ def choose_dataset(s: Session, config: FactoryConfig) -> str | None:
             best_judged is None or score > best_judged[0]
         ):
             best_judged = (score, r.cell_id)
-    pick = best_judged or best  # 提案 1: datasets the scanner already judged come first
+    pick = best_judged or best
     return pick[1] if pick else None
+
+
+WORTH_RATE = 0.02  # 第 3 问: the scanner's "worth digging" line (its SPRT keeps >= 2%)
+FIRST_PASS_FILE = re.compile(r"^([A-Z]+)_(.+?)(?:_v\d+)?_1阶\.csv$")
+FIELDS_FILE = re.compile(r"^fields_([A-Z]+)_([A-Z0-9]+)_(\d)_(.+)\.json$")
+
+
+def scanner_worth(folder: str) -> list[dict[str, Any]]:
+    """Datasets in the scanner's first-pass results with |Sharpe| >= 1 and turnover 1-70%
+    in at least 2% of simulations, highest rate first. Each row also carries the scanner's
+    regular-line count (Sharpe >= 1.58, Fitness >= 1) for the comparison (第 8 问)."""
+    root = Path(folder).expanduser()
+    if not root.is_dir():
+        return []
+    universe: dict[tuple[str, str], str] = {}
+    for f in root.iterdir():
+        m = FIELDS_FILE.match(f.name)
+        if m and m.group(3) == "1":
+            universe[(m.group(1), m.group(4))] = m.group(2)
+    rows: list[dict[str, Any]] = []
+    for f in sorted(root.iterdir()):
+        m = FIRST_PASS_FILE.match(f.name)
+        if not m or (m.group(1), m.group(2)) not in universe:
+            continue
+        n = pp = regular = 0
+        with f.open(encoding="utf-8", newline="") as fh:
+            for r in csv.DictReader(fh):
+                try:
+                    sharpe, turnover = float(r["sharpe"]), float(r["turnover"])
+                    fitness = float(r.get("fitness") or 0)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                n += 1
+                if 0.01 <= turnover <= 0.70 and abs(sharpe) >= 1:
+                    pp += 1
+                    if abs(sharpe) >= 1.58 and abs(fitness) >= 1:
+                        regular += 1
+        if n and pp / n >= WORTH_RATE:
+            region, dataset = m.group(1), m.group(2)
+            rows.append(
+                {
+                    "region": region,
+                    "universe": universe[(region, dataset)],
+                    "dataset": dataset,
+                    "sims": n,
+                    "rate": pp / n,
+                    "regular": regular,
+                }
+            )
+    rows.sort(key=lambda r: -float(r["rate"]))
+    return rows
 
 
 SCANNER_JUDGED = ("止损", "值得跑")  # 提案 1: scanner verdicts that count for the comparison

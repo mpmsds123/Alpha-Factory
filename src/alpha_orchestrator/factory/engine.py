@@ -18,10 +18,10 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from alpha_orchestrator.brain.api import BrainAPI
-from alpha_orchestrator.factory import catalog, study
+from alpha_orchestrator.factory import catalog, evidence, study
 from alpha_orchestrator.factory import generators as gen
+from alpha_orchestrator.factory.cards import CHANGE_CARDS, IDEA_CARDS
 from alpha_orchestrator.factory.config import FactoryConfig
-from alpha_orchestrator.factory.datasets import PAPER_SOURCES
 from alpha_orchestrator.factory.ideas import tokens
 from alpha_orchestrator.factory.ledger import Ledger
 from alpha_orchestrator.factory.llm import FactoryLLM
@@ -32,7 +32,6 @@ from alpha_orchestrator.factory.models import (
     CellState,
     FieldORM,
     IdeaFieldORM,
-    IdeaORM,
     IdeaStatus,
     ResearchIdeaORM,
     ReviewORM,
@@ -40,14 +39,13 @@ from alpha_orchestrator.factory.models import (
 )
 from alpha_orchestrator.factory.research import Metadata
 from alpha_orchestrator.factory.scheduler import QUOTA_RESERVE, Simulator
-from alpha_orchestrator.factory.select import select_today
+from alpha_orchestrator.factory.select import store_passing
 from alpha_orchestrator.factory.validate import check
 
 # 第 3 步
 FIELD_LINES = 200  # field families shown to the LLM
-PAPERS = 3
-PAPER_CHARS = 3000
-MAX_FORM_OPERATORS = 4
+MAX_FORM_OPERATORS = 4  # 第 4 问: 4 + one per round x 4 rounds = 8, the Power Pool limit
+IDEA_FAILS_TO_STOP = 2  # 第 6 问: 2 failed ideas in a row (cost cap) -> the dataset is done
 # 第 4 步
 COARSE = 300
 SCORE_BATCH = 100
@@ -55,43 +53,36 @@ KEEP_SCORE = 6
 # 第 5 步 (2026-10-05 修改)
 FORMULAS = 5  # per idea; a batch of 10 holds two ideas (scheduler mixes ideas in a batch)
 FORMULA_FIELDS = 8  # distinct quantities the LLM may combine in its formulas
-# 提案 1 (2026-10-08, approved): no control arm; compared with the template scanner instead
-CONTROL_SHARE = 0.0
-CONTROL_FIELDS = 5  # random fields a control template is expanded over
-# 第 6 步 (2026-10-05 修改): no first-test gate; the best go to step 7
-PASS_SHARPE = 1.0  # an idea dies only if step 7 ends below this
-DEAD_IN_ROW = 3  # 提议
-IDEAS_PER_DATASET = 10  # 提议
-# 第 7 步
+# 第 3 问 (10/14): no control arm; the template scanner is the control
+# 第 4 问 (10/14): an idea whose best first formula is under the luck line of its tries
+# (0.81 for 5 tries at noise 0.316) cannot be told from noise and stops there
+GATE_CONFIDENCE = 0.95
+# 第 1 问: an idea "hits" when one of its formulas passes the regular line (_passes_floor)
+# 第 5 问 (10/14)
 PARENTS = 2
 VARIANTS = 3
-DRY_ROUNDS = 2  # 提议
-MAX_ROUNDS = 4  # 提议
-CHANGES = (  # 你的 DECISION_LAYER: fix the first failing check; never tune only to pass
-    "HIGH_TURNOVER: raise the decay setting, or smooth the signal over time",
-    "LOW_TURNOVER: use a shorter window",
-    "CONCENTRATED_WEIGHT: rank the signal, or use fewer fields",
-    "LOW_SUB_UNIVERSE_SHARPE: compare within size buckets, or scale by trading volume",
-    "LOW_SHARPE or LOW_FITNESS: turn a raw value into a ratio or a comparison with peers or "
-    "with its own history; or make it robust to outliers once",
-    "SELF_CORRELATION or PROD_CORRELATION: change the structure or the field, not parameters",
-    "change a window to one matching the idea's horizon",
-)
+DRY_ROUNDS = 2  # a parent stops after 2 rounds without a 0.35 gain
+MAX_ROUNDS = 4  # 4 + 4 operators = 8, the Power Pool limit
 SAME_FAIL_LIMIT = 3  # alpha-mining: 3 variants failing the same check -> change the formula
 # 第 5 节
 ACTIVE_IDEAS = 2  # 提议
 CHUNK = 20  # simulations between decisions
 NO_FLIP_REGIONS = frozenset({"CHN"})  # 第 6 步: short side is constrained in China
-ROBUST_ROLES = frozenset({"neutralization", "sub_universe"})  # 第 8 步
+ROBUST_ROLES = frozenset({"neutralization"})  # 第 7 问: the platform checks sub-universe
 PENDING = (CandidateStatus.QUEUED, CandidateStatus.RUNNING)
 WORD = re.compile(r"[a-z0-9]+")
 
 
 def luck_line(n: int, sigma: float) -> float:
-    """第 8 步: the Sharpe pure noise exceeds with only 5% chance after n tries."""
+    """The |Sharpe| the best of n pure-noise formulas exceeds with only 5% chance."""
     n = max(n, 1)
-    p = 1 - 0.95 ** (1 / n)
+    p = 1 - GATE_CONFIDENCE ** (1 / n)
     return sigma * NormalDist().inv_cdf(1 - p / 2)
+
+
+def first_gate(n: int, sigma: float) -> float:
+    """第 4 问: 0.81 for 5 first formulas at noise 0.316."""
+    return luck_line(n, sigma)
 
 
 class Engine:
@@ -151,6 +142,10 @@ class Engine:
                 return None
             if study.load_fields(self.api, self.ledger, cell_id, self.config):
                 with self.ledger.session() as s:
+                    cell = s.get(CellORM, cell_id)
+                    assert cell is not None
+                    # 第 6 问: the 1000-simulation budget counts from here
+                    cell.plan = {**(cell.plan or {}), "sims_at_open": cell.sims_used}
                     self.ledger.log(s, "dataset_opened", cell_id)
                 return cell_id
         return None
@@ -169,25 +164,17 @@ class Engine:
             )
 
     def _dataset_finished(self, cell_id: str) -> bool:
-        """第 6 步: 3 dead ideas in a row, or 10 ideas, or the dataset budget is spent."""
+        """第 6 问: the dataset's 1000 simulations are spent, or the LLM failed to give a
+        valid new idea IDEA_FAILS_TO_STOP times in a row."""
         with self.ledger.session() as s:
             cell = s.get(CellORM, cell_id)
-            ideas = list(
-                s.scalars(
-                    select(ResearchIdeaORM)
-                    .where(
-                        ResearchIdeaORM.cell_id == cell_id,
-                        ResearchIdeaORM.status != IdeaStatus.RETIRED,
-                    )
-                    .order_by(ResearchIdeaORM.created_at)
-                )
-            )
-            if cell is None or cell.sims_used >= self.config.budget.dataset_sim_cap:
+            if cell is None:
                 return True
-            if len(ideas) >= IDEAS_PER_DATASET:
+            plan = cell.plan or {}
+            spent = cell.sims_used - int(plan.get("sims_at_open", 0))
+            if spent >= self.config.budget.dataset_sim_cap:
                 return True
-            tail = [i.status for i in ideas[-DEAD_IN_ROW:]]
-            return len(tail) == DEAD_IN_ROW and all(t == IdeaStatus.DEAD for t in tail)
+            return int(plan.get("idea_fail_streak", 0)) >= IDEA_FAILS_TO_STOP
 
     def _close_dataset(self, cell_id: str) -> None:
         with self.ledger.session() as s:
@@ -202,17 +189,30 @@ class Engine:
                     )
                 )
             )
-            worked = any(i.status == IdeaStatus.DONE for i in ideas)
+            worked = sum(1 for i in ideas if i.status == IdeaStatus.DONE)
             outcome = "signal" if worked else "noise"
+            plan = cell.plan or {}
+            spent = cell.sims_used - int(plan.get("sims_at_open", 0))
             cell.state = CellState.EXHAUSTED
-            cell.plan = {**(cell.plan or {}), "verdict": outcome, "outcome": outcome}
-            cell.stop_reason = f"{len(ideas)} ideas, " + (
-                "some reached Sharpe 1" if worked else "none reached Sharpe 1"
+            cell.plan = {**plan, "verdict": outcome, "outcome": outcome, "sims_spent": spent}
+            why = (
+                "budget spent"
+                if spent >= self.config.budget.dataset_sim_cap
+                else "no valid new idea twice in a row"
+            )
+            cell.stop_reason = (
+                f"{why}; {len(ideas)} ideas, {worked} reached the regular line, {spent} sims"
             )
             self.ledger.log(s, "dataset_closed", cell_id, outcome=outcome, ideas=len(ideas))
 
     # ======================= 第 3 步 想点子 =======================
     def _new_idea(self, cell_id: str) -> str | None:
+        """第 3 步 + 第 2、6 问: ask for one idea with evidence; the program checks format,
+        evidence and duplicates (and, for a paper, whether the quote supports the claim).
+        A rejected answer is sent back with its reason once; two rejections in a row count
+        as one failure for the dataset (第 6 问)."""
+        from alpha_orchestrator.factory.models import LLMCallORM
+
         with self.ledger.session() as s:
             cell = s.get(CellORM, cell_id)
             assert cell is not None
@@ -226,31 +226,77 @@ class Engine:
             }
             fields = study.usable_fields(s, cell_id)
             lines = _family_lines(fields)
-            papers = _papers_naming(s, cell.dataset_id)
-            tried = list(
-                s.scalars(
-                    select(ResearchIdeaORM.title).where(
+            meaning = " ".join(
+                [cell.dataset_name, cell.description[:1500]]
+                + [f["description"] for f in lines[:60]]
+            )
+            documents = evidence.retrieve(meaning, evidence.official_docs(s))
+            earlier = [
+                {
+                    "title": i.title,
+                    "query": i.query,
+                    "evidence_key": str((i.extra or {}).get("evidence_key", "")),
+                }
+                for i in s.scalars(
+                    select(ResearchIdeaORM).where(
                         ResearchIdeaORM.cell_id == cell_id,
                         ResearchIdeaORM.status != IdeaStatus.RETIRED,
                     )
                 )
-            )
+            ]
             dead_ends, worked = _knowledge(s)
-            n_ideas = len(tried)
-        arm = "control" if self.rng.random() < CONTROL_SHARE else "main"
+        docs_by_id = {d["id"]: d for d in documents}
+        self.llm.idea_id = None
+        self.llm.unbilled = []
         card: dict[str, Any] | None = None
+        rejected = ""
+        reasons: list[str] = []
         for _ in range(2):
             try:
-                answer = self.llm.idea(brief, lines, papers, tried, dead_ends, worked)
-            except RuntimeError:
+                answer = self.llm.idea(
+                    brief,
+                    lines,
+                    IDEA_CARDS,
+                    documents,
+                    [e["title"] for e in earlier],
+                    dead_ends,
+                    worked,
+                    rejected,
+                )
+            except RuntimeError as exc:
+                reasons.append(str(exc)[:200])
                 continue
-            if str(answer.get("title", "")).strip() and str(answer.get("mechanism", "")).strip():
+            ok, rejected = evidence.check_idea(answer, docs_by_id)
+            if ok:
+                same = evidence.duplicate_of(answer, earlier)
+                if same:
+                    ok, rejected = False, f"it repeats the idea already tried here: {same}"
+            ev = answer.get("evidence") or {}
+            if ok and str(ev.get("type", "")).lower() == "paper":
+                try:
+                    supported, why = self.llm.supports(
+                        str(answer.get("mechanism", "")), str(ev.get("quote", ""))
+                    )
+                except RuntimeError:
+                    supported, why = False, "the support check failed"
+                if not supported:
+                    ok, rejected = False, f"the quote does not support the mechanism: {why}"
+            if ok:
                 card = answer
                 break
+            reasons.append(rejected)
         with self.ledger.session() as s:
+            cell = s.get(CellORM, cell_id)
+            assert cell is not None
+            plan = dict(cell.plan or {})
             if card is None:
-                self.ledger.log(s, "idea_failed", cell_id, reason="no idea after 2 tries")
+                plan["idea_fail_streak"] = int(plan.get("idea_fail_streak", 0)) + 1
+                cell.plan = plan
+                self.ledger.log(s, "idea_failed", cell_id, reasons=reasons)
                 return None
+            plan["idea_fail_streak"] = 0
+            cell.plan = plan
+            ev = card["evidence"]
             idea = ResearchIdeaORM(
                 cell_id=cell_id,
                 title=str(card.get("title", ""))[:300],
@@ -259,18 +305,39 @@ class Engine:
                 short_side=str(card.get("short", "")),
                 horizon_days=_int(card.get("horizon_days"), 21),
                 query=str(card.get("query", "")),
-                extra={"papers": [p["title"] for p in papers], "arm": arm, "n": n_ideas},
+                extra={
+                    "evidence": {
+                        "type": str(ev.get("type", "")).lower(),
+                        "id": str(ev.get("id", "")).strip().upper()
+                        if str(ev.get("type", "")).lower() == "card"
+                        else str(ev.get("id", "")).strip(),
+                        "quote": str(ev.get("quote", ""))[: evidence.QUOTE_MAX],
+                        "title": docs_by_id.get(str(ev.get("id", "")).strip(), {}).get(
+                            "title", IDEA_CARDS.get(str(ev.get("id", "")).strip().upper(), "")
+                        ),
+                    },
+                    "evidence_key": evidence.evidence_key(card),
+                    "rejected_before": reasons,
+                    "n": len(earlier),
+                },
             )
             s.add(idea)
             s.flush()
             idea_id = idea.id
-            self.ledger.log(s, "idea_created", cell_id, idea=idea_id, title=idea.title, arm=arm)
+            for call_id in self.llm.unbilled:
+                call = s.get(LLMCallORM, call_id)
+                if call is not None:
+                    call.idea_id = idea_id  # 第 9 问: the calls that produced it are its cost
+            self.llm.unbilled = []
+            self.ledger.log(s, "idea_created", cell_id, idea=idea_id, title=idea.title)
+        self.llm.idea_id = idea_id
         self._narrow(idea_id)
         self._queue_tests(idea_id)
         return idea_id
 
     # ======================= 第 4 步 缩字段 =======================
     def _narrow(self, idea_id: str) -> None:
+        self.llm.idea_id = idea_id
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
             assert idea is not None
@@ -335,23 +402,17 @@ class Engine:
         return chosen
 
     def _queue_tests(self, idea_id: str) -> int:
-        """Main arm: the LLM writes FORMULAS formulas stating the idea with its own fields.
-        Control arm (cnhkmcp style, for the comparison): one template with a slot, expanded
-        over randomly drawn usable fields."""
+        """第 5 步 + 第 4 问: the LLM writes FORMULAS formulas stating the idea with its own
+        fields (1-3 per formula, at most MAX_FORM_OPERATORS operators)."""
+        self.llm.idea_id = idea_id
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
             assert idea is not None
             if idea.status == IdeaStatus.DEAD:
                 return 0
-            arm = idea.extra.get("arm", "main")
             usable = {f.field_id: f for f in study.usable_fields(s, idea.cell_id)}
-            if arm == "main":
-                rows = self._distinct_fields(s, idea_id, FORMULA_FIELDS)
-                pool = [usable[r.field_id] for r in rows if r.field_id in usable]
-            else:
-                pool = list(usable.values())
-                self.rng.shuffle(pool)
-                pool = pool[:CONTROL_FIELDS]
+            rows = self._distinct_fields(s, idea_id, FORMULA_FIELDS)
+            pool = [usable[r.field_id] for r in rows if r.field_id in usable]
             info = [{"id": f.field_id, "description": f.description[:200]} for f in pool]
             card = _card(idea)
             types = {f.field_id: f.type for f in pool}
@@ -360,18 +421,8 @@ class Engine:
         exprs: list[tuple[str, str, str | None]] = []  # (expression, why, field)
         for _ in range(2):
             try:
-                if arm == "main":
-                    proposed = self.llm.formulas(card, info, ops, FORMULAS)
-                    exprs = _main_formulas(proposed, types, preps, self.meta.operators)[:FORMULAS]
-                else:
-                    proposed = self.llm.forms(card, info, ops, 1)
-                    forms = _distinct_forms(proposed, self.meta.operators)[:1]
-                    expanded: list[tuple[str, str, str | None]] = [
-                        (fm["form"].replace("{X}", preps[fid]), fm["way"], fid)
-                        for fm in forms
-                        for fid in preps
-                    ]
-                    exprs = expanded[:FORMULAS]
+                proposed = self.llm.formulas(card, info, ops, FORMULAS)
+                exprs = _main_formulas(proposed, types, preps, self.meta.operators)[:FORMULAS]
             except RuntimeError:
                 continue
             if exprs:
@@ -402,7 +453,6 @@ class Engine:
                 "tests_queued",
                 idea.cell_id,
                 idea=idea_id,
-                arm=arm,
                 queued=added,
                 formulas=[e for e, _, _ in exprs],
             )
@@ -428,8 +478,9 @@ class Engine:
         return 0
 
     def _judge(self, idea_id: str) -> None:
-        """第 6 步 (修改后): no gate. The best results go to step 7; a negative one is
-        mirrored first (never in CHN)."""
+        """第 4 问: the best first formula must clear the luck line of the tries (0.81 for
+        5 at noise 0.316); then the best two go to step 7, a negative one mirrored first
+        (第 3 问: direct mirroring, never in CHN)."""
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
             assert idea is not None
@@ -440,10 +491,18 @@ class Engine:
             usable.sort(key=lambda c: -abs(c.sharpe or 0))
             best = usable[:PARENTS]
             idea.best_sharpe = max((abs(c.sharpe or 0) for c in usable), default=0.0)
-            if not best:
+            gate = first_gate(len(done), self.config.thresholds.noise_sigma)
+            if not best or idea.best_sharpe < gate:
                 idea.status = IdeaStatus.DEAD
-                idea.extra = {**idea.extra, "why_dead": f"no usable result among {len(done)}"}
-                self.ledger.log(s, "idea_dead", idea.cell_id, idea=idea_id, tested=len(done))
+                idea.extra = {
+                    **idea.extra,
+                    "gate": round(gate, 3),
+                    "why_dead": f"first {len(done)} formulas best |Sharpe| "
+                    f"{idea.best_sharpe:.2f} < {gate:.2f}: cannot be told from noise",
+                }
+                self.ledger.log(
+                    s, "idea_dead", idea.cell_id, idea=idea_id, tested=len(done), gate=gate
+                )
                 return
             idea.status = IdeaStatus.PROMISING
             for c in best:
@@ -459,7 +518,11 @@ class Engine:
                         parent=c,
                         change="mirrored",
                     )
-            idea.extra = {**idea.extra, "parents_from": [c.id for c in best]}
+            idea.extra = {
+                **idea.extra,
+                "gate": round(gate, 3),
+                "parents_from": [c.id for c in best],
+            }
             self.ledger.log(
                 s,
                 "idea_to_improve",
@@ -521,8 +584,9 @@ class Engine:
                 for cid, c in rows.items()
                 if c is not None
             ]
+        self.llm.idea_id = idea_id
         try:
-            variants = self.llm.improve(card, payload, CHANGES)
+            variants = self.llm.improve(card, payload, CHANGE_CARDS)
         except RuntimeError:
             variants = []
         with self.ledger.session() as s:
@@ -564,7 +628,7 @@ class Engine:
                 self._finish_idea(s, idea)
 
     def _settle_round(self, idea_id: str) -> None:
-        """第 7 步: a variant replaces its parent only when it is 0.15 better."""
+        """第 5 问: a variant replaces its parent only when it is 0.35 better."""
         gain = self.config.thresholds.refine_min_gain
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
@@ -671,20 +735,13 @@ class Engine:
             )
             if any(k.status in PENDING for k in kids):
                 continue
+            # 第 7 问: no luck line (the regular line is far above it); the other
+            # neutralization must keep robust_keep_ratio of the Sharpe
             base = parent.sharpe or 0.0
             ratios = {k.role: round((k.sharpe or 0.0) / base, 3) if base else 0.0 for k in kids}
             tries = self._tries(s, extra.get("idea"))
-            line = luck_line(tries, self.config.thresholds.noise_sigma)
-            ok = base >= line and all(r >= keep for r in ratios.values())
-            parent.extra = {
-                **extra,
-                "robust": {
-                    "pass": ok,
-                    "ratios": ratios,
-                    "luck_line": round(line, 3),
-                    "tries": tries,
-                },
-            }
+            ok = all(r >= keep for r in ratios.values())
+            parent.extra = {**extra, "robust": {"pass": ok, "ratios": ratios, "tries": tries}}
             self.ledger.log(
                 s,
                 "robustness",
@@ -692,7 +749,6 @@ class Engine:
                 candidate=parent.id,
                 passed=ok,
                 ratios=ratios,
-                luck_line=round(line, 3),
                 tries=tries,
             )
 
@@ -800,28 +856,29 @@ class Engine:
         return abs(c.sharpe or 0) > self.config.thresholds.suspicious_sharpe
 
     def _finish_idea(self, s: Session, idea: ResearchIdeaORM) -> None:
-        """第 6 步 (修改后): after step 7, an idea with no version at Sharpe 1 is dead."""
-        best = max(
-            (
-                c.sharpe or 0.0
-                for c in self._idea_rows(s, idea.id)
-                if c.stage in (Stage.FIELD, Stage.IMPROVE)
-                and c.status == CandidateStatus.DONE
-                and not self._suspicious(c)
-            ),
-            default=0.0,
-        )
-        idea.best_sharpe = best
-        if best >= PASS_SHARPE:
+        """第 1 问: an idea hits when one of its formulas passes the regular line."""
+        cell = s.get(CellORM, idea.cell_id)
+        rows = [
+            c
+            for c in self._idea_rows(s, idea.id)
+            if c.stage in (Stage.FIELD, Stage.IMPROVE)
+            and c.status == CandidateStatus.DONE
+            and not self._suspicious(c)
+        ]
+        idea.best_sharpe = max((c.sharpe or 0.0 for c in rows), default=0.0)
+        hits = [c.id for c in rows if cell is not None and self._passes_floor(c, cell)]
+        if hits:
             idea.status = IdeaStatus.DONE
-            self.ledger.log(s, "idea_done", idea.cell_id, idea=idea.id, best=best)
+            idea.extra = {**idea.extra, "regular_hits": hits}
+            self.ledger.log(s, "idea_done", idea.cell_id, idea=idea.id, best=idea.best_sharpe)
         else:
             idea.status = IdeaStatus.DEAD
             idea.extra = {
                 **idea.extra,
-                "why_dead": f"after improvement the best Sharpe is {best:.2f} < {PASS_SHARPE}",
+                "why_dead": f"after improvement the best Sharpe is {idea.best_sharpe:.2f}; "
+                "no formula passed the regular line",
             }
-            self.ledger.log(s, "idea_dead", idea.cell_id, idea=idea.id, best=best)
+            self.ledger.log(s, "idea_dead", idea.cell_id, idea=idea.id, best=idea.best_sharpe)
 
     def _passes_floor(self, c: CandidateORM, cell: CellORM) -> bool:
         t = self.config.thresholds
@@ -843,9 +900,6 @@ def _int(v: Any, default: int) -> int:
         return default
 
 
-FORM_PROBE = "form_probe_field"  # stands for {X}: every field enters already prepared
-
-
 def _card(idea: ResearchIdeaORM) -> dict[str, Any]:
     return {
         "title": idea.title,
@@ -854,21 +908,6 @@ def _card(idea: ResearchIdeaORM) -> dict[str, Any]:
         "short": idea.short_side,
         "horizon_days": idea.horizon_days,
     }
-
-
-def _distinct_forms(proposed: list[dict[str, str]], operators: set[str]) -> list[dict[str, str]]:
-    """Valid forms only, and no two that differ only by numbers (window lengths)."""
-    out, seen = [], set()
-    for f in proposed:
-        form = f["form"].strip()
-        if not _form_ok(form, operators):
-            continue
-        shape = re.sub(r"\d+(\.\d+)?", "#", re.sub(r"\s+", "", form))
-        if shape in seen:
-            continue
-        seen.add(shape)
-        out.append({"form": form, "way": f.get("way", "")})
-    return out
 
 
 def _main_formulas(
@@ -942,15 +981,6 @@ def _knowledge(s: Session) -> tuple[list[str], list[str]]:
     return dead, worked
 
 
-def _form_ok(form: Any, operators: set[str]) -> bool:
-    """One {X}, valid syntax and operators, at most MAX_FORM_OPERATORS. {X} is checked as a
-    plain numeric field: vector fields are already reduced by their prep (第 2 步)."""
-    if not isinstance(form, str) or form.count("{X}") != 1:
-        return False
-    v = check(form.replace("{X}", FORM_PROBE), operators=operators, fields={FORM_PROBE: "MATRIX"})
-    return v.ok and v.operator_count <= MAX_FORM_OPERATORS
-
-
 def _family_lines(fields: list[FieldORM]) -> list[dict[str, str]]:
     seen: dict[str, FieldORM] = {}
     for f in fields:
@@ -959,17 +989,6 @@ def _family_lines(fields: list[FieldORM]) -> list[dict[str, str]]:
         {"id": f.field_id, "description": f.description[:150]}
         for f in list(seen.values())[:FIELD_LINES]
     ]
-
-
-def _papers_naming(s: Session, dataset_id: str) -> list[dict[str, str]]:
-    pat = re.compile(rf"(?<![\w]){re.escape(dataset_id)}(?![\w])", re.I)
-    out = []
-    for d in s.scalars(select(IdeaORM).where(IdeaORM.source.in_(sorted(PAPER_SOURCES)))):
-        if pat.search(f"{d.title}\n{d.body}"):
-            out.append({"title": d.title, "text": d.body[:PAPER_CHARS]})
-        if len(out) >= PAPERS:
-            break
-    return out
 
 
 def _bm25(query: str, fields: list[FieldORM], k1: float = 1.4, b: float = 0.75) -> list[FieldORM]:
@@ -1090,12 +1109,6 @@ def run_day(
         report.stopped_because = run.stopped_because
         if run.stopped_because in ("quota", "deadline", "platform kept refusing batches"):
             break
-        if (
-            _reviews_today(ledger) + _robust_passed_waiting(ledger)
-            >= config.policy.max_submissions_per_day
-        ):
-            report.stopped_because = "enough alphas for today"
-            break
         if run.batches == 0 and not any(moved.values()):
             idle += 1
             if idle >= 3:
@@ -1106,7 +1119,7 @@ def run_day(
     else:
         report.stopped_because = report.stopped_because or "daily budget spent"
     engine.evaluate()
-    report.reviews = select_today(api, ledger, config, llm)
+    report.reviews = store_passing(api, ledger, config)  # 第 10 问: all of them, you pick
     with ledger.session() as s:
         ledger.log(
             s,

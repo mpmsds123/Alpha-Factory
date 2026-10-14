@@ -1,13 +1,15 @@
-"""Choose today's (at most) four alphas and put them in front of you.
+"""第 10 问: every alpha that passes is stored for you to pick from, and exported to a CSV.
 
-Nothing is submitted here. A review row is created with the platform's own check results,
-correlations, robustness verdict and an LLM-written description; `review approve` is the
-only path that calls submit.
+store_passing() is what the factory runs (10/14). select_today() is the older daily-four
+selection, kept for the review commands. Nothing is submitted here: `review approve` is
+the only path that calls submit.
 """
 
+import csv
 import math
 from datetime import UTC, datetime
 from itertools import pairwise
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, select
@@ -194,3 +196,157 @@ def reject(ledger: Ledger, review_id: str, note: str = "") -> bool:
         r.note = note
         r.decided_at = utc_now()
         return True
+
+
+EXPORT_NAME = "工厂_待挑选.csv"
+EXPORT_COLUMNS = (
+    "review_id",
+    "alpha_id",
+    "dataset",
+    "idea",
+    "mechanism",
+    "evidence_type",
+    "evidence_id",
+    "evidence_title",
+    "evidence_quote",
+    "registered_long",
+    "registered_short",
+    "mirrored",
+    "expression",
+    "decay",
+    "neutralization",
+    "sharpe",
+    "fitness",
+    "turnover",
+    "margin_bps",
+    "platform_fails",
+    "self_corr",
+    "prod_corr",
+    "other_neutralization_ratio",
+    "rounds",
+    "steps",
+    "idea_sims",
+    "idea_cost_usd",
+    "status",
+    "created",
+)
+
+
+def store_passing(api: BrainAPI, ledger: Ledger, config: FactoryConfig) -> list[str]:
+    """第 7、10 问: every regular-line alpha that kept its Sharpe under the other
+    neutralization gets the platform's submission check (IS ladder, sub-universe,
+    correlation) and, if nothing FAILs, a row in the pick-list. No daily limit, no ranking:
+    you pick. Then the whole pick-list is written to the CSV."""
+    with ledger.session() as s:
+        reviewed = set(s.scalars(select(ReviewORM.candidate_id)))
+        pool = [
+            (c.id, c.alpha_id)
+            for c in s.scalars(select(CandidateORM).where(CandidateORM.status == "DONE"))
+            if c.id not in reviewed
+            and c.alpha_id
+            and (c.extra or {}).get("ready")
+            and ((c.extra or {}).get("robust") or {}).get("pass")
+            and not (c.extra or {}).get("platform_failed")
+        ]
+    stored: list[str] = []
+    for cid, alpha_id in pool:
+        checks = api.check(alpha_id)
+        fails = [str(c.get("name")) for c in checks if c.get("result") == "FAIL"]
+        with ledger.session() as s:
+            row = s.get(CandidateORM, cid)
+            assert row is not None
+            row.extra = {**row.extra, "submission_check": checks}
+            if fails:
+                row.extra = {**row.extra, "platform_failed": fails}
+                ledger.log(s, "platform_check_failed", alpha=alpha_id, fails=fails)
+                continue
+            score = {
+                "prod_corr": check_value(checks, "PROD_CORRELATION"),
+                "self_corr": check_value(checks, "SELF_CORRELATION"),
+            }
+            s.add(ReviewORM(candidate_id=cid, alpha_id=alpha_id, score=score))
+            ledger.log(s, "stored_for_pick", alpha=alpha_id, score=score)
+        stored.append(alpha_id)
+    export_csv(ledger, config)
+    return stored
+
+
+def _lineage(s: Any, c: CandidateORM) -> tuple[int, list[str], bool]:
+    rounds, steps, mirrored = 0, [], False
+    node: CandidateORM | None = c
+    while node is not None:
+        if node.change == "mirrored":
+            mirrored = True
+        elif node.stage == "IMPROVE":
+            rounds += 1
+            steps.append(node.change.split(":")[0])
+        node = s.get(CandidateORM, node.parent_id) if node.parent_id else None
+    return rounds, list(reversed(steps)), mirrored
+
+
+def export_csv(ledger: Ledger, config: FactoryConfig) -> Path:
+    """第 10 问: the pick-list, one row per stored alpha, in the repo's reports folder."""
+    from alpha_orchestrator.factory.models import LLMCallORM, ResearchIdeaORM
+
+    out = Path(config.reports_dir) / EXPORT_NAME
+    out.parent.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    with ledger.session() as s:
+        for r in s.scalars(select(ReviewORM).order_by(ReviewORM.created_at)):
+            c = s.get(CandidateORM, r.candidate_id)
+            if c is None:
+                continue
+            idea = s.get(ResearchIdeaORM, (c.extra or {}).get("idea") or "")
+            ev = ((idea.extra or {}).get("evidence") or {}) if idea else {}
+            rounds, steps, mirrored = _lineage(s, c)
+            robust = (c.extra or {}).get("robust") or {}
+            idea_rows = (idea.extra or {}).get("rows", []) if idea else []
+            cost = (
+                s.scalar(
+                    select(func.coalesce(func.sum(LLMCallORM.cost_usd), 0.0)).where(
+                        LLMCallORM.idea_id == idea.id
+                    )
+                )
+                if idea
+                else 0.0
+            )
+            rows.append(
+                {
+                    "review_id": r.id,
+                    "alpha_id": r.alpha_id,
+                    "dataset": c.cell_id,
+                    "idea": idea.title if idea else "",
+                    "mechanism": idea.mechanism if idea else "",
+                    "evidence_type": ev.get("type", ""),
+                    "evidence_id": ev.get("id", ""),
+                    "evidence_title": ev.get("title", ""),
+                    "evidence_quote": ev.get("quote", ""),
+                    "registered_long": idea.long_side if idea else "",
+                    "registered_short": idea.short_side if idea else "",
+                    "mirrored": "yes" if mirrored else "no",
+                    "expression": c.expression,
+                    "decay": c.settings.get("decay"),
+                    "neutralization": c.settings.get("neutralization"),
+                    "sharpe": c.sharpe,
+                    "fitness": c.fitness,
+                    "turnover": c.turnover,
+                    "margin_bps": round((c.margin or 0) * 10_000, 2),
+                    "platform_fails": c.fails,
+                    "self_corr": (r.score or {}).get("self_corr"),
+                    "prod_corr": (r.score or {}).get("prod_corr"),
+                    "other_neutralization_ratio": (robust.get("ratios") or {}).get(
+                        "neutralization"
+                    ),
+                    "rounds": rounds,
+                    "steps": " > ".join(steps),
+                    "idea_sims": len(idea_rows),
+                    "idea_cost_usd": round(float(cost or 0.0), 4),
+                    "status": r.status,
+                    "created": r.created_at.isoformat() if r.created_at else "",
+                }
+            )
+    with out.open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=EXPORT_COLUMNS)
+        w.writeheader()
+        w.writerows(rows)
+    return out

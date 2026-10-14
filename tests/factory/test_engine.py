@@ -41,6 +41,7 @@ def honest_llm(model: str, system: str, user: str) -> tuple[str, int, int]:
             "short": "downward revisions",
             "horizon_days": 21,
             "query": "eps earnings per share estimate revision",
+            "evidence": {"type": "card", "id": "Q2"},
         }
         return json.dumps(card), 500, 100
     if task.startswith("Rate how well"):
@@ -87,10 +88,13 @@ def honest_llm(model: str, system: str, user: str) -> tuple[str, int, int]:
                 {
                     "parent": par["id"],
                     "expression": f"group_rank({e}, subindustry)",
+                    "step": "S3",
                     "change": "within subindustry",
                 }
             )
-            out.append({"parent": par["id"], "expression": f"rank({e})", "change": "rank"})
+            out.append(
+                {"parent": par["id"], "expression": f"rank({e})", "step": "S0", "change": "rank"}
+            )
         return json.dumps({"variants": out}), 600, 200
     return json.dumps({"description": "Idea: EPS revisions. Rationale: underreaction."}), 50, 50
 
@@ -109,8 +113,7 @@ def run(world: World, minutes: float = 10, **budget: Any):  # type: ignore[no-un
     return ledger, api, report
 
 
-def test_signal_is_found_improved_and_handed_over_never_submitted(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setattr(eng, "CONTROL_SHARE", 0.0)
+def test_signal_is_found_improved_and_handed_over_never_submitted() -> None:
     ledger, api, report = run(World({"est": analyst_fields("eps")}))
     with ledger.session() as s:
         idea = s.scalars(select(ResearchIdeaORM)).first()
@@ -152,18 +155,18 @@ def test_noise_dataset_ideas_die_and_the_dataset_closes() -> None:
         ideas = list(s.scalars(select(ResearchIdeaORM)))
         cell = s.get(CellORM, next(iter(c.cell_id for c in s.scalars(select(CellORM)))))
         kinds = [e.kind for e in s.scalars(select(EventORM))]
-    assert len(ideas) >= eng.DEAD_IN_ROW
+    assert ideas  # the same idea again is a duplicate: two in a row close the dataset
     assert all(i.status == IdeaStatus.DEAD for i in ideas)
+    assert "idea_failed" in kinds
     assert "dataset_closed" in kinds
     assert cell is not None and cell.plan.get("outcome") == "noise"
 
 
-def test_main_arm_formulas_state_the_idea_with_its_own_fields(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setattr(eng, "CONTROL_SHARE", 0.0)
+def test_formulas_state_the_idea_with_its_own_fields() -> None:
     ledger, _api, _ = run(World({"flat": analyst_fields(None)}), minutes=10)
     with ledger.session() as s:
         idea = s.scalars(select(ResearchIdeaORM)).first()
-        assert idea is not None and idea.extra["arm"] == "main"
+        assert idea is not None and idea.extra["evidence"]["id"] == "Q2"
         exprs = [f["expression"] for f in idea.extra["formulas"]]
         assert len(exprs) == eng.FORMULAS  # the window-only duplicate and madeup() dropped
         assert not any("madeup" in e for e in exprs)
@@ -195,17 +198,6 @@ def test_main_formulas_deduplicate_outer_rank_and_zscore_shells() -> None:
     ]
 
 
-def test_control_arm_expands_one_template_over_random_fields(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setattr(eng, "CONTROL_SHARE", 1.0)
-    ledger, _api, _ = run(World({"flat": analyst_fields(None)}), minutes=10)
-    with ledger.session() as s:
-        idea = s.scalars(select(ResearchIdeaORM)).first()
-        assert idea is not None and idea.extra["arm"] == "control"
-        exprs = [f["expression"] for f in idea.extra["formulas"]]
-        shapes = {e.split("ts_backfill")[0] for e in exprs}
-        assert len(exprs) == eng.CONTROL_FIELDS and len(shapes) == 1  # one template, k fields
-
-
 def test_no_example_formula_in_any_prompt() -> None:
     seen: list[str] = []
 
@@ -228,14 +220,18 @@ def test_no_example_formula_in_any_prompt() -> None:
             assert not re.search(r"[a-z_]+\(", ours), ours[:300]
 
 
-def test_an_idea_dies_only_after_improvement_fails() -> None:
+def test_a_noise_idea_stops_at_the_first_gate() -> None:
     ledger, _api, _ = run(World({"flat": analyst_fields(None)}), minutes=10)
     with ledger.session() as s:
         ideas = list(s.scalars(select(ResearchIdeaORM)))
-        improved = [c for c in s.scalars(select(CandidateORM)) if c.stage == Stage.IMPROVE]
-    assert improved  # ideas reach step 7 before any verdict
-    dead = [i for i in ideas if i.status == IdeaStatus.DEAD]
-    assert dead and all("after improvement" in i.extra.get("why_dead", "") for i in dead)
+    assert ideas and all(i.status == IdeaStatus.DEAD for i in ideas)
+    for i in ideas:  # 第 4 问 gate, or after improvement nothing passed the regular line
+        why = i.extra.get("why_dead", "")
+        assert "told from noise" in why or "regular line" in why, why
+
+
+def test_first_gate_is_081_for_five_formulas() -> None:
+    assert round(eng.first_gate(5, 0.316), 2) == 0.81
 
 
 def test_record_page_lists_every_step(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -245,13 +241,6 @@ def test_record_page_lists_every_step(tmp_path) -> None:  # type: ignore[no-unty
     text = render_record(ledger, tmp_path / "record.html").read_text(encoding="utf-8")
     for marker in ("第1-2步", "第3步", "第4步", "第7-8步", "第8步", "EPS revision drift"):
         assert marker in text
-
-
-def test_a_form_is_valid_even_when_the_dataset_has_only_vector_fields() -> None:
-    ops = {"rank", "ts_delta", "ts_backfill", "vec_avg"}
-    assert eng._form_ok("rank(ts_delta({X}, 21))", ops)
-    assert not eng._form_ok("rank({X}) - rank({X})", ops)  # two placeholders
-    assert not eng._form_ok("madeup({X})", ops)
 
 
 def test_high_turnover_is_fixed_not_discarded() -> None:

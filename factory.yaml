@@ -1,13 +1,14 @@
 # Alpha 工厂配置。每个数字的出处见 src/alpha_orchestrator/factory/config.py。
 db_path: ~/.alpha_factory/factory.db     # 账本，放在仓库外
 reports_dir: reports                     # 面板（含真实表达式，已 gitignore）
-scanner_progress: ~/Desktop/因子挖掘/scanner/runs/数据集进度.csv   # 提案 1：先做扫描器已判过的数据集，便于两种方法对比
+scanner_progress: ~/Desktop/因子挖掘/scanner/runs/数据集进度.csv   # 旧，已不用
+scanner_runs: ~/Desktop/因子挖掘/scanner/runs   # 第 3 问：只挖扫描器一阶命中率 ≥ 2% 的数据集
 
 budget:
-  v1_daily_cap: 1500         # 2026-10-05 临时上限：当日已用约 1,150 次，首跑只放行小批量
+  v1_daily_cap: 1000         # 10/12 定：工厂每天 1000 次
   daily_sim_cap: 2400        # 并发 10 × 12 小时 × 每小时 20 次（约 3 分钟一次）
   active_datasets: 1         # 你定的：一次只做一个数据集
-  dataset_sim_cap: 2000      # 一个数据集最多花多少次回测
+  dataset_sim_cap: 1000      # 第 6 问：每个数据集一样的 1000 次
   health_sample: 40          # 体检抽多少个家族
   survey_per_stratum: 2      # 普查每层抽几个家族（家族总数 ≤40 时全部普查）
   survey_max_families: 100
@@ -19,13 +20,12 @@ budget:
   min_batch_interval_s: 20   # 防 429 风暴
 
 thresholds:
-  noise_sigma: 0.40          # 纯噪声公式 Sharpe 的晃动幅度（从你的账本实测）
+  noise_sigma: 0.316         # 第 5 问：扫描器无信号数据集实测 0.25-0.33
   screen_line: 0.8           # 普查的排队线（不是过关线）
   min_filled_coverage: 0.50  # 默认值，待你确认：按更新周期补齐后的覆盖率门槛
   suspicious_sharpe: 3.0     # 你定的：超过就判可疑，不挖
   suspicious_turnover: 0.70
-  refine_min_gain: 0.15      # 默认值，待你确认：提升小于这个就算没进展
-  refine_max_rounds: 3       # 默认值，待你确认：每个家族最多挖几轮
+  refine_min_gain: 0.35      # 第 5 问：比 0.35 小的提升多半是噪音
   submit_sharpe: 1.58
   submit_sharpe_chn: 2.08
   submit_fitness: 1.0
