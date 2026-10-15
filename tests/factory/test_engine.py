@@ -256,3 +256,44 @@ def test_luck_line_grows_slowly() -> None:
     assert round(eng.luck_line(10, 0.40), 2) == 1.12
     assert round(eng.luck_line(40, 0.40), 2) == 1.29
     assert round(eng.luck_line(300, 0.40), 2) == 1.50
+
+
+def test_an_unreachable_llm_stops_the_day_and_closes_nothing() -> None:
+    def broke(model: str, system: str, user: str) -> tuple[str, int, int]:
+        raise TypeError("'NoneType' object is not subscriptable")  # what an empty balance gave
+
+    ledger = Ledger("sqlite://")
+    api = World({"est": analyst_fields("eps")}).platform()
+    cfg = FactoryConfig()
+    cfg.budget.min_batch_interval_s = 0
+    llm = FactoryLLM(cfg, ledger, complete=broke)
+    report = eng.run_day(
+        cfg, api, ledger, llm, minutes=3, rng=random.Random(1), sleep=lambda _s: None
+    )
+    assert "LLM" in report.stopped_because
+    with ledger.session() as s:
+        assert all(c.state != "EXHAUSTED" for c in s.scalars(select(CellORM)))
+
+
+def test_a_rejected_citation_asks_for_a_card_and_does_not_count_as_no_idea() -> None:
+    asked: list[dict[str, Any]] = []
+
+    def cites_badly(model: str, system: str, user: str) -> tuple[str, int, int]:
+        p = json.loads(user)
+        if p["task"].startswith("Propose ONE"):
+            asked.append(p)
+            card = json.loads(honest_llm(model, system, user)[0])
+            card["evidence"] = {"type": "paper", "id": "nope", "quote": "x" * 30}
+            return json.dumps(card), 10, 10
+        return honest_llm(model, system, user)
+
+    ledger = Ledger("sqlite://")
+    api = World({"est": analyst_fields("eps")}).platform()
+    cfg = FactoryConfig()
+    cfg.budget.min_batch_interval_s = 0
+    llm = FactoryLLM(cfg, ledger, complete=cites_badly)
+    assert eng.run_llm_only(cfg, api, ledger, llm, rng=random.Random(1)) is None
+    assert "method card" in asked[1].get("your_last_answer_was_rejected_because", "")
+    with ledger.session() as s:
+        cell = next(c for c in s.scalars(select(CellORM)) if c.plan)
+        assert cell.plan.get("idea_fail_streak", 0) == 0

@@ -73,6 +73,11 @@ PENDING = (CandidateStatus.QUEUED, CandidateStatus.RUNNING)
 WORD = re.compile(r"[a-z0-9]+")
 
 
+class LLMUnavailable(RuntimeError):
+    """The LLM could not be reached (balance, network, malformed replies). Not the
+    dataset's fault: the day stops and no dataset is marked done because of it."""
+
+
 def luck_line(n: int, sigma: float) -> float:
     """The |Sharpe| the best of n pure-noise formulas exceeds with only 5% chance."""
     n = max(n, 1)
@@ -251,6 +256,8 @@ class Engine:
         card: dict[str, Any] | None = None
         rejected = ""
         reasons: list[str] = []
+        api_errors = 0
+        evidence_only = True  # every rejection was about the citation, not the idea
         for _ in range(2):
             try:
                 answer = self.llm.idea(
@@ -265,12 +272,17 @@ class Engine:
                 )
             except RuntimeError as exc:
                 reasons.append(str(exc)[:200])
+                api_errors += 1
                 continue
             ok, rejected = evidence.check_idea(answer, docs_by_id)
+            cited_paper = str((answer.get("evidence") or {}).get("type", "")).lower() == "paper"
+            if not ok and not (cited_paper or "evidence" in rejected or "card" in rejected):
+                evidence_only = False
             if ok:
                 same = evidence.duplicate_of(answer, earlier)
                 if same:
                     ok, rejected = False, f"it repeats the idea already tried here: {same}"
+                    evidence_only = False
             ev = answer.get("evidence") or {}
             if ok and str(ev.get("type", "")).lower() == "paper":
                 try:
@@ -285,12 +297,20 @@ class Engine:
                 card = answer
                 break
             reasons.append(rejected)
+            if cited_paper or evidence_only:
+                rejected += ". Cite a method card instead of a document this time."
         with self.ledger.session() as s:
             cell = s.get(CellORM, cell_id)
             assert cell is not None
             plan = dict(cell.plan or {})
             if card is None:
-                plan["idea_fail_streak"] = int(plan.get("idea_fail_streak", 0)) + 1
+                if api_errors == 2:
+                    self.ledger.log(s, "llm_unavailable", cell_id, reasons=reasons)
+                    raise LLMUnavailable(reasons[-1] if reasons else "LLM unavailable")
+                # 第 6 问: only "no new idea" counts toward done; a citation that failed
+                # its check says nothing about whether the dataset has ideas left
+                if not evidence_only:
+                    plan["idea_fail_streak"] = int(plan.get("idea_fail_streak", 0)) + 1
                 cell.plan = plan
                 self.ledger.log(s, "idea_failed", cell_id, reasons=reasons)
                 return None
@@ -1098,7 +1118,11 @@ def run_day(
     simulator = Simulator(api, ledger, config, sleep=sleep)
     spent, idle = 0, 0
     while spent < budget and time.monotonic() < deadline:
-        moved = engine.advance()
+        try:
+            moved = engine.advance()
+        except LLMUnavailable as exc:
+            report.stopped_because = f"LLM 调用失败（余额或网络）：{exc}"[:300]
+            break
         run = simulator.run(min(CHUNK, budget - spent), deadline=deadline)
         spent += run.completed + run.failed
         report.simulations += run.completed
