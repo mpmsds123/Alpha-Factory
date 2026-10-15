@@ -16,6 +16,7 @@ Code validates, simulates, gates and decides budgets; nothing is submitted witho
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from alpha_orchestrator.factory.config import FactoryConfig, load_llm_key
@@ -32,6 +33,13 @@ SYSTEM = (
     "never tune parameters just to raise in-sample sharpe. "
     "Answer with a single JSON object only."
 )
+
+
+def is_peak(now: datetime) -> bool:
+    """DeepSeek peak hours: Beijing (UTC+8) Monday-Friday 9-12 and 14-18."""
+    bj = now.astimezone(UTC) + timedelta(hours=8)
+    return bj.weekday() < 5 and (9 <= bj.hour < 12 or 14 <= bj.hour < 18)
+
 
 Completion = Callable[[str, str, str], tuple[str, int, int]]
 
@@ -57,11 +65,14 @@ class FactoryLLM:
         )
         self.unbilled: list[str] = []  # calls made while no idea existed yet (想点子)
 
-    def cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> float:
-        """第 9 问: tokens x the official price (peak, per million tokens, from factory.yaml)."""
-        price = self.config.llm.prices.get(model)
-        if not price:
+    def cost(
+        self, model: str, prompt_tokens: int, completion_tokens: int, now: datetime | None = None
+    ) -> float:
+        """第 9 问: yuan, tokens x DeepSeek's official price at the hour of the call."""
+        table = self.config.llm.prices_cny.get(model)
+        if not table:
             return 0.0
+        price = table["peak"] if is_peak(now or datetime.now(UTC)) else table["off"]
         return (prompt_tokens * price[0] + completion_tokens * price[1]) / 1_000_000
 
     # ---------- transport ----------
@@ -114,7 +125,7 @@ class FactoryLLM:
                     model=model,
                     prompt_tokens=p_tok,
                     completion_tokens=c_tok,
-                    cost_usd=self.cost(model, p_tok, c_tok),
+                    cost_cny=self.cost(model, p_tok, c_tok),
                     idea_id=self.idea_id,
                 )
                 s.add(row)

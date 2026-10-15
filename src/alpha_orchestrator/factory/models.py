@@ -229,7 +229,8 @@ class LLMCallORM(FactoryBase):
     model: Mapped[str] = mapped_column(String(128))
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)  # unused since 10/14
+    cost_cny: Mapped[float] = mapped_column(Float, default=0.0)  # 第 9 问: what DeepSeek bills
     ok: Mapped[bool] = mapped_column(Boolean, default=True)
     error: Mapped[str | None] = mapped_column(Text)
     idea_id: Mapped[str | None] = mapped_column(String(36))  # 第 9 问: which idea paid for it

@@ -226,7 +226,7 @@ EXPORT_COLUMNS = (
     "rounds",
     "steps",
     "idea_sims",
-    "idea_cost_usd",
+    "idea_cost_cny",
     "status",
     "created",
 )
@@ -303,7 +303,7 @@ def export_csv(ledger: Ledger, config: FactoryConfig) -> Path:
             idea_rows = (idea.extra or {}).get("rows", []) if idea else []
             cost = (
                 s.scalar(
-                    select(func.coalesce(func.sum(LLMCallORM.cost_usd), 0.0)).where(
+                    select(func.coalesce(func.sum(LLMCallORM.cost_cny), 0.0)).where(
                         LLMCallORM.idea_id == idea.id
                     )
                 )
@@ -340,7 +340,7 @@ def export_csv(ledger: Ledger, config: FactoryConfig) -> Path:
                     "rounds": rounds,
                     "steps": " > ".join(steps),
                     "idea_sims": len(idea_rows),
-                    "idea_cost_usd": round(float(cost or 0.0), 4),
+                    "idea_cost_cny": round(float(cost or 0.0), 4),
                     "status": r.status,
                     "created": r.created_at.isoformat() if r.created_at else "",
                 }

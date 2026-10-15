@@ -72,9 +72,13 @@ class LLMConfig:
     key_file: str = "~/secrets/deepseek.json"
     temperature: float = 0.4
     timeout_s: float = 120.0
-    # 第 9 问: peak price per million tokens [input, output], DeepSeek official page 2026-10-14
-    prices: dict[str, list[float]] = field(
-        default_factory=lambda: {"deepseek-v4-pro": [1.32, 3.96], "deepseek-flash": [0.3, 1.2]}
+    # 第 9 问: yuan per million tokens [input cache miss, output], DeepSeek official Chinese
+    # price page 2026-10-14; peak = Beijing Mon-Fri 9-12 and 14-18, all other hours off-peak
+    prices_cny: dict[str, dict[str, list[float]]] = field(
+        default_factory=lambda: {
+            "deepseek-v4-pro": {"peak": [9.0, 27.0], "off": [4.5, 13.5]},
+            "deepseek-flash": {"peak": [2.0, 8.0], "off": [1.0, 4.0]},
+        }
     )
 
 
