@@ -18,9 +18,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from alpha_orchestrator.brain.api import BrainAPI
-from alpha_orchestrator.factory import catalog, evidence, study
+from alpha_orchestrator.factory import catalog, study
 from alpha_orchestrator.factory import generators as gen
-from alpha_orchestrator.factory.cards import CHANGE_CARDS, IDEA_CARDS
 from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ideas import tokens
 from alpha_orchestrator.factory.ledger import Ledger
@@ -31,7 +30,6 @@ from alpha_orchestrator.factory.models import (
     CellORM,
     CellState,
     FieldORM,
-    IdeaFieldORM,
     IdeaStatus,
     ResearchIdeaORM,
     ReviewORM,
@@ -59,10 +57,26 @@ FORMULA_FIELDS = 8  # distinct quantities the LLM may combine in its formulas
 GATE_CONFIDENCE = 0.95
 # 第 1 问: an idea "hits" when one of its formulas passes the regular line (_passes_floor)
 # 第 5 问 (10/14)
-PARENTS = 2
+PARENTS = 1  # 现行设计 第 5+6 步: every change starts from the current best formula
 VARIANTS = 3
-DRY_ROUNDS = 2  # a parent stops after 2 rounds without a 0.35 gain
-MAX_ROUNDS = 4  # 4 + 4 operators = 8, the Power Pool limit
+DRY_ROUNDS = 1  # 现行设计 第 7 步: a round that does not add refine_min_gain (0.1) stops it
+MAX_ROUNDS = 3  # 现行设计 第 7 步: at most 3 + 3x3 = 12 simulations per idea
+# 现行设计 (10/14 晚)
+GROUPS = 8  # 第 2 步: 100 simulations / 12 per idea
+FIRST_FORMULAS = 3  # 第 3 步
+FIRST_OPERATORS = 5  # 第 3 步: 5 + one change per round x 3 rounds = 8, the Power Pool limit
+FORMULA_MAX_FIELDS = 3  # Power Pool
+FIRST_GATE = 0.8  # 第 7 步: the luck line of 3 noise formulas is 0.76
+GROUP_FIELD_LINES = 400
+PROBLEMS = (
+    "no signal",
+    "direction reversed",
+    "turnover too high",
+    "works only in some years",
+    "concentrated in few stocks",
+    "low fitness (returns too small for the turnover)",
+    "other (say what)",
+)
 SAME_FAIL_LIMIT = 3  # alpha-mining: 3 variants failing the same check -> change the formula
 # 第 5 节
 ACTIVE_IDEAS = 2  # 提议
@@ -179,6 +193,10 @@ class Engine:
             spent = cell.sims_used - int(plan.get("sims_at_open", 0))
             if spent >= self.config.budget.dataset_sim_cap:
                 return True
+            if plan.get("groups") is not None and int(plan.get("next_group", 0)) >= len(
+                plan["groups"]
+            ):
+                return True  # 现行设计 第 7 步: every field group tried
             return int(plan.get("idea_fail_streak", 0)) >= IDEA_FAILS_TO_STOP
 
     def _close_dataset(self, cell_id: str) -> None:
@@ -210,243 +228,133 @@ class Engine:
             )
             self.ledger.log(s, "dataset_closed", cell_id, outcome=outcome, ideas=len(ideas))
 
-    # ======================= 第 3 步 想点子 =======================
-    def _new_idea(self, cell_id: str) -> str | None:
-        """第 3 步 + 第 2、6 问: ask for one idea with evidence; the program checks format,
-        evidence and duplicates (and, for a paper, whether the quote supports the claim).
-        A rejected answer is sent back with its reason once; two rejections in a row count
-        as one failure for the dataset (第 6 问)."""
-        from alpha_orchestrator.factory.models import LLMCallORM
+    # ======================= 现行设计 第 2-4 步 =======================
+    def _brief(self, cell: CellORM) -> dict[str, Any]:
+        return {
+            "id": cell.dataset_id,
+            "name": cell.dataset_name,
+            "category": cell.category,
+            "region": cell.region,
+            "universe": cell.universe,
+            "description": cell.description[:1500],
+        }
 
+    def _groups(self, cell_id: str) -> list[dict[str, Any]] | None:
+        """第 2 步: one LLM call per dataset reads every field description and returns up
+        to GROUPS field groups; field ids that do not exist are dropped."""
         with self.ledger.session() as s:
             cell = s.get(CellORM, cell_id)
             assert cell is not None
-            brief = {
-                "id": cell.dataset_id,
-                "name": cell.dataset_name,
-                "category": cell.category,
-                "region": cell.region,
-                "universe": cell.universe,
-                "description": cell.description[:1500],
-            }
+            if (cell.plan or {}).get("groups") is not None:
+                return list(cell.plan["groups"])
+            brief = self._brief(cell)
             fields = study.usable_fields(s, cell_id)
-            lines = _family_lines(fields)
-            meaning = " ".join(
-                [cell.dataset_name, cell.description[:1500]]
-                + [f["description"] for f in lines[:60]]
-            )
-            documents = evidence.retrieve(meaning, evidence.official_docs(s))
-            earlier = [
+            lines = [
                 {
-                    "title": i.title,
-                    "query": i.query,
-                    "evidence_key": str((i.extra or {}).get("evidence_key", "")),
+                    "id": f.field_id,
+                    "description": f.description[:120],
+                    "coverage": round(f.coverage or 0, 2),
                 }
-                for i in s.scalars(
-                    select(ResearchIdeaORM).where(
-                        ResearchIdeaORM.cell_id == cell_id,
-                        ResearchIdeaORM.status != IdeaStatus.RETIRED,
-                    )
-                )
+                for f in _one_per_family(fields)[:GROUP_FIELD_LINES]
             ]
-            dead_ends, worked = _knowledge(s)
-        docs_by_id = {d["id"]: d for d in documents}
+            known = {f.field_id for f in fields}
         self.llm.idea_id = None
-        self.llm.unbilled = []
-        card: dict[str, Any] | None = None
-        rejected = ""
-        reasons: list[str] = []
-        api_errors = 0
-        evidence_only = True  # every rejection was about the citation, not the idea
+        groups: list[dict[str, Any]] = []
         for _ in range(2):
             try:
-                answer = self.llm.idea(
-                    brief,
-                    lines,
-                    IDEA_CARDS,
-                    documents,
-                    [e["title"] for e in earlier],
-                    dead_ends,
-                    worked,
-                    rejected,
-                )
-            except RuntimeError as exc:
-                reasons.append(str(exc)[:200])
-                api_errors += 1
+                raw = self.llm.field_groups(brief, lines, GROUPS)
+            except RuntimeError:
                 continue
-            ok, rejected = evidence.check_idea(answer, docs_by_id)
-            cited_paper = str((answer.get("evidence") or {}).get("type", "")).lower() == "paper"
-            if not ok and not (cited_paper or "evidence" in rejected or "card" in rejected):
-                evidence_only = False
-            if ok:
-                same = evidence.duplicate_of(answer, earlier)
-                if same:
-                    ok, rejected = False, f"it repeats the idea already tried here: {same}"
-                    evidence_only = False
-            ev = answer.get("evidence") or {}
-            if ok and str(ev.get("type", "")).lower() == "paper":
-                try:
-                    supported, why = self.llm.supports(
-                        str(answer.get("mechanism", "")), str(ev.get("quote", ""))
+            for g in raw:
+                ids = [str(x) for x in (g.get("fields") or []) if str(x) in known]
+                if ids:
+                    groups.append(
+                        {
+                            "name": str(g.get("name", ""))[:120],
+                            "meaning": str(g.get("meaning", ""))[:300],
+                            "direction": str(g.get("direction", ""))[:40],
+                            "why": str(g.get("why", ""))[:300],
+                            "fields": ids[:FORMULA_MAX_FIELDS],
+                        }
                     )
-                except RuntimeError:
-                    supported, why = False, "the support check failed"
-                if not supported:
-                    ok, rejected = False, f"the quote does not support the mechanism: {why}"
-            if ok:
-                card = answer
+            if groups:
                 break
-            reasons.append(rejected)
-            if cited_paper or evidence_only:
-                rejected += ". Cite a method card instead of a document this time."
+        with self.ledger.session() as s:
+            cell = s.get(CellORM, cell_id)
+            assert cell is not None
+            if not groups:
+                self.ledger.log(s, "llm_unavailable", cell_id, reasons=["no field groups"])
+                return None
+            cell.plan = {**(cell.plan or {}), "groups": groups, "next_group": 0}
+            self.ledger.log(s, "field_groups", cell_id, groups=[g["name"] for g in groups])
+        return groups
+
+    def _new_idea(self, cell_id: str) -> str | None:
+        """第 3 步: the next field group becomes an idea; its 3 first formulas are queued."""
+        groups = self._groups(cell_id)
+        if groups is None:
+            raise LLMUnavailable("the LLM gave no field groups")
         with self.ledger.session() as s:
             cell = s.get(CellORM, cell_id)
             assert cell is not None
             plan = dict(cell.plan or {})
-            if card is None:
-                if api_errors == 2:
-                    self.ledger.log(s, "llm_unavailable", cell_id, reasons=reasons)
-                    raise LLMUnavailable(reasons[-1] if reasons else "LLM unavailable")
-                # 第 6 问: only "no new idea" counts toward done; a citation that failed
-                # its check says nothing about whether the dataset has ideas left
-                if not evidence_only:
-                    plan["idea_fail_streak"] = int(plan.get("idea_fail_streak", 0)) + 1
-                cell.plan = plan
-                self.ledger.log(s, "idea_failed", cell_id, reasons=reasons)
+            k = int(plan.get("next_group", 0))
+            if k >= len(groups):
                 return None
-            plan["idea_fail_streak"] = 0
+            g = groups[k]
+            plan["next_group"] = k + 1
             cell.plan = plan
-            ev = card["evidence"]
             idea = ResearchIdeaORM(
                 cell_id=cell_id,
-                title=str(card.get("title", ""))[:300],
-                mechanism=str(card.get("mechanism", "")),
-                long_side=str(card.get("long", "")),
-                short_side=str(card.get("short", "")),
-                horizon_days=_int(card.get("horizon_days"), 21),
-                query=str(card.get("query", "")),
-                extra={
-                    "evidence": {
-                        "type": str(ev.get("type", "")).lower(),
-                        "id": str(ev.get("id", "")).strip().upper()
-                        if str(ev.get("type", "")).lower() == "card"
-                        else str(ev.get("id", "")).strip(),
-                        "quote": str(ev.get("quote", ""))[: evidence.QUOTE_MAX],
-                        "title": docs_by_id.get(str(ev.get("id", "")).strip(), {}).get(
-                            "title", IDEA_CARDS.get(str(ev.get("id", "")).strip().upper(), "")
-                        ),
-                    },
-                    "evidence_key": evidence.evidence_key(card),
-                    "rejected_before": reasons,
-                    "n": len(earlier),
-                },
+                title=g["name"],
+                mechanism=g["meaning"] + " " + g["why"],
+                long_side=g["direction"],
+                short_side="",
+                horizon_days=21,
+                query=" ".join(g["fields"]),
+                extra={"group": g, "n": k},
             )
             s.add(idea)
             s.flush()
             idea_id = idea.id
-            for call_id in self.llm.unbilled:
-                call = s.get(LLMCallORM, call_id)
-                if call is not None:
-                    call.idea_id = idea_id  # 第 9 问: the calls that produced it are its cost
-            self.llm.unbilled = []
             self.ledger.log(s, "idea_created", cell_id, idea=idea_id, title=idea.title)
         self.llm.idea_id = idea_id
-        self._narrow(idea_id)
         self._queue_tests(idea_id)
         return idea_id
 
-    # ======================= 第 4 步 缩字段 =======================
-    def _narrow(self, idea_id: str) -> None:
-        self.llm.idea_id = idea_id
-        with self.ledger.session() as s:
-            idea = s.get(ResearchIdeaORM, idea_id)
-            assert idea is not None
-            fields = study.usable_fields(s, idea.cell_id)
-            query = f"{idea.query} {idea.title} {idea.mechanism}"
-            coarse = _bm25(query, fields)[:COARSE]
-            card = _card(idea)
-            rows = [{"id": f.field_id, "description": f.description[:200]} for f in coarse]
-        scores: dict[str, tuple[int, str, str]] = {}
-        for i in range(0, len(rows), SCORE_BATCH):
-            try:
-                scores.update(self.llm.score_fields(card, rows[i : i + SCORE_BATCH]))
-            except RuntimeError:
-                continue
-        order = {r["id"]: k for k, r in enumerate(rows)}
-        kept = sorted(
-            (fid for fid, v in scores.items() if v[0] >= KEEP_SCORE),
-            key=lambda fid: (-scores[fid][0], order[fid]),
-        )
-        rank = {fid: k + 1 for k, fid in enumerate(kept)}
-        with self.ledger.session() as s:
-            for r in rows:
-                sc, why, measures = scores.get(r["id"], (0, "", ""))
-                s.add(
-                    IdeaFieldORM(
-                        idea_id=idea_id,
-                        field_id=r["id"],
-                        score=sc,
-                        reason=why,
-                        measures=measures,
-                        rank=rank.get(r["id"], 0),
-                    )
-                )
-            idea = s.get(ResearchIdeaORM, idea_id)
-            assert idea is not None
-            idea.extra = {**idea.extra, "coarse": len(rows), "kept": len(kept)}
-            self.ledger.log(
-                s, "fields_ranked", idea.cell_id, idea=idea_id, coarse=len(rows), kept=len(kept)
-            )
-            if not kept:
-                idea.status = IdeaStatus.DEAD
-                idea.extra = {**idea.extra, "why_dead": f"no field scored {KEEP_SCORE}+"}
-
-    # ======================= 第 5 步 写公式、送回测 =======================
-    def _distinct_fields(self, s: Session, idea_id: str, limit: int) -> list[IdeaFieldORM]:
-        """The most relevant fields, one per measured quantity: versions of the same
-        quantity (e.g. nine "total assets" fields) are one piece of evidence, not nine."""
-        chosen: list[IdeaFieldORM] = []
-        seen: set[str] = set()
-        for r in s.scalars(
-            select(IdeaFieldORM)
-            .where(IdeaFieldORM.idea_id == idea_id, IdeaFieldORM.rank > 0)
-            .order_by(IdeaFieldORM.rank)
-        ):
-            key = (r.measures or r.field_id).strip().lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            chosen.append(r)
-            if len(chosen) >= limit:
-                break
-        return chosen
-
     def _queue_tests(self, idea_id: str) -> int:
-        """第 5 步 + 第 4 问: the LLM writes FORMULAS formulas stating the idea with its own
-        fields (1-3 per formula, at most MAX_FORM_OPERATORS operators)."""
+        """第 3-4 步: FIRST_FORMULAS formulas; invalid ones go back to the LLM once with the
+        exact errors; still invalid -> dropped, never sent (one bad formula cancels a batch)."""
         self.llm.idea_id = idea_id
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
             assert idea is not None
-            if idea.status == IdeaStatus.DEAD:
-                return 0
+            cell = s.get(CellORM, idea.cell_id)
+            assert cell is not None
+            brief = self._brief(cell)
+            group = dict(idea.extra.get("group") or {})
             usable = {f.field_id: f for f in study.usable_fields(s, idea.cell_id)}
-            rows = self._distinct_fields(s, idea_id, FORMULA_FIELDS)
-            pool = [usable[r.field_id] for r in rows if r.field_id in usable]
+            pool = [usable[f] for f in group.get("fields", []) if f in usable]
             info = [{"id": f.field_id, "description": f.description[:200]} for f in pool]
-            card = _card(idea)
             types = {f.field_id: f.type for f in pool}
             preps = {f.field_id: f.prep for f in pool}
-        ops = sorted(f"{k}: {v}"[:160] for k, v in self.meta.definitions.items())
-        exprs: list[tuple[str, str, str | None]] = []  # (expression, why, field)
+        ops = self._operator_lines()
+        exprs: list[tuple[str, str, str | None]] = []
+        rejected = ""
         for _ in range(2):
             try:
-                proposed = self.llm.formulas(card, info, ops, FORMULAS)
-                exprs = _main_formulas(proposed, types, preps, self.meta.operators)[:FORMULAS]
+                proposed = self.llm.first_formulas(
+                    brief, group, info, ops, FIRST_FORMULAS, rejected
+                )
             except RuntimeError:
                 continue
-            if exprs:
+            exprs, problems = _first_formulas(
+                proposed, types, preps, self.meta.operators, self.meta.signatures
+            )
+            exprs = exprs[:FIRST_FORMULAS]
+            if len(exprs) >= FIRST_FORMULAS or (exprs and not problems):
                 break
+            rejected = "; ".join(problems[:5])
         added = 0
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
@@ -462,21 +370,19 @@ class Engine:
             idea.extra = {
                 **idea.extra,
                 "formulas": [{"expression": e, "why": w, "field": f} for e, w, f in exprs],
-                "test_fields": [i["id"] for i in info],
             }
             settings = self._settings(cell)
             for expr, why, fid in exprs:
                 if self._add(s, cell, expr, settings, Stage.FIELD, idea_id, field=fid, change=why):
                     added += 1
             self.ledger.log(
-                s,
-                "tests_queued",
-                idea.cell_id,
-                idea=idea_id,
-                queued=added,
+                s, "tests_queued", idea.cell_id, idea=idea_id, queued=added,
                 formulas=[e for e, _, _ in exprs],
             )
         return added
+
+    def _operator_lines(self) -> list[str]:
+        return sorted(f"{k}: {v}"[:160] for k, v in self.meta.definitions.items())
 
     # ======================= 第 6-7 步 =======================
     def _step_idea(self, idea_id: str) -> int:
@@ -511,7 +417,10 @@ class Engine:
             usable.sort(key=lambda c: -abs(c.sharpe or 0))
             best = usable[:PARENTS]
             idea.best_sharpe = max((abs(c.sharpe or 0) for c in usable), default=0.0)
-            gate = first_gate(len(done), self.config.thresholds.noise_sigma)
+            gate = FIRST_GATE
+            if any(self._passes_floor(c, cell) for c in done):
+                self._finish_idea(s, idea)
+                return
             if not best or idea.best_sharpe < gate:
                 idea.status = IdeaStatus.DEAD
                 idea.extra = {
@@ -575,6 +484,9 @@ class Engine:
         self._queue_round(idea_id)
 
     def _queue_round(self, idea_id: str) -> None:
+        """第 5+6 步: the LLM sees every formula this idea tried (worse ones included), the
+        best one's yearly Sharpe and the field descriptions; it gives up or proposes
+        VARIANTS one-change variants of the best. Repeats and invalid ones go back once."""
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
             assert idea is not None
@@ -588,63 +500,103 @@ class Engine:
             if not parents:
                 self._finish_idea(s, idea)
                 return
-            card = _card(idea)
-            rows = {p["id"]: s.get(CandidateORM, p["id"]) for p in parents}
-            payload = [
-                {
-                    "id": cid,
-                    "expression": c.expression,
-                    "decay": c.settings.get("decay"),
-                    "neutralization": c.settings.get("neutralization"),
-                    "sharpe": c.sharpe,
-                    "fitness": c.fitness,
-                    "turnover": c.turnover,
-                    "failing_checks": c.fails,
-                }
-                for cid, c in rows.items()
-                if c is not None
+            parent = s.get(CandidateORM, parents[0]["id"])
+            assert parent is not None
+            card = {
+                "name": idea.title,
+                "meaning": idea.mechanism,
+                "direction": idea.long_side,
+            }
+            history = [_row(c) for c in self._idea_rows(s, idea_id) if c.stage != Stage.ROBUST]
+            tried = {re.sub(r"\s+", "", c.expression) for c in self._idea_rows(s, idea_id)}
+            best = _row(parent)
+            alpha_id = parent.alpha_id
+            usable = {f.field_id: f for f in study.usable_fields(s, idea.cell_id)}
+            group = idea.extra.get("group") or {}
+            info = [
+                {"id": f, "description": usable[f].description[:200]}
+                for f in group.get("fields", [])
+                if f in usable
             ]
+            types = {f.field_id: f.type for f in s.scalars(
+                select(FieldORM).where(FieldORM.cell_id == cell.cell_id))}
+        if alpha_id:
+            try:
+                best["yearly_sharpe"] = {
+                    str(y.get("year")): y.get("sharpe")
+                    for y in self.api.yearly_stats(alpha_id)
+                    if isinstance(y, dict)
+                }
+            except Exception:
+                pass
         self.llm.idea_id = idea_id
-        try:
-            variants = self.llm.improve(card, payload, CHANGE_CARDS)
-        except RuntimeError:
-            variants = []
+        variants: list[dict[str, Any]] = []
+        verdict: dict[str, Any] = {}
+        rejected = ""
+        for _ in range(2):
+            try:
+                verdict = self.llm.diagnose(
+                    card, history, best, info, self._operator_lines(), PROBLEMS, VARIANTS,
+                    rejected,
+                )
+            except RuntimeError:
+                continue
+            if str(verdict.get("decision", "")).lower() == "give_up":
+                break
+            variants, problems = [], []
+            for v in verdict.get("variants") or []:
+                if not isinstance(v, dict) or not isinstance(v.get("expression"), str):
+                    continue
+                expr = v["expression"].strip()
+                if re.sub(r"\s+", "", expr) in tried and "decay" not in v:
+                    problems.append(f"{expr}: already tried")
+                    continue
+                chk = check(
+                    expr, operators=self.meta.operators, fields=types,
+                    signatures=self.meta.signatures,
+                )
+                if not chk.ok or len(chk.fields_used) > FORMULA_MAX_FIELDS:
+                    problems.append(f"{expr}: {'; '.join(chk.issues[:2]) or 'too many fields'}")
+                    continue
+                variants.append(v)
+            if len(variants) >= VARIANTS or (variants and not problems):
+                break
+            rejected = "; ".join(problems[:5]) or "no valid variant"
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
             assert idea is not None
             cell = s.get(CellORM, idea.cell_id)
             assert cell is not None
-            plist = copy.deepcopy(idea.extra.get("parents", []))  # a new object, so it is saved
-            by_id = {p["id"]: p for p in plist}
-            counts: dict[str, int] = {}
-            for v in variants:
-                p = by_id.get(v["parent"])
-                parent = s.get(CandidateORM, v["parent"])
-                if p is None or parent is None or counts.get(p["id"], 0) >= VARIANTS:
-                    continue
+            plist = copy.deepcopy(idea.extra.get("parents", []))
+            p = plist[0]
+            diag = {
+                "round": p["rounds"] + 1,
+                "problem": str(verdict.get("problem", ""))[:120],
+                "evidence": str(verdict.get("evidence", ""))[:300],
+                "decision": str(verdict.get("decision", ""))[:20],
+                "why": str(verdict.get("why", ""))[:300],
+            }
+            idea.extra = {**idea.extra, "diagnoses": [*idea.extra.get("diagnoses", []), diag]}
+            self.ledger.log(s, "diagnosis", idea.cell_id, idea=idea_id, **diag)
+            if diag["decision"].lower() == "give_up" or not variants:
+                idea.extra = {**idea.extra, "parents": plist, "gave_up": diag}
+                self._finish_idea(s, idea)
+                return
+            parent = s.get(CandidateORM, p["id"])
+            assert parent is not None
+            for v in variants[:VARIANTS]:
                 settings = dict(parent.settings)
-                if "decay" in v:
+                if isinstance(v.get("decay"), int):
                     settings["decay"] = max(0, min(512, int(v["decay"])))
                 c = self._add(
-                    s,
-                    cell,
-                    v["expression"],
-                    settings,
-                    Stage.IMPROVE,
-                    idea_id,
-                    field=parent.extra.get("field"),
-                    parent=parent,
-                    change=v["change"],
+                    s, cell, v["expression"], settings, Stage.IMPROVE, idea_id,
+                    field=parent.extra.get("field"), parent=parent,
+                    change=f"{diag['problem']}: {str(v.get('change', ''))[:160]}",
                 )
                 if c is not None:
                     p["pending"] = [*p.get("pending", []), c.id]
-                    counts[p["id"]] = counts.get(p["id"], 0) + 1
-            for p in plist:
-                if not p.get("pending") and p["dry"] < DRY_ROUNDS and p["rounds"] < MAX_ROUNDS:
-                    p["dry"] += 1  # nothing valid proposed counts as a round without progress
-                    p["rounds"] += 1
             idea.extra = {**idea.extra, "parents": plist}
-            if not any(p.get("pending") for p in plist):
+            if not p.get("pending"):
                 self._finish_idea(s, idea)
 
     def _settle_round(self, idea_id: str) -> None:
@@ -681,6 +633,13 @@ class Engine:
                     if p["same_fail"] >= SAME_FAIL_LIMIT:
                         p["dry"] = DRY_ROUNDS
             idea.extra = {**idea.extra, "parents": plist}
+            cell = s.get(CellORM, idea.cell_id)
+            if cell is not None and any(
+                c.status == CandidateStatus.DONE and self._passes_floor(c, cell)
+                for c in self._idea_rows(s, idea_id)
+            ):
+                self._finish_idea(s, idea)
+                return
             self.ledger.log(
                 s,
                 "round_settled",
@@ -791,7 +750,10 @@ class Engine:
             f.field_id: f.type
             for f in s.scalars(select(FieldORM).where(FieldORM.cell_id == cell.cell_id))
         }
-        verdict = check(expression, operators=self.meta.operators, fields=types)
+        verdict = check(
+            expression, operators=self.meta.operators, fields=types,
+            signatures=self.meta.signatures,
+        )
         if not verdict.ok:
             self.ledger.log(
                 s,
@@ -958,6 +920,69 @@ def _main_formulas(
         first = sorted(v.fields_used & set(types))[0]
         out.append((expr, f.get("way", ""), first))
     return out
+
+
+def _first_formulas(
+    proposed: list[dict[str, str]],
+    types: dict[str, str],
+    preps: dict[str, str],
+    operators: set[str],
+    signatures: dict[str, tuple[int, int]],
+) -> tuple[list[tuple[str, str, str | None]], list[str]]:
+    """第 3-4 步: valid formulas (fields replaced by their prep) and the reasons the others
+    were rejected, to send back to the LLM."""
+    plain = {fid: "MATRIX" for fid in types}
+    out: list[tuple[str, str, str | None]] = []
+    problems: list[str] = []
+    seen: set[str] = set()
+    for f in proposed:
+        text = f["form"].strip()
+        v = check(text, operators=operators, fields=plain, signatures=signatures)
+        if not v.ok:
+            problems.append(f"{text}: {'; '.join(v.issues[:2])}")
+            continue
+        used = v.fields_used & set(types)
+        if not used or len(v.fields_used) > FORMULA_MAX_FIELDS:
+            problems.append(f"{text}: must use 1-{FORMULA_MAX_FIELDS} of the given fields")
+            continue
+        if v.operator_count > FIRST_OPERATORS:
+            problems.append(f"{text}: {v.operator_count} operators > {FIRST_OPERATORS}")
+            continue
+        shape = _formula_shape(text)
+        if shape in seen:
+            problems.append(f"{text}: same as another formula except windows")
+            continue
+        seen.add(shape)
+        expr = text
+        for fid in sorted(used, key=len, reverse=True):
+            expr = re.sub(rf"(?<![\w]){re.escape(fid)}(?![\w])", preps[fid] or fid, expr)
+        out.append((expr, f.get("way", ""), sorted(used)[0]))
+    return out, problems
+
+
+def _one_per_family(fields: list[FieldORM]) -> list[FieldORM]:
+    seen: dict[str, FieldORM] = {}
+    for f in sorted(fields, key=lambda f: -(f.coverage or 0)):
+        seen.setdefault(gen.family_key(f.field_id), f)
+    return list(seen.values())
+
+
+def _row(c: CandidateORM) -> dict[str, Any]:
+    return {
+        "expression": c.expression,
+        "change": c.change,
+        "decay": (c.settings or {}).get("decay"),
+        "status": str(c.status),
+        "sharpe": c.sharpe,
+        "fitness": c.fitness,
+        "turnover": c.turnover,
+        "returns": c.returns,
+        "drawdown": c.drawdown,
+        "long_count": c.long_count,
+        "short_count": c.short_count,
+        "failing_checks": c.fails,
+        "error": (c.error or "")[:150] or None,
+    }
 
 
 def _formula_shape(expression: str) -> str:

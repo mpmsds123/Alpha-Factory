@@ -216,7 +216,8 @@ class FakePlatform(FakeBrainAPI):
             "bucket",
             "group_zscore",
         ]
-        return [{"name": n, "definition": f"{n}(x)", "scope": ["REGULAR"]} for n in names]
+        # no signature parsed from "name(...)" with a variadic marker: arity unchecked
+        return [{"name": n, "definition": f"{n}(x, ..)", "scope": ["REGULAR"]} for n in names]
 
     def pyramid_alphas(self) -> list[dict[str, Any]]:
         return []
