@@ -931,7 +931,7 @@ def _first_formulas(
 ) -> tuple[list[tuple[str, str, str | None]], list[str]]:
     """第 3-4 步: valid formulas (fields replaced by their prep) and the reasons the others
     were rejected, to send back to the LLM."""
-    plain = {fid: "MATRIX" for fid in types}
+    plain = {fid: "GROUP" if t == "GROUP" else "MATRIX" for fid, t in types.items()}
     out: list[tuple[str, str, str | None]] = []
     problems: list[str] = []
     seen: set[str] = set()

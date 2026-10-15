@@ -364,7 +364,15 @@ class FactoryLLM:
             out.append(item)
         return out
 
-    # ---------- v4 (现行设计, 10/14 晚) ----------
+    # ---------- v4 (现行设计, 10/14 晚) + cnhkmcp guides (10/15) ----------
+    @staticmethod
+    def guide(name: str) -> str:
+        """cnhkmcp's fixed guidance documents, copied into prompts/guides/."""
+        from alpha_orchestrator.factory.config import REPO_ROOT
+
+        path = REPO_ROOT / "prompts" / "guides" / f"{name}.md"
+        return path.read_text(encoding="utf-8") if path.exists() else ""
+
     def field_groups(
         self, dataset: dict[str, Any], fields: Sequence[dict[str, str]], n: int
     ) -> list[dict[str, Any]]:
@@ -380,7 +388,9 @@ class FactoryLLM:
             "rules": [
                 "Use field ids exactly as listed. At most 3 fields per group; prefer high "
                 "coverage.",
-                "Groups must differ in meaning, not just in which version of a field.",
+                "Groups must differ in meaning, not just in which version of a field. At "
+                "most 2 groups of the same kind (e.g. two 'estimate revision' groups); "
+                "cover different kinds of meaning.",
                 "direction: 'higher is better' or 'lower is better'.",
             ],
             "output_fields": {
@@ -408,7 +418,12 @@ class FactoryLLM:
             "idea": group,
             "fields": list(fields),
             "operators": list(operators),
+            "guide_single_factor_logic_chain": self.guide("logic_chain"),
+            "guide_when_to_use_each_operator": self.guide("operators"),
             "rules": [
+                "Use the two guides to choose operators for each angle.",
+                "Group operators need a grouping input: industry, sector, subindustry, "
+                "market, or bucket(...).",
                 "Only listed operators and listed field ids. At most 3 fields and 5 "
                 "operators per formula.",
                 "Positional inputs exactly as each operator's definition; optional inputs "
@@ -422,7 +437,8 @@ class FactoryLLM:
         }
         if rejected:
             prompt["your_last_answer_was_rejected_because"] = rejected
-        data = self.ask("first_formulas", json.dumps(prompt, ensure_ascii=False), strong=True)
+        # writing formulas is mechanical next to judging results: the cheap model
+        data = self.ask("first_formulas", json.dumps(prompt, ensure_ascii=False), strong=False)
         return [
             {"form": f["formula"], "way": str(f.get("why", ""))[:200]}
             for f in (data.get("formulas") or [])
@@ -453,6 +469,7 @@ class FactoryLLM:
             "fields": list(fields),
             "operators": list(operators),
             "problems_to_choose_from": list(problems),
+            "guide_single_factor_logic_chain": self.guide("logic_chain"),
             "rules": [
                 "Pick ONE main problem from the list and quote the numbers that show it.",
                 "Never repeat a formula in the history; learn from changes that made it worse.",

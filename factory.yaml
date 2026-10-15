@@ -3,10 +3,10 @@ db_path: ~/.alpha_factory/factory.db     # 账本，放在仓库外
 reports_dir: reports                     # 面板（含真实表达式，已 gitignore）
 scanner_progress: ~/Desktop/因子挖掘/scanner/runs/数据集进度.csv   # 旧，已不用
 scanner_runs: ~/Desktop/因子挖掘/scanner/runs   # 第 3 问：只挖扫描器一阶命中率 ≥ 2% 的数据集
-only_datasets: ["USA|1|TOP3000|analyst_consensus"]   # 现行设计 试跑：只用这一个
+only_datasets: []   # 空 = 按扫描器一阶命中率排的数据集顺序（10/14 第 3 问已定）
 
 budget:
-  v1_daily_cap: 50           # 现行设计 试跑：50 次
+  v1_daily_cap: 300          # 10/15 第一次正式跑：3 个数据集 x 100 次，LLM 约 ¥6
   daily_sim_cap: 2400        # 并发 10 × 12 小时 × 每小时 20 次（约 3 分钟一次）
   active_datasets: 1         # 你定的：一次只做一个数据集
   dataset_sim_cap: 100       # 现行设计 第 1 步：每个数据集 100 次

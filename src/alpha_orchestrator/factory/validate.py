@@ -137,6 +137,42 @@ def arity_issues(expression: str, signatures: Mapping[str, tuple[int, int]]) -> 
     return issues
 
 
+# 2026-10-14: group_rank(x, <an ordinary field>) cancelled a batch ("Incompatible unit
+# ... expected Unit[Group:1]"). The group input sits at this positional index.
+GROUP_INPUT = {
+    "group_rank": 1, "group_zscore": 1, "group_neutralize": 1, "group_scale": 1,
+    "group_max": 1, "group_min": 1, "group_backfill": 1, "group_mean": 2,
+}
+GROUP_MAKERS = ("bucket(", "densify(", "group_cartesian_product(")
+
+
+def group_issues(expression: str, fields: Mapping[str, str]) -> list[str]:
+    issues = []
+    for m in re.finditer(r"([A-Za-z_]\w*)\s*\(", expression):
+        at = GROUP_INPUT.get(m.group(1).lower())
+        if at is None:
+            continue
+        body = _inside(expression, m.end() - 1)
+        if body is None:
+            continue
+        args = [a.strip() for a in _split_args(body) if a.strip()]
+        positional = [a for a in args if not re.match(r"^[A-Za-z_]\w*\s*=(?!=)", a)]
+        if len(positional) <= at:
+            continue
+        g = positional[at]
+        if (
+            g.lower() in GROUP_CLASSIFICATION_IDENTIFIERS
+            or fields.get(g) == "GROUP"
+            or g.lower().startswith(GROUP_MAKERS)
+        ):
+            continue
+        issues.append(
+            f"{m.group(1)} needs a grouping input (industry, sector, subindustry, market, "
+            f"a GROUP field or bucket(...)), got {g[:60]}"
+        )
+    return issues
+
+
 def check(
     expression: str,
     *,
@@ -198,6 +234,7 @@ def check(
 
     if signatures:
         verdict.issues.extend(arity_issues(expression, signatures))
+    verdict.issues.extend(group_issues(expression, fields))
     verdict.operator_count = operator_count(expression, ops)
     if verdict.operator_count > MAX_OPERATORS:
         verdict.issues.append(f"{verdict.operator_count} operators > {MAX_OPERATORS}")
