@@ -97,6 +97,8 @@ class FactoryConfig:
     scanner_progress: str = ""  # 提案 1: the template scanner's 数据集进度.csv; empty = off
     # 第 3 问: the scanner's runs folder; the factory only digs datasets it found worth digging
     scanner_runs: str = ""
+    # 现行设计 第 1 步: the pilot digs only these cells ("USA|1|TOP3000|analyst_consensus")
+    only_datasets: list[str] = field(default_factory=list)
     budget: Budget = field(default_factory=Budget)
     thresholds: Thresholds = field(default_factory=Thresholds)
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -114,6 +116,7 @@ class FactoryConfig:
             reports_dir=str(reports if reports.is_absolute() else source.parent / reports),
             scanner_progress=raw.get("scanner_progress", cls.scanner_progress),
             scanner_runs=raw.get("scanner_runs", cls.scanner_runs),
+            only_datasets=list(raw.get("only_datasets") or []),
             budget=Budget(**raw.get("budget", {})),
             thresholds=Thresholds(**raw.get("thresholds", {})),
             llm=LLMConfig(**raw.get("llm", {})),

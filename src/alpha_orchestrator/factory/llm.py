@@ -364,6 +364,116 @@ class FactoryLLM:
             out.append(item)
         return out
 
+    # ---------- v4 (现行设计, 10/14 晚) ----------
+    def field_groups(
+        self, dataset: dict[str, Any], fields: Sequence[dict[str, str]], n: int
+    ) -> list[dict[str, Any]]:
+        """第 2 步: read every field description; return up to n groups, each one economic
+        meaning a researcher would test, with its expected direction and up to 3 fields."""
+        prompt = {
+            "task": f"You are a quant researcher reading a new dataset. Read the field "
+            f"descriptions and pick up to {n} field groups worth testing as stock-selection "
+            "signals. Each group is ONE economic meaning (e.g. 'number of analysts covering "
+            "the stock'), with the expected direction and why it should predict returns.",
+            "dataset": dataset,
+            "fields": list(fields),
+            "rules": [
+                "Use field ids exactly as listed. At most 3 fields per group; prefer high "
+                "coverage.",
+                "Groups must differ in meaning, not just in which version of a field.",
+                "direction: 'higher is better' or 'lower is better'.",
+            ],
+            "output_fields": {
+                "groups": "list of objects with name, meaning, direction, why (one sentence), "
+                "fields (list of up to 3 field ids)"
+            },
+        }
+        data = self.ask("field_groups", json.dumps(prompt, ensure_ascii=False), strong=True)
+        return [g for g in (data.get("groups") or []) if isinstance(g, dict)][:n]
+
+    def first_formulas(
+        self,
+        dataset: dict[str, Any],
+        group: dict[str, Any],
+        fields: Sequence[dict[str, str]],
+        operators: Sequence[str],
+        n: int,
+        rejected: str = "",
+    ) -> list[dict[str, str]]:
+        """第 3 步: n formulas stating one group's idea from n different angles."""
+        prompt = {
+            "task": f"Write {n} formulas that test this idea, each from a different angle "
+            "(for example: the level, the change over time, relative to the industry).",
+            "dataset": dataset,
+            "idea": group,
+            "fields": list(fields),
+            "operators": list(operators),
+            "rules": [
+                "Only listed operators and listed field ids. At most 3 fields and 5 "
+                "operators per formula.",
+                "Positional inputs exactly as each operator's definition; optional inputs "
+                "only by name, e.g. winsorize(x, std=4).",
+                "Higher formula value = buy. Follow the idea's direction.",
+                "Fields are already cleaned: do not add filling.",
+            ],
+            "output_fields": {
+                "formulas": "list of objects with formula (string) and why (one sentence)"
+            },
+        }
+        if rejected:
+            prompt["your_last_answer_was_rejected_because"] = rejected
+        data = self.ask("first_formulas", json.dumps(prompt, ensure_ascii=False), strong=True)
+        return [
+            {"form": f["formula"], "way": str(f.get("why", ""))[:200]}
+            for f in (data.get("formulas") or [])
+            if isinstance(f, dict) and isinstance(f.get("formula"), str)
+        ]
+
+    def diagnose(
+        self,
+        idea: dict[str, Any],
+        history: Sequence[dict[str, Any]],
+        best: dict[str, Any],
+        fields: Sequence[dict[str, str]],
+        operators: Sequence[str],
+        problems: Sequence[str],
+        n: int,
+        rejected: str = "",
+    ) -> dict[str, Any]:
+        """第 5+6 步: diagnose the best formula from the WHOLE history of this idea, then
+        give up or propose n one-change variants of the best one."""
+        prompt = {
+            "task": "Diagnose why the best formula of this idea does not pass the "
+            "submission line (Sharpe >= 1.58, Fitness >= 1, turnover 1%-70%), using the "
+            f"whole history below. Then either give up, or write {n} new formulas, each "
+            "changing exactly ONE thing in the best formula to fix the diagnosed problem.",
+            "idea": idea,
+            "best": best,
+            "history_all_tries": list(history),
+            "fields": list(fields),
+            "operators": list(operators),
+            "problems_to_choose_from": list(problems),
+            "rules": [
+                "Pick ONE main problem from the list and quote the numbers that show it.",
+                "Never repeat a formula in the history; learn from changes that made it worse.",
+                "Give up when the history shows the idea cannot reach the line.",
+                "Positional inputs exactly as each operator's definition; optional inputs "
+                "only by name. At most 8 operators and 3 fields.",
+                "`decay` is the simulation setting (0-512); set it only for a decay change.",
+            ],
+            "output_fields": {
+                "problem": "one item from problems_to_choose_from",
+                "evidence": "the numbers that show it",
+                "decision": "'give_up' or 'change'",
+                "why": "one sentence",
+                "variants": "list of objects with expression, change (what and why), and "
+                "decay (integer, only for a decay change); empty when giving up",
+            },
+        }
+        if rejected:
+            prompt["your_last_answer_was_rejected_because"] = rejected
+        return self.ask("diagnose", json.dumps(prompt, ensure_ascii=False), strong=True)
+
     def describe(self, alpha: dict[str, Any]) -> str:
         prompt = {
             "task": "Write the alpha description for submission: 'Idea:' then 'Rationale:', "

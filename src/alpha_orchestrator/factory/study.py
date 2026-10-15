@@ -18,7 +18,7 @@ from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ledger import Ledger
 from alpha_orchestrator.factory.models import CellORM, CellState, FieldORM
 
-DESIGN = "v3"  # 10/14 统计题设计; earlier verdicts do not count (reset_old_verdicts)
+DESIGN = "v4"  # 10/14 晚 现行设计; earlier verdicts do not count (reset_old_verdicts)
 FILL_DAYS = 63  # 第 2 步: quarterly data carried one quarter (官方小贴士 10)
 NUMERIC_TYPES = ("MATRIX", "VECTOR")
 
@@ -58,6 +58,15 @@ def choose_dataset(s: Session, config: FactoryConfig) -> str | None:
     """第 3 问: only datasets the template scanner found worth digging (first-pass hit rate
     >= 2%), highest hit rate first, each once under this design. Without the scanner's
     folder, the old ranking (best score, coverage known and >= min_coverage)."""
+    if config.only_datasets:
+        for cell_id in config.only_datasets:
+            cell = s.get(CellORM, cell_id)
+            if cell is None:
+                continue
+            if cell.state != CellState.NEW and (cell.plan or {}).get("design") == DESIGN:
+                continue
+            return cell.cell_id
+        return None
     if config.scanner_runs:
         for w in scanner_worth(config.scanner_runs):
             cell = s.get(CellORM, f"{w['region']}|1|{w['universe']}|{w['dataset']}")

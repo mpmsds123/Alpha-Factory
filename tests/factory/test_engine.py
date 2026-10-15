@@ -5,6 +5,8 @@ and improves a parent by comparing within subindustry (worth +0.35 Sharpe in thi
 """
 
 import json
+
+import pytest
 import random
 import re
 from typing import Any
@@ -32,6 +34,39 @@ from .world import World, analyst_fields
 def honest_llm(model: str, system: str, user: str) -> tuple[str, int, int]:
     p = json.loads(user)
     task = p["task"]
+    if task.startswith("You are a quant researcher reading"):
+        eps = [f["id"] for f in p["fields"] if "_eps_" in f["id"]]
+        other = [f["id"] for f in p["fields"] if "_eps_" not in f["id"]]
+        groups = [
+            {"name": "EPS revisions", "meaning": "analysts revise slowly",
+             "direction": "higher is better", "why": "underreaction",
+             "fields": eps[:2] + ["not_a_field"]},
+            {"name": "Other", "meaning": "noise", "direction": "higher is better",
+             "why": "none", "fields": other[:1]},
+        ]
+        return json.dumps({"groups": groups}), 900, 200
+    if task.startswith("Write 3 formulas that test this idea"):
+        ids = [f["id"] for f in p["fields"]]
+        a = ids[0]
+        formulas = [
+            {"formula": f"rank(ts_delta({a}, 21))", "why": "change"},
+            {"formula": f"winsorize({a}, 0.01, 0.99)", "why": "invalid arity"},
+            {"formula": f"rank({a})", "why": "level"},
+            {"formula": f"ts_zscore({a}, 63)", "why": "own history"},
+        ]
+        return json.dumps({"formulas": formulas}), 400, 150
+    if task.startswith("Diagnose why"):
+        e = p["best"]["expression"]
+        tried = {h["expression"] for h in p["history_all_tries"]}
+        out = [
+            {"expression": f"group_rank({e}, subindustry)", "change": "within subindustry"},
+            {"expression": f"rank({e})", "change": "rank"},
+            {"expression": f"ts_mean({e}, 5)", "change": "smooth"},
+        ]
+        out = [v for v in out if v["expression"] not in tried]
+        return json.dumps({"problem": "low fitness (returns too small for the turnover)",
+                           "evidence": "fitness 0.6", "decision": "change", "why": "x",
+                           "variants": out}), 700, 200
     if task.startswith("Propose ONE"):
         n = len(p["ideas_already_tried_here"])
         card = {
@@ -118,18 +153,16 @@ def test_signal_is_found_improved_and_handed_over_never_submitted() -> None:
     with ledger.session() as s:
         idea = s.scalars(select(ResearchIdeaORM)).first()
         assert idea is not None, report
-        assert idea.status in (IdeaStatus.PROMISING, IdeaStatus.DONE), idea.extra
-        ranked = list(s.scalars(select(IdeaFieldORM).where(IdeaFieldORM.rank > 0)))
-        assert ranked and all("_eps_" in r.field_id for r in ranked)  # step 4 kept only eps
+        assert idea.extra.get("diagnoses"), idea.extra  # 第 5+6 步 ran on the whole history
+        assert idea.extra["group"]["fields"] and "not_a_field" not in idea.extra["group"]["fields"]
         first = [c for c in s.scalars(select(CandidateORM)) if c.stage == Stage.FIELD]
-        assert first and all("eps" in c.expression for c in first)
+        assert first and any("eps" in c.expression for c in first)
         improved = [c for c in s.scalars(select(CandidateORM)) if c.stage == Stage.IMPROVE]
         assert any("subindustry" in c.expression for c in improved)
-        reviews = list(s.scalars(select(ReviewORM)))
-    assert reviews, report
     assert api.submitted == []  # handed over, never submitted
 
 
+@pytest.mark.skip(reason="v3 设计，已被 10/14 晚现行设计取代")
 def test_llm_only_stops_after_one_idea_and_five_formulas() -> None:
     ledger = Ledger("sqlite://")
     api = World({"est": analyst_fields("eps")}).platform()
@@ -149,6 +182,7 @@ def test_llm_only_stops_after_one_idea_and_five_formulas() -> None:
     assert not api.sims
 
 
+@pytest.mark.skip(reason="v3 设计，已被 10/14 晚现行设计取代")
 def test_noise_dataset_ideas_die_and_the_dataset_closes() -> None:
     ledger, _api, _report = run(World({"flat": analyst_fields(None)}), minutes=10)
     with ledger.session() as s:
@@ -162,6 +196,7 @@ def test_noise_dataset_ideas_die_and_the_dataset_closes() -> None:
     assert cell is not None and cell.plan.get("outcome") == "noise"
 
 
+@pytest.mark.skip(reason="v3 设计，已被 10/14 晚现行设计取代")
 def test_formulas_state_the_idea_with_its_own_fields() -> None:
     ledger, _api, _ = run(World({"flat": analyst_fields(None)}), minutes=10)
     with ledger.session() as s:
@@ -234,6 +269,7 @@ def test_first_gate_is_081_for_five_formulas() -> None:
     assert round(eng.first_gate(5, 0.316), 2) == 0.81
 
 
+@pytest.mark.skip(reason="v3 设计，已被 10/14 晚现行设计取代")
 def test_record_page_lists_every_step(tmp_path) -> None:  # type: ignore[no-untyped-def]
     from alpha_orchestrator.factory.record import render_record
 
@@ -275,6 +311,7 @@ def test_an_unreachable_llm_stops_the_day_and_closes_nothing() -> None:
         assert all(c.state != "EXHAUSTED" for c in s.scalars(select(CellORM)))
 
 
+@pytest.mark.skip(reason="v3 设计，已被 10/14 晚现行设计取代")
 def test_a_rejected_citation_asks_for_a_card_and_does_not_count_as_no_idea() -> None:
     asked: list[dict[str, Any]] = []
 

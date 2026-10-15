@@ -68,6 +68,9 @@ PERIOD_SAMPLE = 12  # families whose update period is measured (4 probes each)
 TOKEN = re.compile(r"[a-z0-9]+")
 
 
+from alpha_orchestrator.factory.validate import signature  # noqa: E402
+
+
 @dataclass
 class Metadata:
     """Account-level facts refreshed once per run."""
@@ -75,6 +78,7 @@ class Metadata:
     operators: set[str] = field(default_factory=set)
     definitions: dict[str, str] = field(default_factory=dict)
     options: dict[str, Any] = field(default_factory=dict)
+    signatures: dict[str, tuple[int, int]] = field(default_factory=dict)
 
     @classmethod
     def fetch(cls, api: BrainAPI) -> "Metadata":
@@ -83,6 +87,11 @@ class Metadata:
             operators={str(o["name"]).lower() for o in ops},
             definitions={str(o["name"]): str(o.get("definition") or o["name"]) for o in ops},
             options=api.simulation_options(),
+            signatures={
+                str(o["name"]).lower(): sig
+                for o in ops
+                if (sig := signature(str(o.get("definition") or ""), str(o.get("description") or "")))
+            },
         )
 
     def neutralizations(self, region: str) -> list[str]:
