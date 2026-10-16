@@ -69,7 +69,9 @@ FORMULA_MAX_FIELDS = 3  # Power Pool
 FIRST_GATE = 0.8  # 第 7 步: the luck line of 3 noise formulas is 0.76
 GROUP_FIELD_LINES = 400
 # 10/15 第一次正式跑后的修改
-GROUP_REFILLS = 2  # 8 组试完预算还有剩（实测每个数据集只用了约 25 次）→ 再要 8 组，最多 2 次
+GROUP_REFILLS = 10  # 安全上限；真正的停止条件是数据集预算（100 次）用完
+# 10/15 定：先侦察 8 组；一个都没过 0.8 → 这个数据集没信号，换下一个；有过的 → 补新组
+# 直到预算用完。误扔一个有信号数据集的概率约 0.8^8 = 17%（每组过 0.8 的机会按 20% 估）
 NEAR_MISS = 1.2  # Sharpe 到这里离正式线只差一步：改进没涨够 0.35 也继续改，直到 3 轮
 PROBLEMS = (
     "no signal",
@@ -199,9 +201,12 @@ class Engine:
             if (
                 plan.get("groups") is not None
                 and int(plan.get("next_group", 0)) >= len(plan["groups"])
-                and int(plan.get("refills", 0)) >= GROUP_REFILLS
+                and (
+                    int(plan.get("refills", 0)) >= GROUP_REFILLS
+                    or not self._has_signal(s, cell_id)
+                )
             ):
-                return True  # 现行设计 第 7 步: every field group tried, refills used
+                return True  # 侦察完没信号，或补组到上限
             return int(plan.get("idea_fail_streak", 0)) >= IDEA_FAILS_TO_STOP
 
     def _close_dataset(self, cell_id: str) -> None:
@@ -323,7 +328,11 @@ class Engine:
             assert cell is not None
             plan = dict(cell.plan or {})
             k = int(plan.get("next_group", 0))
-            refill = k >= len(groups) and int(plan.get("refills", 0)) < GROUP_REFILLS
+            refill = (
+                k >= len(groups)
+                and int(plan.get("refills", 0)) < GROUP_REFILLS
+                and self._has_signal(s, cell_id)
+            )
         if refill:
             groups = self._groups(cell_id, refill=True) or groups
         with self.ledger.session() as s:
@@ -412,6 +421,22 @@ class Engine:
                 formulas=[e for e, _, _ in exprs],
             )
         return added
+
+    @staticmethod
+    def _has_signal(s: Session, cell_id: str) -> bool:
+        """At least one field group of this dataset passed the first gate (0.8)."""
+        return (
+            s.scalar(
+                select(func.count())
+                .select_from(ResearchIdeaORM)
+                .where(
+                    ResearchIdeaORM.cell_id == cell_id,
+                    ResearchIdeaORM.status != IdeaStatus.RETIRED,
+                    ResearchIdeaORM.best_sharpe >= FIRST_GATE,
+                )
+            )
+            or 0
+        ) > 0
 
     def _operator_lines(self) -> list[str]:
         return sorted(f"{k}: {v}"[:160] for k, v in self.meta.definitions.items())
