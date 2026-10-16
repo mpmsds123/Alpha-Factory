@@ -68,6 +68,9 @@ FIRST_OPERATORS = 5  # 第 3 步: 5 + one change per round x 3 rounds = 8, the P
 FORMULA_MAX_FIELDS = 3  # Power Pool
 FIRST_GATE = 0.8  # 第 7 步: the luck line of 3 noise formulas is 0.76
 GROUP_FIELD_LINES = 400
+# 10/15 第一次正式跑后的修改
+GROUP_REFILLS = 2  # 8 组试完预算还有剩（实测每个数据集只用了约 25 次）→ 再要 8 组，最多 2 次
+NEAR_MISS = 1.2  # Sharpe 到这里离正式线只差一步：改进没涨够 0.35 也继续改，直到 3 轮
 PROBLEMS = (
     "no signal",
     "direction reversed",
@@ -193,10 +196,12 @@ class Engine:
             spent = cell.sims_used - int(plan.get("sims_at_open", 0))
             if spent >= self.config.budget.dataset_sim_cap:
                 return True
-            if plan.get("groups") is not None and int(plan.get("next_group", 0)) >= len(
-                plan["groups"]
+            if (
+                plan.get("groups") is not None
+                and int(plan.get("next_group", 0)) >= len(plan["groups"])
+                and int(plan.get("refills", 0)) >= GROUP_REFILLS
             ):
-                return True  # 现行设计 第 7 步: every field group tried
+                return True  # 现行设计 第 7 步: every field group tried, refills used
             return int(plan.get("idea_fail_streak", 0)) >= IDEA_FAILS_TO_STOP
 
     def _close_dataset(self, cell_id: str) -> None:
@@ -239,14 +244,17 @@ class Engine:
             "description": cell.description[:1500],
         }
 
-    def _groups(self, cell_id: str) -> list[dict[str, Any]] | None:
+    def _groups(self, cell_id: str, refill: bool = False) -> list[dict[str, Any]] | None:
         """第 2 步: one LLM call per dataset reads every field description and returns up
-        to GROUPS field groups; field ids that do not exist are dropped."""
+        to GROUPS field groups; field ids that do not exist are dropped. refill=True asks
+        for GROUPS more, different from those already tried (budget left over)."""
         with self.ledger.session() as s:
             cell = s.get(CellORM, cell_id)
             assert cell is not None
-            if (cell.plan or {}).get("groups") is not None:
-                return list(cell.plan["groups"])
+            plan0 = cell.plan or {}
+            if plan0.get("groups") is not None and not refill:
+                return list(plan0["groups"])
+            tried = [g["name"] for g in plan0.get("groups") or []]
             brief = self._brief(cell)
             fields = study.usable_fields(s, cell_id)
             lines = [
@@ -262,7 +270,7 @@ class Engine:
         groups: list[dict[str, Any]] = []
         for _ in range(2):
             try:
-                raw = self.llm.field_groups(brief, lines, GROUPS)
+                raw = self.llm.field_groups(brief, lines, GROUPS, tried)
             except RuntimeError:
                 continue
             for g in raw:
@@ -282,10 +290,26 @@ class Engine:
         with self.ledger.session() as s:
             cell = s.get(CellORM, cell_id)
             assert cell is not None
+            plan = dict(cell.plan or {})
+            if refill:
+                plan["refills"] = int(plan.get("refills", 0)) + 1
+                old = list(plan.get("groups") or [])
+                seen = {g["name"].lower() for g in old} | {
+                    tuple(sorted(g["fields"])) for g in old
+                }
+                groups = [
+                    g for g in groups
+                    if g["name"].lower() not in seen and tuple(sorted(g["fields"])) not in seen
+                ]
+                merged = old + groups
+                cell.plan = {**plan, "groups": merged}
+                self.ledger.log(s, "field_groups_refill", cell_id,
+                                groups=[g["name"] for g in groups])
+                return merged
             if not groups:
                 self.ledger.log(s, "llm_unavailable", cell_id, reasons=["no field groups"])
                 return None
-            cell.plan = {**(cell.plan or {}), "groups": groups, "next_group": 0}
+            cell.plan = {**plan, "groups": groups, "next_group": 0}
             self.ledger.log(s, "field_groups", cell_id, groups=[g["name"] for g in groups])
         return groups
 
@@ -294,6 +318,14 @@ class Engine:
         groups = self._groups(cell_id)
         if groups is None:
             raise LLMUnavailable("the LLM gave no field groups")
+        with self.ledger.session() as s:
+            cell = s.get(CellORM, cell_id)
+            assert cell is not None
+            plan = dict(cell.plan or {})
+            k = int(plan.get("next_group", 0))
+            refill = k >= len(groups) and int(plan.get("refills", 0)) < GROUP_REFILLS
+        if refill:
+            groups = self._groups(cell_id, refill=True) or groups
         with self.ledger.session() as s:
             cell = s.get(CellORM, cell_id)
             assert cell is not None
@@ -510,6 +542,8 @@ class Engine:
             history = [_row(c) for c in self._idea_rows(s, idea_id) if c.stage != Stage.ROBUST]
             tried = {re.sub(r"\s+", "", c.expression) for c in self._idea_rows(s, idea_id)}
             best = _row(parent)
+            best["neutralization"] = (parent.settings or {}).get("neutralization")
+            best["neutralization_options"] = self.meta.neutralizations(cell.region)
             alpha_id = parent.alpha_id
             usable = {f.field_id: f for f in study.usable_fields(s, idea.cell_id)}
             group = idea.extra.get("group") or {}
@@ -544,12 +578,18 @@ class Engine:
             if str(verdict.get("decision", "")).lower() == "give_up":
                 break
             variants, problems = [], []
+            tried_shapes = {_formula_shape(e) for e in tried}
             for v in verdict.get("variants") or []:
                 if not isinstance(v, dict) or not isinstance(v.get("expression"), str):
                     continue
                 expr = v["expression"].strip()
-                if re.sub(r"\s+", "", expr) in tried and "decay" not in v:
+                setting_change = "decay" in v or "neutralization" in v
+                if re.sub(r"\s+", "", expr) in tried and not setting_change:
                     problems.append(f"{expr}: already tried")
+                    continue
+                if _formula_shape(re.sub(r"\s+", "", expr)) in tried_shapes and not setting_change:
+                    problems.append(f"{expr}: only a window or number changed; change the "
+                                    "structure or a setting instead")
                     continue
                 chk = check(
                     expr, operators=self.meta.operators, fields=types,
@@ -584,10 +624,13 @@ class Engine:
                 return
             parent = s.get(CandidateORM, p["id"])
             assert parent is not None
+            neutral = {n.upper() for n in self.meta.neutralizations(cell.region)}
             for v in variants[:VARIANTS]:
                 settings = dict(parent.settings)
                 if isinstance(v.get("decay"), int):
                     settings["decay"] = max(0, min(512, int(v["decay"])))
+                if str(v.get("neutralization", "")).upper() in neutral:
+                    settings["neutralization"] = str(v["neutralization"]).upper()
                 c = self._add(
                     s, cell, v["expression"], settings, Stage.IMPROVE, idea_id,
                     field=parent.extra.get("field"), parent=parent,
@@ -619,6 +662,12 @@ class Engine:
                 if best is not None and (best.sharpe or 0) >= p["best"] + gain:
                     p.update(id=best.id, best=best.sharpe, dry=0)
                     idea.best_sharpe = max(idea.best_sharpe, best.sharpe or 0)
+                elif p["best"] >= NEAR_MISS:
+                    # near the line: keep the better one (if any) and keep trying, up to
+                    # MAX_ROUNDS; a smaller gain is worth it this close
+                    if best is not None and (best.sharpe or 0) > p["best"]:
+                        p.update(id=best.id, best=best.sharpe)
+                        idea.best_sharpe = max(idea.best_sharpe, best.sharpe or 0)
                 else:
                     p["dry"] += 1
                 p["rounds"] += 1
