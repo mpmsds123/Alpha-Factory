@@ -374,7 +374,11 @@ class FactoryLLM:
         return path.read_text(encoding="utf-8") if path.exists() else ""
 
     def field_groups(
-        self, dataset: dict[str, Any], fields: Sequence[dict[str, str]], n: int
+        self,
+        dataset: dict[str, Any],
+        fields: Sequence[dict[str, str]],
+        n: int,
+        tried: Sequence[str] = (),
     ) -> list[dict[str, Any]]:
         """第 2 步: read every field description; return up to n groups, each one economic
         meaning a researcher would test, with its expected direction and up to 3 fields."""
@@ -398,6 +402,8 @@ class FactoryLLM:
                 "fields (list of up to 3 field ids)"
             },
         }
+        if tried:
+            prompt["groups_already_tried_do_not_repeat"] = list(tried)
         data = self.ask("field_groups", json.dumps(prompt, ensure_ascii=False), strong=True)
         return [g for g in (data.get("groups") or []) if isinstance(g, dict)][:n]
 
@@ -477,14 +483,19 @@ class FactoryLLM:
                 "Positional inputs exactly as each operator's definition; optional inputs "
                 "only by name. At most 8 operators and 3 fields.",
                 "`decay` is the simulation setting (0-512); set it only for a decay change.",
+                "`neutralization` is the simulation setting, one of "
+                "best.neutralization_options; set it only for a neutralization change.",
+                "Changing only a window length or a number is not a change: change the "
+                "structure (e.g. a step of the logic chain) or a setting.",
             ],
             "output_fields": {
                 "problem": "one item from problems_to_choose_from",
                 "evidence": "the numbers that show it",
                 "decision": "'give_up' or 'change'",
                 "why": "one sentence",
-                "variants": "list of objects with expression, change (what and why), and "
-                "decay (integer, only for a decay change); empty when giving up",
+                "variants": "list of objects with expression, change (what and why), "
+                "decay (integer, only for a decay change) and neutralization (only for a "
+                "neutralization change); empty when giving up",
             },
         }
         if rejected:

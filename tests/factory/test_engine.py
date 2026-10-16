@@ -334,3 +334,12 @@ def test_a_rejected_citation_asks_for_a_card_and_does_not_count_as_no_idea() -> 
     with ledger.session() as s:
         cell = next(c for c in s.scalars(select(CellORM)) if c.plan)
         assert cell.plan.get("idea_fail_streak", 0) == 0
+
+
+def test_refill_skips_repeated_groups_and_near_miss_keeps_improving() -> None:
+    ledger, api, report = run(World({"est": analyst_fields("eps")}))
+    with ledger.session() as s:
+        cell = s.scalars(select(CellORM)).first()
+        names = [g["name"] for g in (cell.plan or {}).get("groups", [])]
+    assert len(names) == len(set(n.lower() for n in names)), names  # no repeated group
+    assert eng.NEAR_MISS == 1.2 and eng.GROUP_REFILLS == 2
