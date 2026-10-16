@@ -18,7 +18,7 @@ from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ledger import Ledger
 from alpha_orchestrator.factory.models import CellORM, CellState, FieldORM
 
-DESIGN = "v4"  # 10/14 晚 现行设计; earlier verdicts do not count (reset_old_verdicts)
+DESIGN = "v5"  # 10/15 晚: 侦察+有信号才加码; earlier verdicts do not count (reset_old_verdicts)
 FILL_DAYS = 63  # 第 2 步: quarterly data carried one quarter (官方小贴士 10)
 NUMERIC_TYPES = ("MATRIX", "VECTOR")
 
