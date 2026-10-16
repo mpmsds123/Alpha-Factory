@@ -342,4 +342,20 @@ def test_refill_skips_repeated_groups_and_near_miss_keeps_improving() -> None:
         cell = s.scalars(select(CellORM)).first()
         names = [g["name"] for g in (cell.plan or {}).get("groups", [])]
     assert len(names) == len(set(n.lower() for n in names)), names  # no repeated group
-    assert eng.NEAR_MISS == 1.2 and eng.GROUP_REFILLS == 2
+    assert eng.NEAR_MISS == 1.2 and eng.GROUP_REFILLS == 10
+
+
+def _kinds(ledger: Ledger) -> list[str]:
+    with ledger.session() as s:
+        return [e.kind for e in s.scalars(select(EventORM))]
+
+
+def test_no_signal_after_scouting_means_next_dataset_no_refill() -> None:
+    ledger, _, _ = run(World({"est": analyst_fields(None)}, noise=0.2))
+    kinds = _kinds(ledger)
+    assert "field_groups" in kinds and "field_groups_refill" not in kinds
+
+
+def test_signal_found_means_more_groups_are_asked_for() -> None:
+    ledger, _, _ = run(World({"est": analyst_fields("eps")}), minutes=30)
+    assert "field_groups_refill" in _kinds(ledger)
