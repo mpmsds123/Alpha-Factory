@@ -62,6 +62,7 @@ class Stage:
     FLIP = "FLIP"  # multiply(-1, parent)
     ROBUST = "ROBUST"  # stress variant of a candidate (rank, sign, perturbation, ...)
     FIELD = "FIELD"  # 设计文档 第 5 步: one field in an idea's simplest form
+    ENHANCE = "ENHANCE"  # 加强: liquidity/size-bucket grouping, then trade_when, around a near miss
     IMPROVE = "IMPROVE"  # 设计文档 第 7 步: one-change variant of a parent
 
 
