@@ -359,3 +359,65 @@ def test_no_signal_after_scouting_means_next_dataset_no_refill() -> None:
 def test_signal_found_means_more_groups_are_asked_for() -> None:
     ledger, _, _ = run(World({"est": analyst_fields("eps")}), minutes=30)
     assert "field_groups_refill" in _kinds(ledger)
+
+
+class _SizeWorld(World):
+    """The signal is concentrated in small caps: comparing within liquidity deciles adds
+    `bucket_gain` Sharpe (like the 10/16 run's two 1.58s failing the sub-universe check)."""
+
+    bucket_gain: float = 0.0
+
+    def metrics(self, expr: str, settings: dict[str, Any]) -> dict[str, Any]:
+        m = super().metrics(expr, settings)
+        if "bucket(rank(close*volume)" in expr and m["sharpe"] > 0.5:
+            sharpe = m["sharpe"] + self.bucket_gain
+            fitness = sharpe * 0.75
+            fails = "" if sharpe >= 1.58 and fitness >= 1 else "LOW_SHARPE"
+            from .fakes import is_metrics
+
+            return is_metrics(sharpe, fitness, turnover=0.12, margin=0.0012, fails=fails)
+        return m
+
+
+def _enhance_rows(ledger: Ledger) -> dict[str, list[CandidateORM]]:
+    out: dict[str, list[CandidateORM]] = {}
+    with ledger.session() as s:
+        for c in s.scalars(select(CandidateORM).where(CandidateORM.stage == Stage.ENHANCE)):
+            out.setdefault(c.extra["idea"], []).append(c)
+            s.expunge(c)
+    return out
+
+
+def test_a_near_miss_is_enhanced_by_deciles_and_passes() -> None:
+    world = _SizeWorld({"est": analyst_fields("eps", strength=1.0, signal_stats=("mean", "median", "high", "low"))})
+    world.bucket_gain = 0.6
+    ledger, _, _ = run(world, minutes=30)
+    rows = _enhance_rows(ledger)
+    assert rows, "a near miss (1.0 + 0.35 within subindustry) must be enhanced"
+    for kids in rows.values():
+        assert all("bucket(" in k.expression or "trade_when(" in k.expression for k in kids)
+        assert len(kids) <= len(eng.ENHANCE_GROUPS) + len(eng.ENHANCE_TIMING)
+    with ledger.session() as s:
+        done = [i for i in s.scalars(select(ResearchIdeaORM)) if i.status == IdeaStatus.DONE]
+        hit_ids = {h for i in done for h in i.extra.get("regular_hits", [])}
+        hit_stages = {s.get(CandidateORM, h).stage for h in hit_ids}
+    assert Stage.ENHANCE in hit_stages
+
+
+def test_enhance_tries_trade_when_on_the_best_wrapper_then_closes() -> None:
+    world = _SizeWorld({"est": analyst_fields("eps", strength=1.0, signal_stats=("mean", "median", "high", "low"))})
+    ledger, _, _ = run(world, minutes=30)
+    rows = _enhance_rows(ledger)
+    assert rows
+    for idea_id, kids in rows.items():
+        timing = [k for k in kids if k.expression.startswith("trade_when(")]
+        assert len([k for k in kids if k not in timing]) == len(eng.ENHANCE_GROUPS)
+        assert len(timing) == len(eng.ENHANCE_TIMING), idea_id
+        with ledger.session() as s:
+            idea = s.get(ResearchIdeaORM, idea_id)
+            assert idea.status == IdeaStatus.DEAD and idea.extra["phase"] == "enhanced"
+
+
+def test_a_noise_idea_is_never_enhanced() -> None:
+    ledger, _, _ = run(World({"est": analyst_fields(None)}, noise=0.2))
+    assert not _enhance_rows(ledger)

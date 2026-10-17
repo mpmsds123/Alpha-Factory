@@ -180,8 +180,10 @@ def check(
     fields: Mapping[str, str],
     extra_fields: Set[str] = COMMON_FIELDS,
     signatures: Mapping[str, tuple[int, int]] | None = None,
+    max_operators: int | None = MAX_OPERATORS,
 ) -> Verdict:
-    """`fields` maps this dataset's field ids to MATRIX/VECTOR/GROUP."""
+    """`max_operators` is the Power Pool limit; None for a regular-only formula.
+    `fields` maps this dataset's field ids to MATRIX/VECTOR/GROUP."""
     verdict = Verdict(ok=True)
     try:
         tokens = tokenize_expression(expression)
@@ -236,7 +238,7 @@ def check(
         verdict.issues.extend(arity_issues(expression, signatures))
     verdict.issues.extend(group_issues(expression, fields))
     verdict.operator_count = operator_count(expression, ops)
-    if verdict.operator_count > MAX_OPERATORS:
-        verdict.issues.append(f"{verdict.operator_count} operators > {MAX_OPERATORS}")
+    if max_operators is not None and verdict.operator_count > max_operators:
+        verdict.issues.append(f"{verdict.operator_count} operators > {max_operators}")
     verdict.ok = not verdict.issues
     return verdict

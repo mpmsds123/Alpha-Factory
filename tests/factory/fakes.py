@@ -214,6 +214,7 @@ class FakePlatform(FakeBrainAPI):
             "abs",
             "winsorize",
             "bucket",
+            "densify",
             "group_zscore",
         ]
         # no signature parsed from "name(...)" with a variadic marker: arity unchecked

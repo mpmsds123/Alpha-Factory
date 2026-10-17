@@ -38,7 +38,7 @@ from alpha_orchestrator.factory.models import (
 from alpha_orchestrator.factory.research import Metadata
 from alpha_orchestrator.factory.scheduler import QUOTA_RESERVE, Simulator
 from alpha_orchestrator.factory.select import store_passing
-from alpha_orchestrator.factory.validate import check
+from alpha_orchestrator.factory.validate import MAX_OPERATORS, check
 
 # 第 3 步
 FIELD_LINES = 200  # field families shown to the LLM
@@ -73,6 +73,22 @@ GROUP_REFILLS = 10  # 安全上限；真正的停止条件是数据集预算（1
 # 10/15 定：先侦察 8 组；一个都没过 0.8 → 这个数据集没信号，换下一个；有过的 → 补新组
 # 直到预算用完。误扔一个有信号数据集的概率约 0.8^8 = 17%（每组过 0.8 的机会按 20% 估）
 NEAR_MISS = 1.2  # Sharpe 到这里离正式线只差一步：改进没涨够 0.35 也继续改，直到 3 轮
+# 加强（10/16）：改进完仍没过线、但 Sharpe ≥ NEAR_MISS 的公式，按扫描器二阶/三阶验证过的结构再试。
+# 第 1 步 4 次：按成交额或市值分 10 档，在档内比较。第二轮两条 1.58 都只卡在子股票池检查
+# （信号集中在小盘股）；扫描器期权数据集二阶里，成交额分档 15/31、市值分档 10/31 过三条线，
+# 其他分组 ≤ 4/16。
+_DECILES = "densify(bucket(rank({x}), range='0.1, 1, 0.1'))"  # 单引号：扫描器跑过上千次的写法
+ENHANCE_GROUPS = tuple(
+    f"{op}({{f}}, {_DECILES.format(x=x)})"
+    for x in ("close*volume", "cap")
+    for op in ("group_zscore", "group_neutralize")
+)
+# 第 2 步 2 次：在第 1 步最好的那条外面加 trade_when（只在条件成立时换仓，-1 = 不强制平仓）。
+# 扫描器三阶里这两个条件各 13/25 过三条线，并列最高，一个看放量、一个看高波动。
+ENHANCE_TIMING = (
+    "trade_when(ts_mean(volume, 10) > ts_mean(volume, 60), {f}, -1)",
+    "trade_when(group_rank(ts_std_dev(returns, 60), sector) > 0.7, {f}, -1)",
+)
 PROBLEMS = (
     "no signal",
     "direction reversed",
@@ -127,6 +143,8 @@ class Engine:
         """Moves every idea one step when its simulations are back; keeps ACTIVE_IDEAS
         ideas going on the current dataset; opens the next dataset when needed."""
         moved = {"ideas_moved": 0, "ideas_new": 0}
+        for idea_id in self._enhancing_ideas():
+            moved["ideas_moved"] += self._step_idea(idea_id)
         cell_id = self._current_dataset() or self._open_dataset()
         if cell_id is None:
             return moved
@@ -449,6 +467,9 @@ class Engine:
             if self._pending(s, idea_id):
                 return 0
             status, phase = idea.status, (idea.extra or {}).get("phase")
+        if phase == "enhance":
+            self._settle_enhance(idea_id)
+            return 1
         if status == IdeaStatus.TESTING:
             self._judge(idea_id)
             return 1
@@ -827,6 +848,7 @@ class Engine:
         verdict = check(
             expression, operators=self.meta.operators, fields=types,
             signatures=self.meta.signatures,
+            max_operators=None if stage == Stage.ENHANCE else MAX_OPERATORS,
         )
         if not verdict.ok:
             self.ledger.log(
@@ -847,7 +869,7 @@ class Engine:
             change=change,
             expression=expression,
             settings=settings,
-            priority={Stage.ROBUST: 3.0, Stage.IMPROVE: 2.0}.get(stage, 1.0),
+            priority={Stage.ROBUST: 3.0, Stage.ENHANCE: 2.5, Stage.IMPROVE: 2.0}.get(stage, 1.0),
             extra={
                 "design": "v1",
                 "idea": idea_id,
@@ -917,12 +939,14 @@ class Engine:
         rows = [
             c
             for c in self._idea_rows(s, idea.id)
-            if c.stage in (Stage.FIELD, Stage.IMPROVE)
+            if c.stage in (Stage.FIELD, Stage.IMPROVE, Stage.ENHANCE)
             and c.status == CandidateStatus.DONE
             and not self._suspicious(c)
         ]
-        idea.best_sharpe = max((c.sharpe or 0.0 for c in rows), default=0.0)
         hits = [c.id for c in rows if cell is not None and self._passes_floor(c, cell)]
+        if not hits and cell is not None and self._start_enhance(s, idea, cell, rows):
+            return
+        idea.best_sharpe = max((c.sharpe or 0.0 for c in rows), default=0.0)
         if hits:
             idea.status = IdeaStatus.DONE
             idea.extra = {**idea.extra, "regular_hits": hits}
@@ -935,6 +959,125 @@ class Engine:
                 "no formula passed the regular line",
             }
             self.ledger.log(s, "idea_dead", idea.cell_id, idea=idea.id, best=idea.best_sharpe)
+
+    # ======================= 加强 =======================
+    def _start_enhance(
+        self, s: Session, idea: ResearchIdeaORM, cell: CellORM, rows: list[CandidateORM]
+    ) -> bool:
+        """A near miss (best positive Sharpe >= NEAR_MISS, not past the line) gets the
+        ENHANCE_GROUPS wrappers once, before the idea is closed. False when not eligible."""
+        if "enhance" in (idea.extra or {}):
+            return False
+        base = max(
+            (c for c in rows if c.stage != Stage.ENHANCE and (c.sharpe or 0) >= NEAR_MISS),
+            key=lambda c: c.sharpe or 0,
+            default=None,
+        )
+        if base is None:
+            return False
+        made = self._wrap(s, cell, idea.id, base, ENHANCE_GROUPS, "分档比较")
+        if not made:
+            return False
+        idea.status = IdeaStatus.PROMISING
+        idea.extra = {
+            **idea.extra,
+            "phase": "enhance",
+            "enhance": {"step": 1, "base": base.id, "pending": made},
+        }
+        self.ledger.log(s, "enhance_start", idea.cell_id, idea=idea.id, base=base.sharpe)
+        return True
+
+    def _settle_enhance(self, idea_id: str) -> None:
+        """Step 1 back: the best of base + wrappers (fewest failed checks first, then Sharpe)
+        gets the ENHANCE_TIMING wrappers. Step 2 back: the idea closes."""
+        with self.ledger.session() as s:
+            idea = s.get(ResearchIdeaORM, idea_id)
+            assert idea is not None
+            cell = s.get(CellORM, idea.cell_id)
+            assert cell is not None
+            e = dict(idea.extra.get("enhance") or {})
+            kids = [
+                k
+                for k in (s.get(CandidateORM, i) for i in e.get("pending", []))
+                if k is not None and k.sharpe is not None and not self._suspicious(k)
+            ]
+            done = any(self._passes_floor(k, cell) for k in kids)
+            if e.get("step") == 1 and not done:
+                base = s.get(CandidateORM, e.get("base"))
+                pool = [k for k in [base, *kids] if k is not None and (k.sharpe or 0) > 0]
+                best = max(pool, key=_enhance_key, default=None)
+                made = (
+                    self._wrap(s, cell, idea_id, best, ENHANCE_TIMING, "条件交易")
+                    if best is not None
+                    else []
+                )
+                if made:
+                    idea.extra = {
+                        **idea.extra,
+                        "enhance": {"step": 2, "base": best.id, "pending": made},
+                    }
+                    return
+            idea.extra = {**idea.extra, "phase": "enhanced", "enhance": {**e, "pending": []}}
+            self._finish_idea(s, idea)
+
+    def _wrap(
+        self,
+        s: Session,
+        cell: CellORM,
+        idea_id: str,
+        base: CandidateORM,
+        shapes: tuple[str, ...],
+        why: str,
+    ) -> list[str]:
+        made = []
+        for shape in shapes:
+            c = self._add(
+                s, cell, shape.format(f=base.expression), dict(base.settings), Stage.ENHANCE,
+                idea_id, field=(base.extra or {}).get("field"), parent=base,
+                change=f"加强·{why}",
+            )
+            if c is not None:
+                made.append(c.id)
+        return made
+
+    def _enhancing_ideas(self) -> list[str]:
+        with self.ledger.session() as s:
+            return [
+                i.id
+                for i in s.scalars(
+                    select(ResearchIdeaORM).where(
+                        ResearchIdeaORM.status == IdeaStatus.PROMISING
+                    )
+                )
+                if (i.extra or {}).get("phase") == "enhance"
+            ]
+
+    def revive_near_misses(self) -> int:
+        """Ideas closed before 加强 existed whose best Sharpe reached NEAR_MISS get it now
+        (the datasets in only_datasets, current design)."""
+        n = 0
+        with self.ledger.session() as s:
+            for cell_id in self.config.only_datasets:
+                cell = s.get(CellORM, cell_id)
+                if cell is None or (cell.plan or {}).get("design") != study.DESIGN:
+                    continue
+                for idea in s.scalars(
+                    select(ResearchIdeaORM).where(
+                        ResearchIdeaORM.cell_id == cell_id,
+                        ResearchIdeaORM.status == IdeaStatus.DEAD,
+                        ResearchIdeaORM.best_sharpe >= NEAR_MISS,
+                    )
+                ):
+                    rows = [
+                        c
+                        for c in self._idea_rows(s, idea.id)
+                        if c.stage in (Stage.FIELD, Stage.IMPROVE)
+                        and c.status == CandidateStatus.DONE
+                        and not self._suspicious(c)
+                    ]
+                    if self._start_enhance(s, idea, cell, rows):
+                        n += 1
+        return n
 
     def _passes_floor(self, c: CandidateORM, cell: CellORM) -> bool:
         t = self.config.thresholds
@@ -1032,6 +1175,12 @@ def _first_formulas(
             expr = re.sub(rf"(?<![\w]){re.escape(fid)}(?![\w])", preps[fid] or fid, expr)
         out.append((expr, f.get("way", ""), sorted(used)[0]))
     return out, problems
+
+
+def _enhance_key(c: CandidateORM) -> tuple[int, float]:
+    """Fewer failed platform checks first (a fixed check is worth more), then Sharpe."""
+    fails = [f for f in (c.fails or "").split(",") if f]
+    return (-len(fails), c.sharpe or 0.0)
 
 
 def _one_per_family(fields: list[FieldORM]) -> list[FieldORM]:
@@ -1214,6 +1363,10 @@ def run_day(
     if quota is not None:
         budget = min(budget, quota - QUOTA_RESERVE)
     engine = Engine(api, ledger, config, meta, llm, rng)
+    revived = engine.revive_near_misses()
+    if revived:
+        with ledger.session() as s:
+            ledger.log(s, "enhance_revived", ideas=revived)
     simulator = Simulator(api, ledger, config, sleep=sleep)
     spent, idle = 0, 0
     while spent < budget and time.monotonic() < deadline:

@@ -7,6 +7,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 TOKEN_RE = re.compile(
+    r"\"[^\"]*\"|'[^']*'|"  # string literal, e.g. bucket(x, range="0.1, 1, 0.1")
     r"[A-Za-z_][A-Za-z0-9_]*|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|"
     r"==|!=|<=|>=|&&|\|\||[-+*/%^<>=(),?:\[\]{}.]"
 )
@@ -46,7 +47,7 @@ def metadata_snapshot_identity(
 
 def tokenize_expression(expression: str) -> list[str]:
     tokens = TOKEN_RE.findall(expression)
-    if "".join(tokens) != re.sub(r"\s+", "", expression):
+    if re.sub(r"\s+", "", "".join(tokens)) != re.sub(r"\s+", "", expression):
         raise ValueError("Expression contains unsupported characters")
     return tokens
 
