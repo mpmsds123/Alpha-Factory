@@ -19,7 +19,7 @@ from urllib.parse import urljoin
 import httpx
 
 API_URL = "https://api.worldquantbrain.com"
-DEFAULT_CREDENTIALS = Path("~/secrets/platform-brain.json")
+DEFAULT_CREDENTIALS = Path(".runtime/platform-session.json")
 DEFAULT_STATE_DIR = Path("~/.alpha_factory")
 RELOGIN_COOLDOWN_SECONDS = 1800.0
 

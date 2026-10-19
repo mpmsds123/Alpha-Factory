@@ -69,7 +69,7 @@ class LLMConfig:
     base_url: str = "https://api.deepseek.com"
     model: str = "deepseek-flash"  # grouping fields, descriptions
     strong_model: str = "deepseek-v4-pro"  # combinations of fields
-    key_file: str = "~/secrets/deepseek.json"
+    key_file: str = ".runtime/llm.json"
     temperature: float = 0.4
     timeout_s: float = 120.0
     # 第 9 问: yuan per million tokens [input cache miss, output], DeepSeek official Chinese

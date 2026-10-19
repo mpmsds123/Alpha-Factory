@@ -1,0 +1,7 @@
+{
+  "fixture": "tests/fixtures/basic_replay.json",
+  "dataset_id": "demo-dataset",
+  "candidate_count": 2,
+  "external_calls": 0,
+  "data_classification": "synthetic"
+}

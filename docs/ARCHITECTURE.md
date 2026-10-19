@@ -8,3 +8,6 @@ The active workflow lives in `src/alpha_orchestrator/factory/`. Platform access 
 
 Every external batch is recorded before polling. A restart reads unresolved ledger rows and resumes instead of silently recreating work. Final candidates stop at a human review boundary; there is no submission path in the orchestration layer.
 
+For state invariants, data relationships, scheduling, failure semantics, and verification strategy,
+see [Technical Design](TECHNICAL_DESIGN.md).
+

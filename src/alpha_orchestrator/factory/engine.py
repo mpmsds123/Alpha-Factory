@@ -280,11 +280,11 @@ class Engine:
             tried = [g["name"] for g in plan0.get("groups") or []]
             brief = self._brief(cell)
             fields = study.usable_fields(s, cell_id)
-            lines = [
+            lines: list[dict[str, str]] = [
                 {
                     "id": f.field_id,
                     "description": f.description[:120],
-                    "coverage": round(f.coverage or 0, 2),
+                    "coverage": f"{f.coverage or 0:.2f}",
                 }
                 for f in _one_per_family(fields)[:GROUP_FIELD_LINES]
             ]
@@ -1034,6 +1034,7 @@ class Engine:
                     else []
                 )
                 if made:
+                    assert best is not None
                     idea.extra = {
                         **idea.extra,
                         "enhance": {"step": 2, "base": best.id, "pending": made},
