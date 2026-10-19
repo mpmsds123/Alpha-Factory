@@ -1,0 +1,53 @@
+# Public example configuration. Replace in a private, untracked file for authorized live work.
+db_path: ~/.alpha_factory/factory.db
+reports_dir: reports
+scanner_progress: ""
+scanner_runs: ""
+only_datasets: []
+
+budget:
+  v1_daily_cap: 50
+  daily_sim_cap: 50
+  active_datasets: 1
+  dataset_sim_cap: 50
+  health_sample: 20
+  survey_per_stratum: 2
+  survey_max_families: 40
+  round_size: 10
+  refine_structures: 3
+  combo_count: 4
+  slots: 2
+  children_per_slot: 5
+  min_batch_interval_s: 30
+
+thresholds:
+  noise_sigma: 0.316
+  screen_line: 0.8
+  min_filled_coverage: 0.50
+  min_coverage: 0.60
+  suspicious_sharpe: 3.0
+  suspicious_turnover: 0.70
+  refine_min_gain: 0.35
+  refine_max_rounds: 3
+  submit_sharpe: 1.58
+  submit_sharpe_chn: 2.08
+  submit_fitness: 1.0
+  turnover_min: 0.01
+  turnover_max: 0.70
+  robust_keep_ratio: 0.5
+  pnl_corr_max: 0.7
+  dataset_cap: 8
+  margin_bps: {USA: 5.0, CHN: 20.0, IND: 20.0, MEA: 20.0, default: 15.0}
+
+llm:
+  base_url: https://api.deepseek.com
+  model: deepseek-flash
+  strong_model: deepseek-v4-pro
+  key_file: ~/.config/alpha-factory/llm.json
+
+policy:
+  max_submissions_per_day: 4
+  auto_submit: false
+  regions: []
+  delays: [1]
+

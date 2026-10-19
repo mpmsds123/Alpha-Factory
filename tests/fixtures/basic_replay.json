@@ -1,0 +1,49 @@
+{
+  "fixture_version": "replay.v1",
+  "metadata": {
+    "dataset_id": "demo-dataset",
+    "fields": {
+      "close": "MATRIX",
+      "volume": "MATRIX"
+    },
+    "operators": ["rank", "ts_mean", "subtract"],
+    "settings": {
+      "neutralization": ["SUBINDUSTRY"],
+      "truncation": [0.08]
+    }
+  },
+  "candidates": [
+    {
+      "expression": "rank(ts_mean(close, 5))",
+      "settings": {"neutralization": "SUBINDUSTRY", "truncation": 0.08},
+      "mechanism_claim": "A smoothed relative price level may rank persistent moves.",
+      "source_method_card_ids": []
+    },
+    {
+      "expression": "rank(volume)",
+      "settings": {"neutralization": "SUBINDUSTRY", "truncation": 0.08},
+      "mechanism_claim": "Relative volume may identify temporary attention.",
+      "source_method_card_ids": []
+    }
+  ],
+  "scenarios": [
+    {
+      "expression": "rank(ts_mean(close, 5))",
+      "create_errors": [],
+      "result": {
+        "completed": true,
+        "metrics": {"sharpe": 0.70, "fitness": 0.40, "turnover": 0.20, "extra": {}},
+        "raw_artifact_ref": "fixtures/basic/strong.json"
+      }
+    },
+    {
+      "expression": "rank(volume)",
+      "create_errors": [],
+      "result": {
+        "completed": true,
+        "metrics": {"sharpe": 0.10, "fitness": 0.10, "turnover": 0.15, "extra": {}},
+        "raw_artifact_ref": "fixtures/basic/weak.json"
+      }
+    }
+  ]
+}

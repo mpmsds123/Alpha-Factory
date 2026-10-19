@@ -1,0 +1,67 @@
+{
+  "fixture_version": "replay.v1-regressions",
+  "regression_cases": [
+    "repeated_identical_candidates_across_enhancement_rounds",
+    "producer_outpaces_inspection",
+    "authentication_dominated_submission_failures",
+    "missing_idea_and_simulation_artifacts",
+    "stale_pool_size_state",
+    "concentrated_weight_requires_targeted_diagnosis",
+    "low_coverage_requires_targeted_diagnosis",
+    "transient_error_must_not_become_fail",
+    "legacy_local_submittable_with_zero_platform_all_pass"
+  ],
+  "metadata": {
+    "dataset_id": "regression-dataset",
+    "fields": {"feature_a": "MATRIX", "feature_b": "MATRIX"},
+    "operators": ["rank", "ts_mean"],
+    "settings": {"neutralization": ["INDUSTRY"], "truncation": [0.05]}
+  },
+  "candidates": [
+    {
+      "expression": "rank(feature_a)",
+      "settings": {"neutralization": "INDUSTRY", "truncation": 0.05},
+      "mechanism_claim": "Sanitized regression candidate A.",
+      "source_method_card_ids": []
+    },
+    {
+      "expression": " RANK ( feature_a ) ",
+      "settings": {"truncation": 0.05, "neutralization": "INDUSTRY"},
+      "mechanism_claim": "The same sanitized candidate repeated in a later round.",
+      "source_method_card_ids": []
+    },
+    {
+      "expression": "rank(ts_mean(feature_b, 10))",
+      "settings": {"neutralization": "INDUSTRY", "truncation": 0.05},
+      "mechanism_claim": "Sanitized regression candidate B.",
+      "source_method_card_ids": []
+    }
+  ],
+  "scenarios": [
+    {
+      "expression": "rank(feature_a)",
+      "create_errors": ["AUTHENTICATION", "HUMAN_VERIFICATION_REQUIRED"],
+      "result": {
+        "completed": true,
+        "metrics": {"sharpe": 0.60, "fitness": 0.35, "turnover": 0.25, "extra": {}},
+        "raw_artifact_ref": "fixtures/regression/auth-recovered.json"
+      },
+      "platform_checks": [
+        {"name": "CONCENTRATED_WEIGHT", "status": "FAIL", "message": "Targeted diagnosis required"},
+        {"name": "LOW_COVERAGE", "status": "WARNING", "message": "Targeted diagnosis required"},
+        {"name": "TRANSIENT", "status": "ERROR", "message": "Unresolved infrastructure state"}
+      ]
+    },
+    {
+      "expression": "rank(ts_mean(feature_b, 10))",
+      "create_errors": [],
+      "result": {
+        "completed": false,
+        "metrics": {"extra": {}},
+        "error_class": "PENDING",
+        "error_message": "Sanitized pending response",
+        "raw_artifact_ref": "fixtures/regression/pending.json"
+      }
+    }
+  ]
+}

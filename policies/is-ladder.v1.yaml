@@ -1,0 +1,75 @@
+version: is-ladder.v1
+# Reference values only -- transcribed from Meilin's own official-rules notes
+# (Obsidian "WQ规则手册.md"). BRAIN evaluates the IS-Ladder recursively and
+# server-side at submission time; this pipeline has no local endpoint that
+# returns a per-year Sharpe breakdown before submitting, and submission itself
+# is out of scope (no automatic_submission_available, by design). This file
+# exists so CandidateGenerator/RepairPlanner prompts and human review can see
+# the real bar instead of only the much lower local routing.v2 sharpe/fitness
+# floors (0.50/0.30), which are a cheap early filter, not the submission bar.
+#
+# Recursive check (both USA-style regions; CHN is stricter, see chn_region):
+#   whole-history Sharpe < fail_threshold        -> FAIL
+#   else, starting at year_window=2:
+#     Sharpe[window] < fail_threshold             -> FAIL
+#     Sharpe[window] > pass_threshold[window]      -> PASS
+#     otherwise                                    -> window += 1, repeat
+# Turnover < 30% multiplies every pass_threshold (not fail_threshold) by 0.85.
+is_ladder:
+  fail_threshold:
+    delay_1: 1.59
+    delay_0: 2.69
+  pass_threshold_by_year_window:
+    2: {delay_1: 2.38, delay_0: 3.96}
+    6: {delay_1: 2.22, delay_0: 3.64}
+    7: {delay_1: 2.06, delay_0: 3.33}
+    8: {delay_1: 1.90, delay_0: 3.17}
+    9: {delay_1: 1.74, delay_0: 2.85}
+    10: {delay_1: 1.59, delay_0: 2.69}
+  low_turnover_pass_threshold_discount: 0.85
+  low_turnover_ceiling: 0.30
+
+# ATOM / single-dataset alphas skip the recursive ladder entirely and are
+# judged only on the most recent 2 years, at the window=2 pass_threshold above
+# (2.38 / 3.96, same 0.85 discount under 30% turnover). Source: same handbook,
+# "ATOM / Single Dataset Alpha" section.
+atom_alpha_exempt_from_ladder: true
+
+chn_region:
+  # CHN's flat (non-ladder) bar, stricter than the USA-style whole-history floor.
+  delay_1: {sharpe: 2.08, returns: 0.08, fitness: 1.0}
+  delay_0: {sharpe: 3.5, returns: 0.12, fitness: 1.5}
+  robust_universe_minimum_retention: 0.40
+
+correlation_submission_exemption:
+  # The available pre-submission correlation response does not identify the matched
+  # alpha or expose its Sharpe, so the exemption cannot be evaluated automatically.
+  # Candidates at or above the threshold are archived conservatively for human review.
+  threshold: 0.70
+  sharpe_margin_required: 0.10
+  locally_enforceable: false
+
+# Official failure-hint strings BRAIN's own submission-check UI shows, mapped to
+# the same failure vocabulary this project already keys off of (routing/platform
+# check names). Reference for report-reading and for recognizing these exact
+# strings if they ever appear in a platform-check `message` field instead of a
+# structured `name` -- G6_PLATFORM_READINESS in platform_checks.py already keys
+# off the structured check `name` BRAIN returns, not this free text, for every
+# check name this project has seen in a real response so far.
+known_failure_hints:
+  - hint: "Maximum weight on an instrument is greater than 10%"
+    meaning: WEIGHT_CONCENTRATION
+  - hint: "Reduce max correlation"
+    meaning: CORRELATION_TOO_HIGH
+  - hint: "Improve Sharpe"
+    meaning: IS_LADDER_LOW_MARGIN
+  - hint: "Improve Sharpe or reduce turnover"
+    meaning: IS_LADDER_MID_MARGIN_HIGH_TURNOVER
+  - hint: "Improve Sharpe or reduce turnover or reduce correlation"
+    meaning: IS_LADDER_AT_CEILING_HIGH_TURNOVER_AND_CORRELATION
+  - hint: "Improve fitness"
+    meaning: LOW_FITNESS
+  - hint: "Alpha better suited for Delay 1"
+    meaning: DELAY_0_SHARPE_CHECK_FAILED
+  - hint: "Improve Sharpe in SubUniverse"
+    meaning: SUBUNIVERSE_SHARPE_TOO_LOW

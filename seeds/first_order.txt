@@ -1,0 +1,16 @@
+# First-order sweep: one degree of freedom per candidate.
+#
+# Each line varies only the time-series operator; the backfill window (66 days,
+# between the 65 used for fundamentals and the 252 used for slow data), lookback (66)
+# and grouping (industry) are held fixed, so a result is attributable to the field and
+# the operator alone. This is the first stage that produced every consultant-grade
+# alpha in the 25,828-simulation history behind this project.
+#
+# Strongly negative results are not discarded: the engine queues multiply(-1, x) and
+# simulates it (see gates/sign_flip.py).
+group_rank(ts_rank(ts_backfill(<field>, 66), 66), industry)
+group_rank(ts_zscore(ts_backfill(<field>, 66), 66), industry)
+group_rank(ts_delta(ts_backfill(<field>, 66), 66), industry)
+group_rank(ts_mean(ts_backfill(<field>, 66), 66), industry)
+group_rank(ts_std_dev(ts_backfill(<field>, 66), 66), industry)
+group_rank(ts_av_diff(ts_backfill(<field>, 66), 66), industry)

@@ -1,0 +1,14 @@
+{
+  "_comment": "Example settings for the replay-oriented orchestration layer. Every value is checked against the active platform OPTIONS snapshot before a live candidate is queued. testPeriod is omitted because the published schema treats it as an optional free-form range that this structural gate cannot validate.",
+  "_version": "simulation-settings.v1",
+  "instrumentType": "EQUITY",
+  "language": "FASTEXPR",
+  "neutralization": "MARKET",
+  "decay": 0,
+  "truncation": 0.08,
+  "pasteurization": "ON",
+  "unitHandling": "VERIFY",
+  "nanHandling": "OFF",
+  "maxTrade": "OFF",
+  "visualization": false
+}

@@ -1,0 +1,5 @@
+# 60-Second Technical Explanation
+
+Alpha Factory is a local Python system for LLM-guided alpha research under a fixed backtest budget. It freezes one dataset and market cell, asks an LLM for structured hypotheses and formulas, and sends only validated, deduplicated candidates to a resumable simulation queue. SQLite records candidates, batches, results, lineage, LLM-call metadata, policy decisions, and stop reasons, allowing the workflow to recover after interruption and reconstruct why budget was spent.
+
+The LLM has narrow authority: it may group fields, propose formulas, or diagnose a failed candidate. Deterministic code checks field names, vector handling, operator arity, group inputs, complexity, budget ceilings, retry limits, and platform states. Fake and replay adapters make the control flow testable without external requests. The system has no automatic submission path; candidates that survive local and platform checks stop at human review. Software tests establish engineering behavior, not predictive validity, tradability, or out-of-sample performance.

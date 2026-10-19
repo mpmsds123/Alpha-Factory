@@ -1,0 +1,5 @@
+# Candidates at or above this platform-reported correlation threshold are treated as
+# redundant. This complements local expression fingerprints, which cannot detect two
+# different spellings of the same signal.
+version: correlation.v1
+maximum_correlation: 0.70

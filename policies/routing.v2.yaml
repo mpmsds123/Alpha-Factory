@@ -1,0 +1,10 @@
+version: routing.v2
+# Turnover is recorded for every result. High-turnover candidates are routed through
+# platform checks and bounded repair instead of being discarded by an unsupported
+# local threshold.
+strong:
+  minimum_sharpe: 0.50
+  minimum_fitness: 0.30
+weak:
+  minimum_sharpe: 0.25
+  minimum_fitness: 0.15
