@@ -195,8 +195,7 @@ class FactoryLLM:
         ]
 
     # ---------- 设计文档 v1 ----------
-    # No example expression appears in any prompt: the model copies examples (v2 wrote only
-    # group_rank, v1 copied rank(ts_delta({X}, 21)) into 11 of 36 ideas).
+    # Keep example expressions out of prompts to reduce pattern repetition across generated ideas.
     def idea(
         self,
         dataset: dict[str, Any],
