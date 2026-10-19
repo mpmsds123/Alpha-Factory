@@ -1,0 +1,14 @@
+version: limits.v1
+initial_candidates: 10
+maximum_concurrent_simulations: 10
+children_per_parent_per_generation: 2
+maximum_generations: 3
+maximum_distinct_candidates: 50
+maximum_simulation_result_rows: 100
+maximum_pending_candidates: 20
+maximum_llm_requests: 30
+transient_retries_per_external_request: 2
+structural_repairs_per_candidate: 1
+maximum_wall_clock_seconds: 21600
+crossover_enabled: false
+automatic_submission_available: false

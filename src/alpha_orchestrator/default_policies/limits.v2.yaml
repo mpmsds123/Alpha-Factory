@@ -1,0 +1,27 @@
+version: limits.v2
+# Generation and simulation are two separate steps: raising this does not raise
+# concurrency (maximum_concurrent_simulations still throttles how many run at once).
+# v1 pinned this to maximum_concurrent_simulations (10) for no real reason -- that
+# capped how many ideas one LLM call could even propose, forcing a fresh
+# run/LLM-call cycle for every ~10 candidates. Raised to match
+# maximum_distinct_candidates (50): one call can propose up to a full run's worth,
+# cutting LLM-calls-per-1000-simulations roughly 5x. The model still self-limits to
+# defensible ideas per its own prompt ("empty list when no defensible hypothesis
+# remains") -- this raises the ceiling, it does not force more ideas to appear.
+# Confirmed by a live batch on 2026-09-16: at 10, most simulation submissions
+# collided and died with CONCURRENT_SIMULATION_LIMIT_EXCEEDED (a real account's
+# concurrent-slot quota is well below 10). Lowered to a conservative default;
+# raise it only if the account is confirmed to hold more concurrent slots.
+initial_candidates: 50
+maximum_concurrent_simulations: 3
+children_per_parent_per_generation: 2
+maximum_generations: 3
+maximum_distinct_candidates: 50
+maximum_simulation_result_rows: 100
+maximum_pending_candidates: 20
+maximum_llm_requests: 30
+transient_retries_per_external_request: 2
+structural_repairs_per_candidate: 1
+maximum_wall_clock_seconds: 21600
+crossover_enabled: false
+automatic_submission_available: false

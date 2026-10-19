@@ -1,0 +1,37 @@
+.env
+.DS_Store
+.venv/
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+.coverage
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+dist/
+build/
+*.egg-info/
+诊断日志.txt
+_to_delete/
+
+# private research corpus / personal notes / credential-adjacent tooling — never public
+method_cards/*
+!method_cards/README.md
+CLAUDE.md
+workflow_learning.canvas
+*.command
+templates/
+tools/*
+!tools/daily_run.sh
+!tools/取会话.py
+tests/tools/
+brain-session.json
+platform-brain.json
+.runtime/
+
+# alpha factory: real expressions, results and the ledger never leave this machine
+reports/
+factory.db*
+.alpha_factory/
