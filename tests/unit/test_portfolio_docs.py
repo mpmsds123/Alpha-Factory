@@ -32,10 +32,9 @@ def test_case_study_matches_sanitized_replay_fixture() -> None:
 
     assert len(fixture["candidates"]) == 2
     assert len(fixture["scenarios"]) == 2
-    for scenario in fixture["scenarios"]:
-        expression = scenario["expression"]
+    for index, scenario in enumerate(fixture["scenarios"], start=1):
         metrics = scenario["result"]["metrics"]
-        assert f"`{expression}`" in case_study
+        assert f"`candidate-{'ab'[index - 1]}`" in case_study
         for name in ("sharpe", "fitness", "turnover"):
             assert f"`{metrics[name]:.2f}`" in case_study
     assert "2 distinct candidates" in normalized_case_study

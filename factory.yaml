@@ -1,5 +1,5 @@
 # Public example configuration. Replace in a private, untracked file for authorized live work.
-db_path: ~/.alpha_factory/factory.db
+db_path: .runtime/factory.db
 reports_dir: reports
 scanner_progress: ""
 scanner_runs: ""
@@ -40,10 +40,10 @@ thresholds:
   margin_bps: {USA: 5.0, CHN: 20.0, IND: 20.0, MEA: 20.0, default: 15.0}
 
 llm:
-  base_url: https://api.deepseek.com
-  model: deepseek-flash
-  strong_model: deepseek-v4-pro
-  key_file: ~/.config/alpha-factory/llm.json
+  base_url: https://llm-provider.example/v1
+  model: proposal-model
+  strong_model: reasoning-model
+  key_file: .runtime/llm.json
 
 policy:
   max_submissions_per_day: 4

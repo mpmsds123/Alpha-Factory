@@ -1,0 +1,16 @@
+{
+  "run": {
+    "adapter": "replay",
+    "state": "completed",
+    "simulation_budget_reserved": 2,
+    "simulation_budget_used": 2,
+    "external_calls": 0
+  },
+  "transitions": [
+    {"candidate": "candidate-a", "from": "proposed", "to": "validated"},
+    {"candidate": "candidate-a", "from": "validated", "to": "ready_for_platform_check"},
+    {"candidate": "candidate-b", "from": "proposed", "to": "validated"},
+    {"candidate": "candidate-b", "from": "validated", "to": "archived"}
+  ],
+  "note": "Synthetic values demonstrate orchestration behavior only."
+}
