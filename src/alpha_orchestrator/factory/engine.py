@@ -356,6 +356,10 @@ class Engine:
                     if g["name"].lower() not in seen and tuple(sorted(g["fields"])) not in seen
                 ]
                 merged = old + groups
+                if not groups:
+                    # No new field relation was proposed. Do not repeat the same
+                    # expensive request while ready simulations sit in the queue.
+                    plan["refills"] = GROUP_REFILLS
                 cell.plan = {**plan, "groups": merged}
                 self.ledger.log(
                     s, "field_groups_refill", cell_id, groups=[g["name"] for g in groups]
@@ -1446,7 +1450,9 @@ def run_day(
     spent, idle = 0, 0
     while spent < budget and time.monotonic() < deadline:
         try:
-            moved = engine.advance()
+            with ledger.session() as s:
+                queued = bool(ledger.queue_groups(s))
+            moved = {"queued_work": 1} if queued else engine.advance()
         except LLMUnavailable as exc:
             report.stopped_because = f"LLM 调用失败（余额或网络）：{exc}"[:300]
             # Already queued work remains useful even when proposal generation fails.
