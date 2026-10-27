@@ -216,7 +216,7 @@ def run(
         api.client.session.close()
     render_record(ledger, record_path)
     msg = (
-        f"今日回测 {report.simulations}（失败 {report.failed}），过门槛 {report.ready}，"
+        f"本次完成 {report.simulations}（失败 {report.failed}），过门槛 {report.ready}，"
         f"新存入待挑选 {len(report.reviews)} 条"
     )
     typer.echo(f"待挑选表格：{Path(cfg.reports_dir) / '工厂_待挑选.csv'}")
