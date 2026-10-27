@@ -24,6 +24,10 @@ class SessionExpired(Exception):
     """A request came back 401 after the session's one allowed re-login."""
 
 
+class AmbiguousRequest(Exception):
+    """A mutation may have reached the server. Reconcile it; never blindly retry."""
+
+
 @dataclass
 class Quota:
     limit: int | None = None
@@ -56,6 +60,7 @@ class BrainClient:
 
     def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         relogged = False
+        read_only = method.upper() in {"GET", "HEAD", "OPTIONS"}
         for attempt in range(self.max_attempts):
             try:
                 response = self.session.http.request(method, path, **kwargs)
@@ -64,10 +69,17 @@ class BrainClient:
                 httpx.ReadError,
                 httpx.RemoteProtocolError,
                 httpx.TimeoutException,
-            ):
+            ) as exc:
+                if not read_only:
+                    raise AmbiguousRequest(f"{method} {path}: outcome unknown") from exc
                 self.sleep(min(5.0 * 2**attempt, 60.0))
                 continue
             self.quota.update(response.headers)
+            if response.status_code >= 500:
+                if not read_only:
+                    raise AmbiguousRequest(f"{method} {path}: HTTP {response.status_code}")
+                self.sleep(min(5.0 * 2**attempt, 60.0))
+                continue
             if response.status_code == 401:
                 if relogged:
                     raise SessionExpired(f"{method} {path} rejected after re-login")

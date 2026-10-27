@@ -34,6 +34,15 @@ class Budget:
     slots: int = 6  # upper bound; lowered automatically to what the platform accepts
     children_per_slot: int = 10  # 规则: 10 alphas per multi-simulation
     min_batch_interval_s: float = 20.0  # 论坛: >3 batches / 10 min triggers 429 storms
+    quota_reserve: int = 0  # Explicit reserve outside this factory's own daily allocation.
+
+    def __post_init__(self) -> None:
+        if any(v < 0 for v in (self.daily_sim_cap, self.v1_daily_cap, self.quota_reserve)):
+            raise ValueError("Daily caps and quota reserve must be nonnegative")
+        if self.slots < 1 or not 1 <= self.children_per_slot <= 10:
+            raise ValueError("Need at least one slot and 1-10 children per batch")
+        if self.min_batch_interval_s < 0:
+            raise ValueError("Batch interval must be nonnegative")
 
 
 @dataclass
@@ -72,6 +81,8 @@ class LLMConfig:
     key_file: str = "~/secrets/deepseek.json"
     temperature: float = 0.4
     timeout_s: float = 120.0
+    max_calls_per_day: int = 1000
+    max_completion_tokens: int = 4096
     # 第 9 问: yuan per million tokens [input cache miss, output], DeepSeek official Chinese
     # price page 2026-10-14; peak = Beijing Mon-Fri 9-12 and 14-18, all other hours off-peak
     prices_cny: dict[str, dict[str, list[float]]] = field(

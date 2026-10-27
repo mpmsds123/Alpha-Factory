@@ -1,11 +1,15 @@
 """Ledger access: one place that opens sessions and enforces de-duplication."""
 
+import fcntl
 import re
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from functools import wraps
+from inspect import signature
 from pathlib import Path
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
 from sqlalchemy import Engine, create_engine, event, func, inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -13,11 +17,29 @@ from sqlalchemy.pool import StaticPool
 
 from alpha_orchestrator.domain.identity import canonical_json, sha256_text
 from alpha_orchestrator.factory.models import (
+    BatchORM,
     CandidateORM,
     CandidateStatus,
     EventORM,
     FactoryBase,
 )
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+class WorkerAlreadyRunning(RuntimeError):
+    """A second worker must not plan or spend from the same ledger."""
+
+
+def ledger_locked(function: Callable[P, R]) -> Callable[P, R]:
+    @wraps(function)
+    def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+        ledger = signature(function).bind(*args, **kwargs).arguments["ledger"]
+        with ledger.writer_lock():
+            return function(*args, **kwargs)
+
+    return wrapped
 
 
 def fingerprint(expression: str, settings: dict[str, Any]) -> str:
@@ -72,9 +94,43 @@ class Ledger:
             kwargs["poolclass"] = StaticPool
         self.engine = create_engine(url, future=True, **kwargs)
         event.listen(self.engine, "connect", _sqlite_pragmas)
-        _upgrade_empty_tables(self.engine)
-        FactoryBase.metadata.create_all(self.engine)
+        self._worker_mutex = threading.Lock()
+        self._worker_owner: int | None = None
+        with self.writer_lock():
+            _upgrade_empty_tables(self.engine)
+            FactoryBase.metadata.create_all(self.engine)
         self._sessions = sessionmaker(bind=self.engine, expire_on_commit=False)
+
+    @contextmanager
+    def writer_lock(self) -> Iterator[None]:
+        """Single host, single ledger writer; released by the OS even after a crash."""
+        if self._worker_owner == threading.get_ident():
+            yield
+            return
+        if not self._worker_mutex.acquire(blocking=False):
+            raise WorkerAlreadyRunning("Another worker owns this ledger")
+        try:
+            database = self.engine.url.database
+            if not database or database == ":memory:":
+                self._worker_owner = threading.get_ident()
+                try:
+                    yield
+                finally:
+                    self._worker_owner = None
+                return
+            with Path(database + ".worker.lock").open("a") as handle:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise WorkerAlreadyRunning("Another worker owns this ledger") from exc
+                self._worker_owner = threading.get_ident()
+                try:
+                    yield
+                finally:
+                    self._worker_owner = None
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            self._worker_mutex.release()
 
     @classmethod
     def at(cls, path: Path) -> "Ledger":
@@ -141,6 +197,23 @@ class Ledger:
             CandidateORM.completed_at >= start,
         )
         return int(s.scalar(stmt) or 0)
+
+    def sims_reserved_today(self, s: Session) -> int:
+        """Count children at creation, including in-flight and uncertain requests.
+
+        The local allocation resets at UTC midnight. Only a confirmed refusal releases
+        it. Completion dates never decide which day's allocation paid for a request.
+        """
+        start = datetime.combine(datetime.now(UTC).date(), datetime.min.time(), tzinfo=UTC)
+        return int(
+            s.scalar(
+                select(func.coalesce(func.sum(BatchORM.size), 0)).where(
+                    BatchORM.created_at >= start,
+                    BatchORM.status.not_in(["REFUSED", "REJECTED"]),
+                )
+            )
+            or 0
+        )
 
     # ---------- events ----------
     def log(self, s: Session, kind: str, cell_id: str | None = None, **payload: Any) -> None:

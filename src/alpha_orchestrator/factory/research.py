@@ -90,7 +90,11 @@ class Metadata:
             signatures={
                 str(o["name"]).lower(): sig
                 for o in ops
-                if (sig := signature(str(o.get("definition") or ""), str(o.get("description") or "")))
+                if (
+                    sig := signature(
+                        str(o.get("definition") or ""), str(o.get("description") or "")
+                    )
+                )
             },
         )
 

@@ -10,6 +10,7 @@ import random
 import re
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from statistics import NormalDist
 from typing import Any
@@ -22,8 +23,8 @@ from alpha_orchestrator.factory import catalog, study
 from alpha_orchestrator.factory import generators as gen
 from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ideas import tokens
-from alpha_orchestrator.factory.ledger import Ledger
-from alpha_orchestrator.factory.llm import FactoryLLM
+from alpha_orchestrator.factory.ledger import Ledger, ledger_locked
+from alpha_orchestrator.factory.llm import FactoryLLM, LLMUnavailable
 from alpha_orchestrator.factory.models import (
     CandidateORM,
     CandidateStatus,
@@ -36,7 +37,7 @@ from alpha_orchestrator.factory.models import (
     Stage,
 )
 from alpha_orchestrator.factory.research import Metadata
-from alpha_orchestrator.factory.scheduler import QUOTA_RESERVE, Simulator
+from alpha_orchestrator.factory.scheduler import Simulator
 from alpha_orchestrator.factory.select import store_passing
 from alpha_orchestrator.factory.validate import MAX_OPERATORS, check
 
@@ -108,11 +109,6 @@ PENDING = (CandidateStatus.QUEUED, CandidateStatus.RUNNING)
 WORD = re.compile(r"[a-z0-9]+")
 
 
-class LLMUnavailable(RuntimeError):
-    """The LLM could not be reached (balance, network, malformed replies). Not the
-    dataset's fault: the day stops and no dataset is marked done because of it."""
-
-
 def luck_line(n: int, sigma: float) -> float:
     """The |Sharpe| the best of n pure-noise formulas exceeds with only 5% chance."""
     n = max(n, 1)
@@ -173,6 +169,40 @@ class Engine:
             for c in s.scalars(select(CellORM).where(CellORM.state == CellState.RESEARCH)):
                 if (c.plan or {}).get("design") == study.DESIGN:
                     return c.cell_id
+            # A pilot cap is an operational stop, not a permanent research verdict.
+            # Resume only explicitly selected cells and retain their prior evidence.
+            for cell_id in self.config.only_datasets:
+                cell = s.get(CellORM, cell_id)
+                if (
+                    cell is None
+                    or not cell.active
+                    or cell.state != CellState.EXHAUSTED
+                    or not cell.stop_reason.startswith("budget spent;")
+                ):
+                    continue
+                plan = cell.plan or {}
+                spent = cell.sims_used - int(plan.get("sims_at_open", 0))
+                if (
+                    plan.get("design") != study.DESIGN
+                    or spent >= self.config.budget.dataset_sim_cap
+                ):
+                    continue
+                has_work = int(plan.get("next_group", 0)) < len(plan.get("groups") or []) or (
+                    int(plan.get("refills", 0)) < GROUP_REFILLS and self._has_signal(s, cell_id)
+                )
+                if not has_work:
+                    continue
+                previous = {"reason": cell.stop_reason, "outcome": plan.get("outcome")}
+                cell.plan = {k: v for k, v in plan.items() if k not in {"outcome", "verdict"}}
+                cell.state, cell.stop_reason = CellState.RESEARCH, ""
+                self.ledger.log(
+                    s,
+                    "dataset_budget_resumed",
+                    cell_id,
+                    previous=previous,
+                    new_cap=self.config.budget.dataset_sim_cap,
+                )
+                return cell_id
         return None
 
     def _open_dataset(self) -> str | None:
@@ -220,8 +250,7 @@ class Engine:
                 plan.get("groups") is not None
                 and int(plan.get("next_group", 0)) >= len(plan["groups"])
                 and (
-                    int(plan.get("refills", 0)) >= GROUP_REFILLS
-                    or not self._has_signal(s, cell_id)
+                    int(plan.get("refills", 0)) >= GROUP_REFILLS or not self._has_signal(s, cell_id)
                 )
             ):
                 return True  # 侦察完没信号，或补组到上限
@@ -241,9 +270,10 @@ class Engine:
                 )
             )
             worked = sum(1 for i in ideas if i.status == IdeaStatus.DONE)
-            outcome = "signal" if worked else "noise"
             plan = cell.plan or {}
             spent = cell.sims_used - int(plan.get("sims_at_open", 0))
+            budget_stop = spent >= self.config.budget.dataset_sim_cap
+            outcome = "budget" if budget_stop else ("signal" if worked else "noise")
             cell.state = CellState.EXHAUSTED
             cell.plan = {**plan, "verdict": outcome, "outcome": outcome, "sims_spent": spent}
             why = (
@@ -294,6 +324,8 @@ class Engine:
         for _ in range(2):
             try:
                 raw = self.llm.field_groups(brief, lines, GROUPS, tried)
+            except LLMUnavailable:
+                raise
             except RuntimeError:
                 continue
             for g in raw:
@@ -317,17 +349,17 @@ class Engine:
             if refill:
                 plan["refills"] = int(plan.get("refills", 0)) + 1
                 old = list(plan.get("groups") or [])
-                seen = {g["name"].lower() for g in old} | {
-                    tuple(sorted(g["fields"])) for g in old
-                }
+                seen = {g["name"].lower() for g in old} | {tuple(sorted(g["fields"])) for g in old}
                 groups = [
-                    g for g in groups
+                    g
+                    for g in groups
                     if g["name"].lower() not in seen and tuple(sorted(g["fields"])) not in seen
                 ]
                 merged = old + groups
                 cell.plan = {**plan, "groups": merged}
-                self.ledger.log(s, "field_groups_refill", cell_id,
-                                groups=[g["name"] for g in groups])
+                self.ledger.log(
+                    s, "field_groups_refill", cell_id, groups=[g["name"] for g in groups]
+                )
                 return merged
             if not groups:
                 self.ledger.log(s, "llm_unavailable", cell_id, reasons=["no field groups"])
@@ -405,6 +437,8 @@ class Engine:
                 proposed = self.llm.first_formulas(
                     brief, group, info, ops, FIRST_FORMULAS, rejected
                 )
+            except LLMUnavailable:
+                raise
             except RuntimeError:
                 continue
             exprs, problems = _first_formulas(
@@ -435,7 +469,11 @@ class Engine:
                 if self._add(s, cell, expr, settings, Stage.FIELD, idea_id, field=fid, change=why):
                     added += 1
             self.ledger.log(
-                s, "tests_queued", idea.cell_id, idea=idea_id, queued=added,
+                s,
+                "tests_queued",
+                idea.cell_id,
+                idea=idea_id,
+                queued=added,
                 formulas=[e for e, _, _ in exprs],
             )
         return added
@@ -466,11 +504,14 @@ class Engine:
             assert idea is not None
             if self._pending(s, idea_id):
                 return 0
+            needs_formulas = not (idea.extra or {}).get("rows")
             status, phase = idea.status, (idea.extra or {}).get("phase")
         if phase == "enhance":
             self._settle_enhance(idea_id)
             return 1
         if status == IdeaStatus.TESTING:
+            if needs_formulas:
+                return self._queue_tests(idea_id)
             self._judge(idea_id)
             return 1
         if status == IdeaStatus.PROMISING and phase != "improve":
@@ -598,17 +639,17 @@ class Engine:
                 for f in group.get("fields", [])
                 if f in usable
             ]
-            types = {f.field_id: f.type for f in s.scalars(
-                select(FieldORM).where(FieldORM.cell_id == cell.cell_id))}
+            types = {
+                f.field_id: f.type
+                for f in s.scalars(select(FieldORM).where(FieldORM.cell_id == cell.cell_id))
+            }
         if alpha_id:
-            try:
+            with suppress(Exception):
                 best["yearly_sharpe"] = {
                     str(y.get("year")): y.get("sharpe")
                     for y in self.api.yearly_stats(alpha_id)
                     if isinstance(y, dict)
                 }
-            except Exception:
-                pass
         self.llm.idea_id = idea_id
         variants: list[dict[str, Any]] = []
         verdict: dict[str, Any] = {}
@@ -616,9 +657,17 @@ class Engine:
         for _ in range(2):
             try:
                 verdict = self.llm.diagnose(
-                    card, history, best, info, self._operator_lines(), PROBLEMS, VARIANTS,
+                    card,
+                    history,
+                    best,
+                    info,
+                    self._operator_lines(),
+                    PROBLEMS,
+                    VARIANTS,
                     rejected,
                 )
+            except LLMUnavailable:
+                raise
             except RuntimeError:
                 continue
             if str(verdict.get("decision", "")).lower() == "give_up":
@@ -634,11 +683,15 @@ class Engine:
                     problems.append(f"{expr}: already tried")
                     continue
                 if _formula_shape(re.sub(r"\s+", "", expr)) in tried_shapes and not setting_change:
-                    problems.append(f"{expr}: only a window or number changed; change the "
-                                    "structure or a setting instead")
+                    problems.append(
+                        f"{expr}: only a window or number changed; change the "
+                        "structure or a setting instead"
+                    )
                     continue
                 chk = check(
-                    expr, operators=self.meta.operators, fields=types,
+                    expr,
+                    operators=self.meta.operators,
+                    fields=types,
                     signatures=self.meta.signatures,
                 )
                 if not chk.ok or len(chk.fields_used) > FORMULA_MAX_FIELDS:
@@ -678,8 +731,14 @@ class Engine:
                 if str(v.get("neutralization", "")).upper() in neutral:
                     settings["neutralization"] = str(v["neutralization"]).upper()
                 c = self._add(
-                    s, cell, v["expression"], settings, Stage.IMPROVE, idea_id,
-                    field=parent.extra.get("field"), parent=parent,
+                    s,
+                    cell,
+                    v["expression"],
+                    settings,
+                    Stage.IMPROVE,
+                    idea_id,
+                    field=parent.extra.get("field"),
+                    parent=parent,
                     change=f"{diag['problem']}: {str(v.get('change', ''))[:160]}",
                 )
                 if c is not None:
@@ -814,7 +873,7 @@ class Engine:
             base = parent.sharpe or 0.0
             ratios = {k.role: round((k.sharpe or 0.0) / base, 3) if base else 0.0 for k in kids}
             tries = self._tries(s, extra.get("idea"))
-            ok = all(r >= keep for r in ratios.values())
+            ok = bool(ratios) and all(r >= keep for r in ratios.values())
             parent.extra = {**extra, "robust": {"pass": ok, "ratios": ratios, "tries": tries}}
             self.ledger.log(
                 s,
@@ -846,7 +905,9 @@ class Engine:
             for f in s.scalars(select(FieldORM).where(FieldORM.cell_id == cell.cell_id))
         }
         verdict = check(
-            expression, operators=self.meta.operators, fields=types,
+            expression,
+            operators=self.meta.operators,
+            fields=types,
             signatures=self.meta.signatures,
             max_operators=None if stage == Stage.ENHANCE else MAX_OPERATORS,
         )
@@ -1012,6 +1073,7 @@ class Engine:
                     else []
                 )
                 if made:
+                    assert best is not None
                     idea.extra = {
                         **idea.extra,
                         "enhance": {"step": 2, "base": best.id, "pending": made},
@@ -1032,8 +1094,14 @@ class Engine:
         made = []
         for shape in shapes:
             c = self._add(
-                s, cell, shape.format(f=base.expression), dict(base.settings), Stage.ENHANCE,
-                idea_id, field=(base.extra or {}).get("field"), parent=base,
+                s,
+                cell,
+                shape.format(f=base.expression),
+                dict(base.settings),
+                Stage.ENHANCE,
+                idea_id,
+                field=(base.extra or {}).get("field"),
+                parent=base,
                 change=f"加强·{why}",
             )
             if c is not None:
@@ -1045,9 +1113,7 @@ class Engine:
             return [
                 i.id
                 for i in s.scalars(
-                    select(ResearchIdeaORM).where(
-                        ResearchIdeaORM.status == IdeaStatus.PROMISING
-                    )
+                    select(ResearchIdeaORM).where(ResearchIdeaORM.status == IdeaStatus.PROMISING)
                 )
                 if (i.extra or {}).get("phase") == "enhance"
             ]
@@ -1337,6 +1403,7 @@ def run_llm_only(
         )
 
 
+@ledger_locked
 def run_day(
     config: FactoryConfig,
     api: BrainAPI,
@@ -1353,27 +1420,39 @@ def run_day(
 
     report = DayReport()
     deadline = time.monotonic() + minutes * 60
+    simulator = Simulator(api, ledger, config, sleep=sleep)
+    simulator.assert_recoverable()
+    # Drain durable requests before an unavailable LLM can prevent their recovery.
+    recovered = simulator.run(0, deadline=deadline)
+    report.simulations += recovered.completed
+    report.failed += recovered.failed
+    if recovered.stopped_because == "deadline":
+        report.stopped_because = "deadline"
+        return report
     meta = meta or Metadata.fetch(api)
     if catalog_is_stale(ledger):
         catalog.refresh(api, ledger, config)
     study.reset_old_verdicts(ledger)
     with ledger.session() as s:
-        budget = config.budget.v1_daily_cap - ledger.sims_used_today(s)
+        budget = config.budget.v1_daily_cap - ledger.sims_reserved_today(s)
     quota = api.client.quota.remaining
     if quota is not None:
-        budget = min(budget, quota - QUOTA_RESERVE)
+        budget = min(budget, quota - config.budget.quota_reserve)
     engine = Engine(api, ledger, config, meta, llm, rng)
     revived = engine.revive_near_misses()
     if revived:
         with ledger.session() as s:
             ledger.log(s, "enhance_revived", ideas=revived)
-    simulator = Simulator(api, ledger, config, sleep=sleep)
     spent, idle = 0, 0
     while spent < budget and time.monotonic() < deadline:
         try:
             moved = engine.advance()
         except LLMUnavailable as exc:
             report.stopped_because = f"LLM 调用失败（余额或网络）：{exc}"[:300]
+            # Already queued work remains useful even when proposal generation fails.
+            remaining = simulator.run(min(CHUNK, budget - spent), deadline=deadline)
+            report.simulations += remaining.completed
+            report.failed += remaining.failed
             break
         run = simulator.run(min(CHUNK, budget - spent), deadline=deadline)
         spent += run.completed + run.failed
@@ -1383,6 +1462,9 @@ def run_day(
         if on_progress is not None:
             on_progress()
         report.stopped_because = run.stopped_because
+        if simulator._remaining_daily() <= 0:
+            report.stopped_because = "daily budget spent"
+            break
         if run.stopped_because in ("quota", "deadline", "platform kept refusing batches"):
             break
         if run.batches == 0 and not any(moved.values()):

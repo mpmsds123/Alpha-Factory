@@ -25,8 +25,9 @@ def test_common_forms_pass() -> None:
 
 
 def test_check_reports_it() -> None:
-    v = check("winsorize(a, 0.01, 0.99)", operators={"winsorize"}, fields={"a": "MATRIX"},
-              signatures=SIG)
+    v = check(
+        "winsorize(a, 0.01, 0.99)", operators={"winsorize"}, fields={"a": "MATRIX"}, signatures=SIG
+    )
     assert not v.ok and "positional" in v.issues[0]
 
 
@@ -35,6 +36,10 @@ def test_group_input_must_be_a_grouping() -> None:
 
     f = {"a": "MATRIX", "g": "GROUP"}
     assert group_issues("group_rank(a, a)", f)  # the batch-cancelling case of 10/14
-    for ok in ["group_rank(a, industry)", "group_rank(a, g)", "group_mean(a, 1, sector)",
-               'group_neutralize(a, bucket(rank(a), range="0,1,0.1"))']:
+    for ok in [
+        "group_rank(a, industry)",
+        "group_rank(a, g)",
+        "group_mean(a, 1, sector)",
+        'group_neutralize(a, bucket(rank(a), range="0,1,0.1"))',
+    ]:
         assert not group_issues(ok, f), ok

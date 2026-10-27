@@ -16,12 +16,13 @@ from typing import Any
 from sqlalchemy import select
 
 from alpha_orchestrator.brain.api import BrainAPI, simulation_payload
+from alpha_orchestrator.brain.client import AmbiguousRequest
 from alpha_orchestrator.domain.models import utc_now
 from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ledger import Ledger, fingerprint
 from alpha_orchestrator.factory.models import BatchORM, CandidateORM, CandidateStatus
 
-QUOTA_RESERVE = 300  # stop before the platform's own counter runs dry
+QUOTA_RESERVE = 0  # Compatibility import; actual reserve is configured per factory.
 REFUSED = -1
 REJECTED = -2  # the platform said some formulas are invalid: not a capacity problem
 MAX_REFUSALS = 10
@@ -111,19 +112,55 @@ class Simulator:
     # ---------- public ----------
     def run(self, sim_budget: int, deadline: float | None = None) -> RunStats:
         """Simulate until the queue is empty, the budget is spent, or the deadline passes."""
+        with self.ledger.writer_lock():
+            self.assert_recoverable()
+            return self._run(sim_budget, deadline)
+
+    def assert_recoverable(self) -> None:
+        with self.ledger.session() as s:
+            uncertain = list(
+                s.scalars(
+                    select(BatchORM).where(
+                        (BatchORM.status == "UNKNOWN")
+                        | ((BatchORM.status == "RUNNING") & (BatchORM.location == ""))
+                    )
+                )
+            )
+            for batch in uncertain:
+                batch.status = "UNKNOWN"
+            ids = [b.id for b in uncertain]
+        if ids:
+            raise AmbiguousRequest(
+                "Reconcile uncertain simulation batches before running: " + ", ".join(ids)
+            )
+
+    def _remaining_daily(self) -> int:
+        with self.ledger.session() as s:
+            return max(
+                0,
+                min(self.config.budget.v1_daily_cap, self.config.budget.daily_sim_cap)
+                - self.ledger.sims_reserved_today(s),
+            )
+
+    def _run(self, sim_budget: int, deadline: float | None) -> RunStats:
         stats = RunStats()
         started = 0
         refusals = 0
         while True:
+            if deadline is not None and self.clock() >= deadline:
+                stats.stopped_because = "deadline"
+                return stats  # In-flight URLs remain durable for the next worker.
             inflight = self._inflight()
             remaining_quota = self.api.client.quota.remaining
-            can_start = (
-                started < sim_budget
-                and (remaining_quota is None or remaining_quota > QUOTA_RESERVE)
-                and (deadline is None or self.clock() < deadline)
+            quota_left = (
+                max(0, remaining_quota - self.config.budget.quota_reserve)
+                if remaining_quota is not None
+                else sim_budget
             )
+            capacity = min(sim_budget - started, self._remaining_daily(), quota_left)
+            can_start = capacity > 0 and (deadline is None or self.clock() < deadline)
             if can_start and len(inflight) < self.slots:
-                launched = self._launch_one(sim_budget - started)
+                launched = self._launch_one(capacity, deadline)
                 if launched > 0:
                     started += launched
                     stats.batches += 1
@@ -147,10 +184,10 @@ class Simulator:
                 if not can_start:
                     stats.stopped_because = (
                         "budget"
-                        if started >= sim_budget
+                        if started >= sim_budget or self._remaining_daily() <= 0
                         else (
                             "quota"
-                            if remaining_quota is not None and remaining_quota <= QUOTA_RESERVE
+                            if remaining_quota is not None and quota_left <= 0
                             else "deadline"
                         )
                     )
@@ -158,6 +195,9 @@ class Simulator:
                     stats.stopped_because = "queue empty"
                 return stats
             for batch_id in inflight:
+                if deadline is not None and self.clock() >= deadline:
+                    stats.stopped_because = "deadline"
+                    return stats
                 done, failed = self._poll(batch_id)
                 stats.completed += done
                 stats.failed += failed
@@ -168,10 +208,15 @@ class Simulator:
         with self.ledger.session() as s:
             return list(s.scalars(select(BatchORM.id).where(BatchORM.status == "RUNNING")))
 
-    def _launch_one(self, budget_left: int) -> int:
+    def _launch_one(self, budget_left: int, deadline: float | None = None) -> int:
         wait = self.config.budget.min_batch_interval_s - (self.clock() - self._last_batch_at)
         if wait > 0:
-            self.sleep(wait)
+            self.sleep(min(wait, max(0, deadline - self.clock())) if deadline else wait)
+        if deadline is not None and self.clock() >= deadline:
+            return 0
+        budget_left = min(budget_left, self._remaining_daily())
+        if budget_left <= 0:
+            return 0
         with self.ledger.session() as s:
             groups = sorted(self.ledger.queue_groups(s), key=lambda g: -g[3])
             if not groups:
@@ -200,6 +245,13 @@ class Simulator:
             self._release(batch_id, str(exc))
             self.sleep(60)
             return REFUSED
+        except Exception:
+            with self.ledger.session() as s:
+                unknown = s.get(BatchORM, batch_id)
+                assert unknown is not None
+                unknown.status = "UNKNOWN"
+                self.ledger.log(s, "batch_unknown", batch=batch_id, size=len(payloads))
+            raise
         self._last_batch_at = self.clock()
         with self.ledger.session() as s:
             launched = s.get(BatchORM, batch_id)
@@ -240,6 +292,13 @@ class Simulator:
                 c.batch_id = None
             self.ledger.log(s, "batch_refused", batch=batch_id, reason=reason[:300])
 
+    def _quarantine(self, batch_id: str) -> None:
+        with self.ledger.session() as s:
+            row = s.get(BatchORM, batch_id)
+            assert row is not None
+            row.status = "UNKNOWN"
+            self.ledger.log(s, "batch_unknown", batch=batch_id)
+
     def _poll(self, batch_id: str) -> tuple[int, int]:
         with self.ledger.session() as s:
             row = s.get(BatchORM, batch_id)
@@ -253,51 +312,54 @@ class Simulator:
                 )
             )
             member_ids = [m.id for m in members]
-            by_fp = {m.fingerprint: m.id for m in members}
         if not location:
-            self._release(batch_id, "no location recorded")
-            return 0, 0
+            raise AmbiguousRequest(f"Batch {batch_id} has no confirmed progress URL")
         progress = self.api.poll(location)
         if not progress.done:
             return 0, 0
 
         results: dict[str, dict[str, Any]] = {}
+
+        def attach(alpha_id: str) -> None:
+            alpha = self.api.alpha(alpha_id)
+            code = (alpha.get("regular") or {}).get("code")
+            actual = alpha.get("settings") or {}
+            matches = [
+                m.id
+                for m in members
+                if isinstance(code, str)
+                and fingerprint(code, {k: actual.get(k) for k in m.settings}) == m.fingerprint
+            ]
+            if len(matches) != 1 or matches[0] in results:
+                self._quarantine(batch_id)
+                raise AmbiguousRequest(f"Batch {batch_id}: result identity mismatch")
+            results[matches[0]] = {"alpha": alpha, "alpha_id": alpha_id}
+
         if progress.children:
-            for index, child_id in enumerate(progress.children):
+            if len(progress.children) != len(member_ids):
+                self._quarantine(batch_id)
+                raise AmbiguousRequest(f"Batch {batch_id}: incomplete child list")
+            errors = []
+            for child_id in progress.children:
                 child = self.api.child(child_id)
-                cid = None
                 if child.alpha_id:
-                    alpha = self.api.alpha(child.alpha_id)
-                    code = (alpha.get("regular") or {}).get("code")
-                    settings = {
-                        k: alpha.get("settings", {}).get(k)
-                        for k in (
-                            "region",
-                            "universe",
-                            "delay",
-                            "decay",
-                            "neutralization",
-                            "truncation",
-                            "maxTrade",
-                        )
-                    }
-                    cid = by_fp.get(fingerprint(code, settings)) if code else None
-                    results[cid or member_ids[min(index, len(member_ids) - 1)]] = {
-                        "alpha": alpha,
-                        "alpha_id": child.alpha_id,
-                    }
+                    attach(child.alpha_id)
                 else:
-                    results[member_ids[min(index, len(member_ids) - 1)]] = {
-                        "error": child.message or child.status
-                    }
-        elif progress.alpha_id and member_ids:
-            results[member_ids[0]] = {
-                "alpha": self.api.alpha(progress.alpha_id),
-                "alpha_id": progress.alpha_id,
-            }
-        else:
+                    errors.append(child.message or child.status)
+            # Failed children do not expose an expression. Preserve their messages at
+            # batch scope rather than guessing their identities from response order.
+            reason = " | ".join(sorted(set(errors)))
+            for mid in member_ids:
+                if mid not in results:
+                    results[mid] = {"error": reason or "child result unavailable"}
+        elif progress.alpha_id and len(member_ids) == 1:
+            attach(progress.alpha_id)
+        elif progress.status in {"ERROR", "CANCELLED", "FAIL", "FAILED"}:
             for mid in member_ids:
                 results[mid] = {"error": progress.message or progress.status}
+        else:
+            self._quarantine(batch_id)
+            raise AmbiguousRequest(f"Batch {batch_id}: terminal response lacks results")
 
         done = failed = 0
         with self.ledger.session() as s:

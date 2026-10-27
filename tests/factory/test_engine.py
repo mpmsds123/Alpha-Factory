@@ -5,12 +5,11 @@ and improves a parent by comparing within subindustry (worth +0.35 Sharpe in thi
 """
 
 import json
-
-import pytest
 import random
 import re
 from typing import Any
 
+import pytest
 from sqlalchemy import select
 
 from alpha_orchestrator.factory import engine as eng
@@ -21,10 +20,8 @@ from alpha_orchestrator.factory.models import (
     CandidateORM,
     CellORM,
     EventORM,
-    IdeaFieldORM,
     IdeaStatus,
     ResearchIdeaORM,
-    ReviewORM,
     Stage,
 )
 
@@ -38,11 +35,20 @@ def honest_llm(model: str, system: str, user: str) -> tuple[str, int, int]:
         eps = [f["id"] for f in p["fields"] if "_eps_" in f["id"]]
         other = [f["id"] for f in p["fields"] if "_eps_" not in f["id"]]
         groups = [
-            {"name": "EPS revisions", "meaning": "analysts revise slowly",
-             "direction": "higher is better", "why": "underreaction",
-             "fields": eps[:2] + ["not_a_field"]},
-            {"name": "Other", "meaning": "noise", "direction": "higher is better",
-             "why": "none", "fields": other[:1]},
+            {
+                "name": "EPS revisions",
+                "meaning": "analysts revise slowly",
+                "direction": "higher is better",
+                "why": "underreaction",
+                "fields": [*eps[:2], "not_a_field"],
+            },
+            {
+                "name": "Other",
+                "meaning": "noise",
+                "direction": "higher is better",
+                "why": "none",
+                "fields": other[:1],
+            },
         ]
         return json.dumps({"groups": groups}), 900, 200
     if task.startswith("Write 3 formulas that test this idea"):
@@ -64,9 +70,19 @@ def honest_llm(model: str, system: str, user: str) -> tuple[str, int, int]:
             {"expression": f"ts_mean({e}, 5)", "change": "smooth"},
         ]
         out = [v for v in out if v["expression"] not in tried]
-        return json.dumps({"problem": "low fitness (returns too small for the turnover)",
-                           "evidence": "fitness 0.6", "decision": "change", "why": "x",
-                           "variants": out}), 700, 200
+        return (
+            json.dumps(
+                {
+                    "problem": "low fitness (returns too small for the turnover)",
+                    "evidence": "fitness 0.6",
+                    "decision": "change",
+                    "why": "x",
+                    "variants": out,
+                }
+            ),
+            700,
+            200,
+        )
     if task.startswith("Propose ONE"):
         n = len(p["ideas_already_tried_here"])
         card = {
@@ -337,7 +353,7 @@ def test_a_rejected_citation_asks_for_a_card_and_does_not_count_as_no_idea() -> 
 
 
 def test_refill_skips_repeated_groups_and_near_miss_keeps_improving() -> None:
-    ledger, api, report = run(World({"est": analyst_fields("eps")}))
+    ledger, _api, _report = run(World({"est": analyst_fields("eps")}))
     with ledger.session() as s:
         cell = s.scalars(select(CellORM)).first()
         names = [g["name"] for g in (cell.plan or {}).get("groups", [])]
@@ -389,7 +405,9 @@ def _enhance_rows(ledger: Ledger) -> dict[str, list[CandidateORM]]:
 
 
 def test_a_near_miss_is_enhanced_by_deciles_and_passes() -> None:
-    world = _SizeWorld({"est": analyst_fields("eps", strength=1.0, signal_stats=("mean", "median", "high", "low"))})
+    world = _SizeWorld(
+        {"est": analyst_fields("eps", strength=1.0, signal_stats=("mean", "median", "high", "low"))}
+    )
     world.bucket_gain = 0.6
     ledger, _, _ = run(world, minutes=30)
     rows = _enhance_rows(ledger)
@@ -405,7 +423,9 @@ def test_a_near_miss_is_enhanced_by_deciles_and_passes() -> None:
 
 
 def test_enhance_tries_trade_when_on_the_best_wrapper_then_closes() -> None:
-    world = _SizeWorld({"est": analyst_fields("eps", strength=1.0, signal_stats=("mean", "median", "high", "low"))})
+    world = _SizeWorld(
+        {"est": analyst_fields("eps", strength=1.0, signal_stats=("mean", "median", "high", "low"))}
+    )
     ledger, _, _ = run(world, minutes=30)
     rows = _enhance_rows(ledger)
     assert rows

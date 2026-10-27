@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlencode
 
-from alpha_orchestrator.brain.client import BrainClient
+from alpha_orchestrator.brain.client import AmbiguousRequest, BrainClient
 
 PAGE = 50
 MULTI_SIM_MAX_CHILDREN = 10
@@ -107,16 +107,23 @@ class BrainAPI:
         body: Any = payloads if len(payloads) > 1 else payloads[0]
         response = self.client.request("POST", "/simulations", json=body)
         location = response.headers.get("Location")
-        if response.status_code // 100 != 2 or not location:
+        if 400 <= response.status_code < 500:
             raise ValueError(f"Simulation refused ({response.status_code}): {response.text[:4000]}")
+        if response.status_code // 100 != 2 or not location:
+            raise AmbiguousRequest("Simulation creation has no confirmed progress URL")
         return str(location)
 
     def poll(self, location: str) -> SimulationProgress:
         """One look at a simulation. A multi returns child ids; a single returns its alpha."""
         response = self.client.request("GET", location)
+        response.raise_for_status()
         if float(response.headers.get("Retry-After", 0) or 0) > 0:
             return SimulationProgress(done=False, status="RUNNING")
         data = response.json() if response.content.strip() else {}
+        if data.get("status") in {"PENDING", "RUNNING", "IN_PROGRESS"}:
+            return SimulationProgress(done=False, status=str(data["status"]))
+        if not data.get("status"):
+            raise ValueError("Simulation progress has no status; leaving batch in flight")
         return SimulationProgress(
             done=True,
             status=str(data.get("status", "ERROR")),
