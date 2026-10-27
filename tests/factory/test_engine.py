@@ -441,3 +441,29 @@ def test_enhance_tries_trade_when_on_the_best_wrapper_then_closes() -> None:
 def test_a_noise_idea_is_never_enhanced() -> None:
     ledger, _, _ = run(World({"est": analyst_fields(None)}, noise=0.2))
     assert not _enhance_rows(ledger)
+
+
+def test_empty_diagnosis_preserves_active_idea_instead_of_finishing() -> None:
+
+    def empty_diagnosis(model: str, system: str, user: str) -> tuple[str, int, int]:
+        if json.loads(user)["task"].startswith("Diagnose why"):
+            return "{}", 100, 4096
+        return honest_llm(model, system, user)
+
+    ledger = Ledger("sqlite://")
+    cfg = FactoryConfig()
+    cfg.budget.min_batch_interval_s = 0
+    llm = FactoryLLM(cfg, ledger, complete=empty_diagnosis)
+    report = eng.run_day(
+        cfg,
+        World({"est": analyst_fields("eps")}).platform(),
+        ledger,
+        llm,
+        rng=random.Random(3),
+        sleep=lambda _: None,
+    )
+    assert "LLM" in report.stopped_because or "llm" in report.stopped_because
+    with ledger.session() as s:
+        active = [i for i in s.scalars(select(ResearchIdeaORM)) if i.status == IdeaStatus.PROMISING]
+        assert active and all("gave_up" not in i.extra for i in active)
+        assert not list(s.scalars(select(EventORM).where(EventORM.kind == "diagnosis")))

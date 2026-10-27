@@ -100,6 +100,7 @@ class LLMConfig:
     timeout_s: float = 120.0
     max_calls_per_day: int = 1000
     max_completion_tokens: int = 4096
+    thinking: bool = False  # Keep bounded JSON output from being consumed by reasoning.
     # 第 9 问: yuan per million tokens [input cache miss, output], DeepSeek official Chinese
     # price page 2026-10-14; peak = Beijing Mon-Fri 9-12 and 14-18, all other hours off-peak
     prices_cny: dict[str, dict[str, list[float]]] = field(
