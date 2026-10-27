@@ -4,6 +4,12 @@ Alpha Factory is a research system in which an LLM interprets field semantics, p
 diagnoses failures, and suggests targeted revisions. Deterministic software controls validation,
 deduplication, budgets, stopping rules, robustness checks, platform checks, and human-gated submission.
 
+**Follow the development:** [current progress and open questions](docs/PROGRESS.md) ·
+[dated development journal](docs/progress/README.md).
+
+The result tables below describe the previously documented research cohort. Ongoing working-system
+snapshots are tracked separately in the progress log; figures from different cohorts must not be added.
+
 | Datasets | Available fields | Research ideas | Backtests | Best observed Sharpe |
 |---:|---:|---:|---:|---:|
 | **3** | **1,369** | **102** | **523** | **1.83** |
