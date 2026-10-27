@@ -29,6 +29,13 @@ the existing external credential file. Cookies and keys must never enter the sou
 bundle. When BRAIN requires Persona verification, the owner completes it; do not retry
 password login in a loop. Login and run must use the same session directory.
 
+Pending biometric verification is a persistent stop: unattended startup and password
+relogin return the saved challenge without another network authentication request, even
+after the login cooldown or a worker restart. Only explicit human verification completion
+clears the stop; an interactive login can replace an expired challenge. The acceptance
+heartbeat pauses itself after notifying the owner, and resumes only after confirmation.
+A 30-minute follow-up interval does not extend the platform's session lifetime.
+
 ## Budget and recovery
 
 Both `v1_daily_cap` and `daily_sim_cap` are 1,000 in the release configuration. The lower

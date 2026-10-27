@@ -159,6 +159,7 @@ class BrainSession:
 
     def ensure(self, minimum_seconds: float = 600.0, *, interactive: bool = False) -> float:
         """Return remaining seconds, logging in with the password when needed."""
+        self._require_human_if_pending(interactive)
         remaining = self.seconds_remaining()
         if remaining >= minimum_seconds:
             return remaining
@@ -168,6 +169,7 @@ class BrainSession:
     def login(self, *, interactive: bool = False) -> None:
         """The cooldown guards unattended runs from hammering the password; a person at
         the keyboard running `alpha-factory login` is not held back by it."""
+        self._require_human_if_pending(interactive)
         last = float(self.store.meta().get("last_password_login", 0.0))
         if not interactive and self._clock() - last < RELOGIN_COOLDOWN_SECONDS:
             raise AuthenticationFailed(
@@ -185,6 +187,11 @@ class BrainSession:
             raise AuthenticationFailed(f"Login rejected: HTTP {response.status_code}")
         self.store.save_cookies(self.http.cookies)
         self.store.update_meta(pending_biometric=None)
+
+    def _require_human_if_pending(self, interactive: bool) -> None:
+        pending = self.store.meta().get("pending_biometric")
+        if pending and not interactive:
+            raise NeedBiometric(str(pending))
 
     def complete_biometric(self, url: str) -> bool:
         """POST back to the Persona URL after the human finished the face check."""
