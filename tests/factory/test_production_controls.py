@@ -12,7 +12,7 @@ from alpha_orchestrator.brain.client import AmbiguousRequest, BrainClient
 from alpha_orchestrator.brain.session import BrainSession, SessionStore
 from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ledger import Ledger, WorkerAlreadyRunning
-from alpha_orchestrator.factory.models import BatchORM, CandidateORM, ReviewORM
+from alpha_orchestrator.factory.models import BatchORM, CandidateORM, EventORM, ReviewORM
 from alpha_orchestrator.factory.scheduler import Simulator
 from alpha_orchestrator.factory.select import approve, checks_passed, store_passing
 
@@ -215,6 +215,59 @@ def test_wrong_result_identity_cannot_be_attached_by_position() -> None:
     with pytest.raises(AmbiguousRequest, match="identity mismatch"):
         sim(ledger, api).run(2)
     with ledger.session() as s:
+        assert s.scalar(select(BatchORM.status)) == "UNKNOWN"
+        assert all(c.alpha_id is None for c in s.scalars(select(CandidateORM)))
+
+
+def test_identity_quarantine_retains_original_child_and_result_evidence() -> None:
+    ledger = setup(2)
+    api = FakeBrainAPI(metrics)
+    original = api.alpha
+
+    def wrong(alpha_id):  # type: ignore[no-untyped-def]
+        alpha = original(alpha_id)
+        return {
+            **alpha,
+            "regular": {"code": "rank(wrong_field)"},
+            "credential": "never-copy-arbitrary-payload-fields",
+        }
+
+    api.alpha = wrong  # type: ignore[method-assign]
+    with pytest.raises(AmbiguousRequest, match="identity mismatch"):
+        sim(ledger, api).run(2)
+    with ledger.session() as s:
+        events = list(s.scalars(select(EventORM).order_by(EventORM.id)))
+        parent = next(e for e in events if e.kind == "batch_progress_observed")
+        child = next(e for e in events if e.kind == "batch_child_observed")
+        result = next(e for e in events if e.kind == "batch_result_observed")
+        assert child.payload["child_id"] in parent.payload["children"]
+        assert child.payload["alpha_id"] == result.payload["alpha_id"]
+        assert result.payload["matched_candidates"] == []
+        assert result.payload["alpha"]["regular"]["code"] == "rank(wrong_field)"
+        assert "credential" not in result.payload["alpha"]
+        assert result.id < next(e.id for e in events if e.kind == "batch_unknown")
+        assert ledger.sims_reserved_today(s) == 2
+        assert s.scalar(select(BatchORM.status)) == "UNKNOWN"
+    # Restart still stops, rather than treating stored evidence as approval or
+    # re-creating a request whose outcome needs reconciliation.
+    with pytest.raises(AmbiguousRequest, match="Reconcile"):
+        sim(ledger, api).run(2)
+    assert api.started == 2
+
+
+def test_incomplete_child_list_is_retained_before_quarantine() -> None:
+    from alpha_orchestrator.brain.api import SimulationProgress
+
+    ledger = setup(2)
+    api = FakeBrainAPI(metrics)
+    api.poll = lambda _: SimulationProgress(  # type: ignore[method-assign]
+        done=True, status="COMPLETE", children=["only-one-returned"]
+    )
+    with pytest.raises(AmbiguousRequest, match="incomplete child list"):
+        sim(ledger, api).run(2)
+    with ledger.session() as s:
+        evidence = s.scalar(select(EventORM).where(EventORM.kind == "batch_progress_observed"))
+        assert evidence.payload["children"] == ["only-one-returned"]
         assert s.scalar(select(BatchORM.status)) == "UNKNOWN"
         assert all(c.alpha_id is None for c in s.scalars(select(CandidateORM)))
 
