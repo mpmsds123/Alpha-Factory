@@ -324,6 +324,19 @@ class Simulator:
         if not progress.done:
             return 0, 0
 
+        # Persist reconciliation evidence before a later child/identity failure can
+        # quarantine the batch. Progress endpoints can become unavailable overnight.
+        with self.ledger.session() as s:
+            self.ledger.log(
+                s,
+                "batch_progress_observed",
+                batch=batch_id,
+                status=progress.status,
+                children=progress.children,
+                alpha_id=progress.alpha_id,
+                message=progress.message,
+            )
+
         results: dict[str, dict[str, Any]] = {}
 
         def attach(alpha_id: str) -> None:
@@ -336,6 +349,18 @@ class Simulator:
                 if isinstance(code, str)
                 and fingerprint(code, {k: actual.get(k) for k in m.settings}) == m.fingerprint
             ]
+            with self.ledger.session() as s:
+                self.ledger.log(
+                    s,
+                    "batch_result_observed",
+                    batch=batch_id,
+                    alpha_id=alpha_id,
+                    matched_candidates=matches,
+                    duplicate_match=bool(matches and matches[0] in results),
+                    # Explicitly retained private fields, never an HTTP response or
+                    # authentication payload. Do not export these audit events.
+                    alpha={k: alpha[k] for k in ("regular", "settings", "is") if k in alpha},
+                )
             if len(matches) != 1 or matches[0] in results:
                 self._quarantine(batch_id)
                 raise AmbiguousRequest(f"Batch {batch_id}: result identity mismatch")
@@ -348,6 +373,16 @@ class Simulator:
             errors = []
             for child_id in progress.children:
                 child = self.api.child(child_id)
+                with self.ledger.session() as s:
+                    self.ledger.log(
+                        s,
+                        "batch_child_observed",
+                        batch=batch_id,
+                        child_id=child_id,
+                        status=child.status,
+                        alpha_id=child.alpha_id,
+                        message=child.message,
+                    )
                 if child.alpha_id:
                     attach(child.alpha_id)
                 else:
