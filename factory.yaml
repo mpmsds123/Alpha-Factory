@@ -3,7 +3,7 @@ db_path: ~/.alpha_factory/factory.db     # 账本，放在仓库外
 reports_dir: reports                     # 面板（含真实表达式，已 gitignore）
 scanner_progress: ~/Desktop/因子挖掘/scanner/runs/数据集进度.csv   # 旧，已不用
 scanner_runs: ~/Desktop/因子挖掘/scanner/runs   # 第 3 问：只挖扫描器一阶命中率 ≥ 2% 的数据集
-only_datasets: ["EUR|1|TOP2500|other466", "GLB|1|TOP3000|intraday_pv_feats", "USA|1|TOP3000|option_chart_model"]   # 10/15 跑出信号的 3 个；名单为空时按扫描器一阶命中率排
+only_datasets: []                       # Production: existing scanner eligibility/ranking; one active dataset
 
 budget:
   v1_daily_cap: 1000         # Factory allocation: at most 1,000 launched children / UTC day
