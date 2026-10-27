@@ -92,3 +92,66 @@ def test_homework_thread_becomes_one_document_per_answer(tmp_path: Path) -> None
         (doc,) = s.scalars(select(IdeaORM))
     assert doc.source == "作业区" and doc.title == "系列课程Course 3作业 · 作业 #1"
     assert "pcr_oi_30" in doc.body
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "{}",
+        '{"variants": []}',
+        '{"problem":"x","evidence":"1","decision":"unknown","why":"x","variants":[]}',
+    ],
+)
+def test_incomplete_diagnosis_is_unavailable_and_tokens_are_recorded(reply: str) -> None:
+    from alpha_orchestrator.factory.llm import LLMUnavailable
+
+    ledger = Ledger("sqlite://")
+    llm = FactoryLLM(FactoryConfig(), ledger, complete=lambda *_: (reply, 100, 4096))
+    with pytest.raises(LLMUnavailable):
+        llm.diagnose({}, [], {}, [], [], [], 3)
+    with ledger.session() as s:
+        calls = list(s.scalars(select(LLMCallORM)))
+        assert len(calls) == 2
+        assert all(not c.ok and c.completion_tokens == 4096 and c.response_hash for c in calls)
+
+
+@pytest.mark.parametrize(
+    ("finish", "content"), [("length", '{"description":"partial"}'), ("stop", "")]
+)
+def test_transport_rejects_unfinished_or_empty_content(
+    monkeypatch, finish: str, content: str
+) -> None:  # type: ignore[no-untyped-def]
+    from types import SimpleNamespace
+
+    from alpha_orchestrator.factory.llm import LLMUnavailable
+
+    captured = []
+
+    class Client:
+        def __init__(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *_):  # type: ignore[no-untyped-def]
+            pass
+
+        def create(self, **kwargs):  # type: ignore[no-untyped-def]
+            captured.append(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(finish_reason=finish, message=SimpleNamespace(content=content))
+                ],
+                usage=SimpleNamespace(prompt_tokens=20, completion_tokens=4096),
+            )
+
+    monkeypatch.setattr("openai.OpenAI", Client)
+    monkeypatch.setattr("alpha_orchestrator.factory.llm.load_llm_key", lambda _: "test-key")
+    ledger = Ledger("sqlite://")
+    llm = FactoryLLM(FactoryConfig(), ledger)
+    with pytest.raises(LLMUnavailable):
+        llm.describe({})
+    assert captured[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+    with ledger.session() as s:
+        assert all(not c.ok and c.completion_tokens == 4096 for c in s.scalars(select(LLMCallORM)))

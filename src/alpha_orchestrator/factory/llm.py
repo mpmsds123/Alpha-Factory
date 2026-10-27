@@ -48,6 +48,12 @@ class LLMUnavailable(RuntimeError):
     """Infrastructure/output failure; preserve the research state for a retry."""
 
 
+class IncompleteOutput(ValueError):
+    def __init__(self, text: str, prompt: int, completion: int, reason: str) -> None:
+        super().__init__(f"Incomplete LLM output: {reason}")
+        self.text, self.prompt_tokens, self.completion_tokens = text, prompt, completion
+
+
 Completion = Callable[[str, str, str], tuple[str, int, int]]
 
 
@@ -98,11 +104,23 @@ class FactoryLLM:
                 temperature=self.config.llm.temperature,
                 max_tokens=self.config.llm.max_completion_tokens,
                 response_format={"type": "json_object"},
+                extra_body={
+                    "thinking": {"type": "enabled" if self.config.llm.thinking else "disabled"}
+                },
                 messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
             )
             usage = response.usage
+            choice = response.choices[0]
+            content = choice.message.content or ""
+            if choice.finish_reason != "stop" or not content.strip():
+                raise IncompleteOutput(
+                    content,
+                    getattr(usage, "prompt_tokens", 0) or 0,
+                    getattr(usage, "completion_tokens", 0) or 0,
+                    str(choice.finish_reason),
+                )
             return (
-                response.choices[0].message.content or "{}",
+                content,
                 getattr(usage, "prompt_tokens", 0) or 0,
                 getattr(usage, "completion_tokens", 0) or 0,
             )
@@ -118,6 +136,7 @@ class FactoryLLM:
                         "user": user,
                         "temperature": self.config.llm.temperature,
                         "max_tokens": self.config.llm.max_completion_tokens,
+                        "thinking": self.config.llm.thinking,
                     }
                 )
             ),
@@ -138,12 +157,27 @@ class FactoryLLM:
             if used >= self.config.llm.max_calls_per_day:
                 raise LLMUnavailable("Daily LLM call budget exhausted")
             text = ""
+            p_tok, c_tok = 0, 0
             try:
                 text, p_tok, c_tok = self._complete(model, SYSTEM, user)
                 data = json.loads(text)
                 if not isinstance(data, dict):
                     raise ValueError("top-level JSON is not an object")
+                if not data:
+                    raise ValueError("empty JSON object")
+                if purpose == "diagnose":
+                    if any(
+                        not isinstance(data.get(k), str) or not data[k].strip()
+                        for k in ("problem", "evidence", "decision", "why")
+                    ):
+                        raise ValueError("diagnosis is missing decision or evidence")
+                    if data["decision"] not in {"change", "give_up"}:
+                        raise ValueError("invalid diagnosis decision")
+                    if not isinstance(data.get("variants"), list):
+                        raise ValueError("diagnosis variants must be a list")
             except Exception as exc:  # network, quota, malformed JSON: all recorded
+                if isinstance(exc, IncompleteOutput):
+                    text, p_tok, c_tok = exc.text, exc.prompt_tokens, exc.completion_tokens
                 last_error = f"{type(exc).__name__}: {exc}"[:500]
                 with self.ledger.session() as s:
                     s.add(
@@ -151,6 +185,9 @@ class FactoryLLM:
                             purpose=purpose,
                             model=model,
                             ok=False,
+                            prompt_tokens=p_tok,
+                            completion_tokens=c_tok,
+                            cost_cny=self.cost(model, p_tok, c_tok),
                             error=last_error,
                             idea_id=self.idea_id,
                             **provenance,

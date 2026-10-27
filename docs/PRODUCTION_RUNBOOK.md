@@ -73,6 +73,12 @@ Calls retain request/system/response hashes; older ledger rows receive empty pro
 fields because their original inputs cannot be reconstructed. Token cost fields remain
 estimates from the existing configured price table, not verified invoices or a spending cap.
 
+DeepSeek thinking is explicitly disabled by default for bounded JSON generation (configurable
+with `llm.thinking`). Empty/truncated responses and diagnoses without an explicit decision
+and evidence are unavailable output, never research conclusions. Failed output retains the
+provider's reported token usage when available. An exhausted output budget must not close
+an idea or count as a successful diagnosis.
+
 ## Promotion and acceptance
 
 Empty, warning, pending, erroneous or missing required platform checks cannot promote a
