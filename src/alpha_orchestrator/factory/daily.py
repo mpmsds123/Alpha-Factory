@@ -108,7 +108,7 @@ def run_day(
     rng = rng or random.Random()
 
     with ledger.session() as s:
-        used = ledger.sims_reserved_today(s)
+        used = ledger.sims_reserved_today(s, config.budget.window_start())
     budget = config.budget.daily_sim_cap - used
     quota = api.client.quota.remaining
     if quota is not None:

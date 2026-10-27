@@ -140,7 +140,7 @@ class Simulator:
             return max(
                 0,
                 min(self.config.budget.v1_daily_cap, self.config.budget.daily_sim_cap)
-                - self.ledger.sims_reserved_today(s),
+                - self.ledger.sims_reserved_today(s, self.config.budget.window_start()),
             )
 
     def _run(self, sim_budget: int, deadline: float | None) -> RunStats:
