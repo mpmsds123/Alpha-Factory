@@ -467,3 +467,39 @@ def test_empty_diagnosis_preserves_active_idea_instead_of_finishing() -> None:
         active = [i for i in s.scalars(select(ResearchIdeaORM)) if i.status == IdeaStatus.PROMISING]
         assert active and all("gave_up" not in i.extra for i in active)
         assert not list(s.scalars(select(EventORM).where(EventORM.kind == "diagnosis")))
+
+
+def test_diagnosis_receives_actual_configured_gates_and_margin_history() -> None:
+    observed = []
+
+    def capture(model: str, system: str, user: str) -> tuple[str, int, int]:
+        payload = json.loads(user)
+        if payload["task"].startswith("Diagnose why"):
+            observed.append(payload)
+        return honest_llm(model, system, user)
+
+    ledger = Ledger("sqlite://")
+    cfg = FactoryConfig()
+    cfg.budget.min_batch_interval_s = 0
+    cfg.thresholds.submit_sharpe = 1.91
+    cfg.thresholds.margin_bps["USA"] = 13.0
+    llm = FactoryLLM(cfg, ledger, complete=capture)
+    eng.run_day(
+        cfg,
+        World({"est": analyst_fields("eps")}).platform(),
+        ledger,
+        llm,
+        rng=random.Random(3),
+        sleep=lambda _: None,
+    )
+    assert observed
+    for p in observed:
+        assert p["acceptance_requirements"] == {
+            "sharpe_min": 1.91,
+            "fitness_min": 1.0,
+            "turnover_min": 0.01,
+            "turnover_max": 0.7,
+            "margin_min": 0.0013,
+        }
+        assert p["best"]["margin"] is not None
+        assert all("margin" in row for row in p["history_all_tries"])
