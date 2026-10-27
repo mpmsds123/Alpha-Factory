@@ -198,13 +198,13 @@ class Ledger:
         )
         return int(s.scalar(stmt) or 0)
 
-    def sims_reserved_today(self, s: Session) -> int:
+    def sims_reserved_today(self, s: Session, start: datetime | None = None) -> int:
         """Count children at creation, including in-flight and uncertain requests.
 
-        The local allocation resets at UTC midnight. Only a confirmed refusal releases
+        The caller supplies its allocation window. Only a confirmed refusal releases
         it. Completion dates never decide which day's allocation paid for a request.
         """
-        start = datetime.combine(datetime.now(UTC).date(), datetime.min.time(), tzinfo=UTC)
+        start = start or datetime.combine(datetime.now(UTC).date(), datetime.min.time(), tzinfo=UTC)
         return int(
             s.scalar(
                 select(func.coalesce(func.sum(BatchORM.size), 0)).where(

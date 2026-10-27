@@ -1438,7 +1438,9 @@ def run_day(
         catalog.refresh(api, ledger, config)
     study.reset_old_verdicts(ledger)
     with ledger.session() as s:
-        budget = config.budget.v1_daily_cap - ledger.sims_reserved_today(s)
+        budget = config.budget.v1_daily_cap - ledger.sims_reserved_today(
+            s, config.budget.window_start()
+        )
     quota = api.client.quota.remaining
     if quota is not None:
         budget = min(budget, quota - config.budget.quota_reserve)

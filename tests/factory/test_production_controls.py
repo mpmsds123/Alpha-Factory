@@ -479,3 +479,37 @@ def test_explicit_refusal_does_not_create_a_phantom_unknown_batch(kind: str) -> 
         assert ledger.sims_reserved_today(s) == 0
         assert s.scalar(select(BatchORM.status)) == "REFUSED"
         assert {c.status for c in s.scalars(select(CandidateORM))} == {"QUEUED"}
+
+
+@pytest.mark.parametrize(
+    ("instant", "expected"),
+    [
+        ("2026-10-27T03:59:59+00:00", "2026-10-26T04:00:00+00:00"),
+        ("2026-10-27T04:00:00+00:00", "2026-10-27T04:00:00+00:00"),
+        ("2026-12-02T01:00:00+00:00", "2026-12-01T05:00:00+00:00"),
+    ],
+)
+def test_allocation_resets_at_pacific_21_with_daylight_saving(instant: str, expected: str) -> None:
+    cfg = FactoryConfig()
+    assert cfg.budget.window_start(datetime.fromisoformat(instant)).isoformat() == expected
+
+
+def test_utc_midnight_does_not_release_same_scanner_day_reservations() -> None:
+    ledger = setup(0)
+    cfg = FactoryConfig()
+    cfg.budget.v1_daily_cap = 10
+    with ledger.session() as s:
+        s.add(
+            BatchORM(
+                region="USA",
+                delay=1,
+                size=10,
+                status="DONE",
+                created_at=datetime(2026, 10, 27, 0, 30, tzinfo=UTC),
+            )
+        )
+    cfg.budget.window_start = lambda now=None: datetime(2026, 10, 26, 4, tzinfo=UTC)  # type: ignore[method-assign]
+    worker = Simulator(FakeBrainAPI(metrics), ledger, cfg)
+    assert worker._remaining_daily() == 0
+    cfg.budget.window_start = lambda now=None: datetime(2026, 10, 27, 4, tzinfo=UTC)  # type: ignore[method-assign]
+    assert worker._remaining_daily() == 10

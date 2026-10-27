@@ -7,8 +7,10 @@ training 2026-04-29; AI课 = official "零基础上手BRAIN-AI篇"; 论坛 = Chi
 
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -35,6 +37,8 @@ class Budget:
     children_per_slot: int = 10  # 规则: 10 alphas per multi-simulation
     min_batch_interval_s: float = 20.0  # 论坛: >3 batches / 10 min triggers 429 storms
     quota_reserve: int = 0  # Explicit reserve outside this factory's own daily allocation.
+    quota_timezone: str = "America/Los_Angeles"
+    quota_reset_hour: int = 21  # Same allocation window as the existing 4,000/day scanner.
 
     def __post_init__(self) -> None:
         if any(v < 0 for v in (self.daily_sim_cap, self.v1_daily_cap, self.quota_reserve)):
@@ -43,6 +47,19 @@ class Budget:
             raise ValueError("Need at least one slot and 1-10 children per batch")
         if self.min_batch_interval_s < 0:
             raise ValueError("Batch interval must be nonnegative")
+        if not 0 <= self.quota_reset_hour <= 23:
+            raise ValueError("Quota reset hour must be 0-23")
+        ZoneInfo(self.quota_timezone)
+
+    def window_start(self, now: datetime | None = None) -> datetime:
+        instant = now or datetime.now(UTC)
+        if instant.tzinfo is None:
+            raise ValueError("Quota clock must include a timezone")
+        local = instant.astimezone(ZoneInfo(self.quota_timezone))
+        cut = local.replace(hour=self.quota_reset_hour, minute=0, second=0, microsecond=0)
+        if local < cut:
+            cut -= timedelta(days=1)
+        return cut.astimezone(UTC)
 
 
 @dataclass

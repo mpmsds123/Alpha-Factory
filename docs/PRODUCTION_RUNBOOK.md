@@ -33,8 +33,9 @@ password login in a loop. Login and run must use the same session directory.
 
 Both `v1_daily_cap` and `daily_sim_cap` are 1,000 in the release configuration. The lower
 value wins. Reservations count child simulations at request creation, including pending
-and unknown outcomes. Confirmed refusals release their reservations. The local day is UTC;
-verify the account's actual simulation reset and header semantics during rollout. This
+and unknown outcomes. Confirmed refusals release their reservations. The allocation day resets at 21:00 America/Los_Angeles, matching the existing scanner's
+4,000 + 1,000 split; timezone rules handle daylight saving. Verify the platform's actual
+server reset and header semantics during rollout. This
 ledger cannot coordinate spending by another independent scanner or another ledger.
 
 `quota_reserve` is configurable and defaults to zero for this factory's allocated quota.

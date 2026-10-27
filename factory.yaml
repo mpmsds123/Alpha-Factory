@@ -6,8 +6,10 @@ scanner_runs: ~/Desktop/因子挖掘/scanner/runs   # 第 3 问：只挖扫描�
 only_datasets: []                       # Production: existing scanner eligibility/ranking; one active dataset
 
 budget:
-  v1_daily_cap: 1000         # Factory allocation: at most 1,000 launched children / UTC day
+  v1_daily_cap: 1000         # Factory allocation: at most 1,000 launched children / allocation day
   daily_sim_cap: 1000        # Same hard cap for the legacy entrypoint
+  quota_timezone: America/Los_Angeles
+  quota_reset_hour: 21      # Existing scanner allocation resets at 21:00 Pacific
   quota_reserve: 0          # This factory has its own 1,000-simulation allocation
   active_datasets: 1         # 你定的：一次只做一个数据集
   dataset_sim_cap: 1000      # Per-dataset lifetime allowance; daily hard cap still applies

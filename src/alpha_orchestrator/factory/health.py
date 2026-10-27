@@ -11,9 +11,13 @@ from alpha_orchestrator.factory.ledger import today_utc
 def inspect_local(config: FactoryConfig) -> dict[str, Any]:
     path = Path(config.db_path).expanduser().resolve()
     cap = min(config.budget.v1_daily_cap, config.budget.daily_sim_cap)
+    start = config.budget.window_start()
     report: dict[str, Any] = {
         "day_utc": today_utc(),
         "daily_cap": cap,
+        "quota_window_start_utc": start.isoformat(),
+        "quota_timezone": config.budget.quota_timezone,
+        "quota_reset_hour": config.budget.quota_reset_hour,
         "ledger": str(path),
         "ledger_exists": path.exists(),
         "authenticated": "not_checked",
@@ -29,7 +33,7 @@ def inspect_local(config: FactoryConfig) -> dict[str, Any]:
             report["reserved_today"] = conn.execute(
                 "SELECT coalesce(sum(size),0) FROM batches WHERE created_at >= ? "
                 "AND status NOT IN ('REFUSED','REJECTED')",
-                (today_utc(),),
+                (start.replace(tzinfo=None).isoformat(" "),),
             ).fetchone()[0]
             report["unknown_batches"] = conn.execute(
                 "SELECT count(*) FROM batches WHERE status='UNKNOWN' "
