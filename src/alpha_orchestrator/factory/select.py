@@ -50,6 +50,26 @@ def check_value(checks: list[dict[str, Any]], name: str) -> float | None:
     return None
 
 
+def checks_passed(checks: list[dict[str, Any]], corr_max: float) -> bool:
+    """Empty, pending, unknown or incomplete evidence never authorizes promotion."""
+    if not checks or any(c.get("result") != "PASS" for c in checks):
+        return False
+    for name in ("SELF_CORRELATION", "PROD_CORRELATION"):
+        value = check_value(checks, name)
+        if value is None or not math.isfinite(value) or value > corr_max:
+            return False
+    return True
+
+
+def robust_passed(extra: dict[str, Any], keep_ratio: float) -> bool:
+    robust = extra.get("robust") or {}
+    ratios = robust.get("ratios") or {}
+    return bool(robust.get("pass") and ratios) and all(
+        isinstance(value, (int, float)) and math.isfinite(value) and value >= keep_ratio
+        for value in ratios.values()
+    )
+
+
 def select_today(
     api: BrainAPI, ledger: Ledger, config: FactoryConfig, llm: FactoryLLM | None
 ) -> list[str]:
@@ -78,7 +98,7 @@ def select_today(
         for c in s.scalars(select(CandidateORM).where(CandidateORM.status == "DONE")):
             if c.id in reviewed or not c.extra.get("ready") or not c.alpha_id:
                 continue
-            if not (c.extra.get("robust") or {}).get("pass"):
+            if not robust_passed(c.extra, config.thresholds.robust_keep_ratio):
                 continue
             value = value_of.get(c.cell_id, 1.0)
             pool.append(
@@ -105,14 +125,13 @@ def select_today(
         if len(chosen) >= slots:
             break
         checks = api.check(alpha_id)
-        fails = [c.get("name") for c in checks if c.get("result") == "FAIL"]
         prod = check_value(checks, "PROD_CORRELATION")
         self_corr = check_value(checks, "SELF_CORRELATION")
         with ledger.session() as s:
             row = s.get(CandidateORM, cid)
             assert row is not None
             row.extra = {**row.extra, "submission_check": checks}
-        if fails:
+        if not checks_passed(checks, config.thresholds.pnl_corr_max):
             continue
         pnl = api.daily_pnl(alpha_id)
         worst = max((abs(pnl_corr(pnl, other)) for other in kept_pnl.values()), default=0.0)
@@ -163,13 +182,20 @@ def _describe(ledger: Ledger, llm: FactoryLLM | None, candidate_id: str) -> str:
         return ""
 
 
-def approve(api: BrainAPI, ledger: Ledger, review_id: str) -> bool:
+def approve(
+    api: BrainAPI, ledger: Ledger, review_id: str, config: FactoryConfig | None = None
+) -> bool:
     """The only code path that submits. Called by `alpha-factory review approve`."""
     with ledger.session() as s:
         r = s.get(ReviewORM, review_id)
         if r is None or r.status != ReviewStatus.PENDING:
             return False
         alpha_id, description = r.alpha_id, r.description
+    checks = api.check(alpha_id)
+    if not checks_passed(checks, (config or FactoryConfig()).thresholds.pnl_corr_max):
+        with ledger.session() as s:
+            ledger.log(s, "submission_check_blocked", alpha=alpha_id, checks=checks)
+        return False
     if description:
         api.set_properties(alpha_id, description=description, tags=["alpha-factory"])
     ok = api.submit(alpha_id)
@@ -245,7 +271,7 @@ def store_passing(api: BrainAPI, ledger: Ledger, config: FactoryConfig) -> list[
             if c.id not in reviewed
             and c.alpha_id
             and (c.extra or {}).get("ready")
-            and ((c.extra or {}).get("robust") or {}).get("pass")
+            and robust_passed(c.extra or {}, config.thresholds.robust_keep_ratio)
             and not (c.extra or {}).get("platform_failed")
         ]
     stored: list[str] = []
@@ -259,6 +285,9 @@ def store_passing(api: BrainAPI, ledger: Ledger, config: FactoryConfig) -> list[
             if fails:
                 row.extra = {**row.extra, "platform_failed": fails}
                 ledger.log(s, "platform_check_failed", alpha=alpha_id, fails=fails)
+                continue
+            if not checks_passed(checks, config.thresholds.pnl_corr_max):
+                ledger.log(s, "platform_check_deferred", alpha=alpha_id, checks=checks)
                 continue
             score = {
                 "prod_corr": check_value(checks, "PROD_CORRELATION"),

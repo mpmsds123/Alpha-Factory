@@ -19,11 +19,11 @@ from sqlalchemy import func, select
 from alpha_orchestrator.brain.api import BrainAPI
 from alpha_orchestrator.factory import catalog, datasets
 from alpha_orchestrator.factory.config import FactoryConfig
-from alpha_orchestrator.factory.ledger import Ledger
+from alpha_orchestrator.factory.ledger import Ledger, ledger_locked
 from alpha_orchestrator.factory.llm import FactoryLLM
 from alpha_orchestrator.factory.models import CellORM, CellState, EventORM
 from alpha_orchestrator.factory.research import Factory, Metadata, reset_legacy
-from alpha_orchestrator.factory.scheduler import QUOTA_RESERVE, Simulator
+from alpha_orchestrator.factory.scheduler import Simulator
 from alpha_orchestrator.factory.select import select_today
 
 CHUNK = 100  # simulations between research steps (~30 minutes at 10 in flight)
@@ -77,6 +77,7 @@ def fill_active(
     return started
 
 
+@ledger_locked
 def run_day(
     config: FactoryConfig,
     api: BrainAPI,
@@ -91,6 +92,15 @@ def run_day(
 ) -> DayReport:
     report = DayReport()
     deadline = time.monotonic() + minutes * 60
+    simulator = Simulator(api, ledger, config, sleep=sleep)
+    simulator.assert_recoverable()
+    # Drain durable requests before an unavailable LLM can prevent their recovery.
+    recovered = simulator.run(0, deadline=deadline)
+    report.simulations += recovered.completed
+    report.failed += recovered.failed
+    if recovered.stopped_because == "deadline":
+        report.stopped_because = "deadline"
+        return report
     meta = meta or Metadata.fetch(api)
     if catalog_is_stale(ledger):
         catalog.refresh(api, ledger, config)
@@ -98,17 +108,16 @@ def run_day(
     rng = rng or random.Random()
 
     with ledger.session() as s:
-        used = ledger.sims_used_today(s)
+        used = ledger.sims_reserved_today(s)
     budget = config.budget.daily_sim_cap - used
     quota = api.client.quota.remaining
     if quota is not None:
-        budget = min(budget, quota - QUOTA_RESERVE)
+        budget = min(budget, quota - config.budget.quota_reserve)
     if budget <= 0:
         report.stopped_because = "daily simulation budget already used"
         return report
 
     factory = Factory(api, ledger, config, meta, llm, rng=rng)
-    simulator = Simulator(api, ledger, config, sleep=sleep)
     spent = 0
     idle = 0
     while spent < budget and time.monotonic() < deadline:
@@ -122,6 +131,9 @@ def run_day(
         if on_progress is not None:
             on_progress()
         report.stopped_because = run.stopped_because
+        if simulator._remaining_daily() <= 0:
+            report.stopped_because = "daily budget spent"
+            break
         if run.stopped_because in ("quota", "deadline", "platform kept refusing batches"):
             break
         if run.batches == 0 and not any(moved.values()):

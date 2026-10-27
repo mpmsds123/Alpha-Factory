@@ -1,5 +1,8 @@
 """`alpha-factory`: the commands you actually type."""
 
+import json
+import os
+import plistlib
 import subprocess
 import sys
 import webbrowser
@@ -10,13 +13,18 @@ import typer
 from sqlalchemy import select
 
 from alpha_orchestrator.brain.api import BrainAPI
-from alpha_orchestrator.brain.client import BrainClient, RateLimited, SessionExpired
+from alpha_orchestrator.brain.client import (
+    AmbiguousRequest,
+    BrainClient,
+    RateLimited,
+    SessionExpired,
+)
 from alpha_orchestrator.brain.notify import notify
 from alpha_orchestrator.brain.session import AuthenticationFailed, BrainSession, NeedBiometric
 from alpha_orchestrator.factory.config import DEFAULT_CONFIG, FactoryConfig
 from alpha_orchestrator.factory.dashboard import render
 from alpha_orchestrator.factory.ideas import import_ideas
-from alpha_orchestrator.factory.ledger import Ledger
+from alpha_orchestrator.factory.ledger import Ledger, WorkerAlreadyRunning
 from alpha_orchestrator.factory.llm import FactoryLLM
 from alpha_orchestrator.factory.models import (
     CandidateORM,
@@ -58,6 +66,65 @@ def _llm(config: FactoryConfig, ledger: Ledger) -> FactoryLLM | None:
 
 def _dashboard_path(config: FactoryConfig) -> Path:
     return Path(config.reports_dir) / "dashboard.html"
+
+
+@app.command()
+def doctor(
+    live: Annotated[bool, typer.Option("--live")] = False, config: ConfigOpt = DEFAULT_CONFIG
+) -> None:
+    """只读检查预算、在途和异常批次；--live 只检查登录，不登录或回测。"""
+    from alpha_orchestrator.factory.health import inspect_local
+
+    report = inspect_local(FactoryConfig.load(config))
+    if live:
+        session = BrainSession()
+        try:
+            response = session.http.get("/authentication")
+            report["authentication_http_status"] = response.status_code
+            report["authenticated"] = response.status_code == 200
+            if response.status_code != 200:
+                report["blockers"].append("authentication_required")
+        except Exception as exc:
+            report["authenticated"] = False
+            report["blockers"].append("authentication_unreachable")
+            report["connection_error"] = type(exc).__name__
+        finally:
+            session.close()
+    typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
+    if report["blockers"]:
+        raise typer.Exit(1)
+
+
+@app.command("recover-batch")
+def recover_batch(
+    batch_id: str,
+    location: Annotated[str, typer.Option(help="核对后的 /simulations/... URL")],
+    config: ConfigOpt = DEFAULT_CONFIG,
+) -> None:
+    """把已在平台核对过的进度 URL 接回异常批次；不发起新回测。"""
+    from urllib.parse import urlsplit
+
+    from alpha_orchestrator.brain.session import API_URL
+    from alpha_orchestrator.factory.models import BatchORM
+
+    parts = urlsplit(location)
+    if (parts.netloc and f"{parts.scheme}://{parts.netloc}" != API_URL) or not (
+        parts.path.startswith("/simulations/") and not parts.query and not parts.fragment
+    ):
+        raise typer.BadParameter("必须是 BRAIN 的 /simulations/... 进度 URL")
+    _, ledger = _ctx(config)
+    with ledger.writer_lock(), ledger.session() as s:
+        batch = s.get(BatchORM, batch_id)
+        if batch is None or batch.status != "UNKNOWN":
+            raise typer.BadParameter("只允许恢复 UNKNOWN 批次")
+        other = s.scalar(
+            select(BatchORM).where(BatchORM.location == parts.path, BatchORM.id != batch_id)
+        )
+        if other is not None:
+            raise typer.BadParameter("该进度 URL 已属于另一批次")
+        batch.location, batch.status = parts.path, "RUNNING"
+        ledger.log(s, "batch_reconciled", batch=batch_id, location=parts.path)
+    typer.echo("已接回原批次；下次 run 只查询原请求，返回结果必须匹配表达式及设置。")
 
 
 @app.command()
@@ -134,6 +201,9 @@ def run(
             minutes=minutes,
             on_progress=refresh_record,
         )
+    except (AmbiguousRequest, WorkerAlreadyRunning) as exc:
+        typer.echo(f"安全暂停：{exc}")
+        raise typer.Exit(4) from None
     except NeedBiometric:
         notify("平台要求刷脸：运行 alpha-factory login --then-run，会从断点继续")
         render_record(ledger, record_path)
@@ -221,7 +291,7 @@ def review_list(config: ConfigOpt = DEFAULT_CONFIG) -> None:
 @review_app.command("approve")
 def review_approve(review_id: str, config: ConfigOpt = DEFAULT_CONFIG) -> None:
     """提交这一条 alpha 到平台（不可撤回）。"""
-    _, ledger = _ctx(config)
+    cfg, ledger = _ctx(config)
     with ledger.session() as s:
         pool = list(s.scalars(select(ReviewORM.id)))
     matched = _match([review_id], pool)
@@ -231,7 +301,7 @@ def review_approve(review_id: str, config: ConfigOpt = DEFAULT_CONFIG) -> None:
     api = _api()
     try:
         api.client.session.ensure()
-        typer.echo("已提交。" if approve(api, ledger, rid) else "提交失败，详情见面板事件。")
+        typer.echo("已提交。" if approve(api, ledger, rid, cfg) else "提交失败，详情见面板事件。")
     finally:
         api.client.session.close()
 
@@ -246,23 +316,40 @@ def review_reject(review_id: str, note: str = "", config: ConfigOpt = DEFAULT_CO
 
 
 @schedule_app.command("install")
-def schedule_install(hour: int = 0, minute: int = 37, workdir: Path | None = None) -> None:
-    """每天定时运行（Mac 睡眠错过时醒来补跑）。"""
-    workdir = workdir or Path.cwd()
-    exe = Path(sys.executable).with_name("alpha-factory")
+def schedule_install(
+    hour: int = 0, minute: int = 37, workdir: Path | None = None, config: ConfigOpt = DEFAULT_CONFIG
+) -> None:
+    """每天定时运行；明确固定代码、配置和会话路径。"""
+    from alpha_orchestrator.factory.config import REPO_ROOT
+
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        raise typer.BadParameter("小时必须为 0-23，分钟必须为 0-59")
+    workdir = (workdir or REPO_ROOT).resolve()
+    cfg = FactoryConfig.load(config)
+    log_path = Path(cfg.db_path).expanduser().resolve().parent / "run.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    env = {"PYTHONPATH": str(REPO_ROOT / "src")}
+    if os.getenv("BRAIN_STATE_DIR"):
+        env["BRAIN_STATE_DIR"] = str(Path(os.environ["BRAIN_STATE_DIR"]).expanduser().resolve())
+    payload = {
+        "Label": "com.meilin.alphafactory",
+        "ProgramArguments": [
+            sys.executable,
+            "-c",
+            "from alpha_orchestrator.factory.cli import app; app()",
+            "run",
+            "--config",
+            str(config.expanduser().resolve()),
+        ],
+        "WorkingDirectory": str(workdir),
+        "EnvironmentVariables": env,
+        "StartCalendarInterval": {"Hour": hour, "Minute": minute},
+        "StandardOutPath": str(log_path),
+        "StandardErrorPath": str(log_path),
+    }
     PLIST.parent.mkdir(parents=True, exist_ok=True)
-    PLIST.write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>com.meilin.alphafactory</string>
-  <key>ProgramArguments</key><array><string>{exe}</string><string>run</string></array>
-  <key>WorkingDirectory</key><string>{workdir.resolve()}</string>
-  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>{hour}</integer>
-    <key>Minute</key><integer>{minute}</integer></dict>
-  <key>StandardOutPath</key><string>{Path("~/.alpha_factory/run.log").expanduser()}</string>
-  <key>StandardErrorPath</key><string>{Path("~/.alpha_factory/run.log").expanduser()}</string>
-</dict></plist>
-""")
+    with PLIST.open("wb") as out:
+        plistlib.dump(payload, out)
     subprocess.run(["launchctl", "unload", str(PLIST)], check=False, capture_output=True)
     subprocess.run(["launchctl", "load", str(PLIST)], check=True)
     typer.echo(f"已安装：每天 {hour:02d}:{minute:02d} 运行。卸载：alpha-factory schedule uninstall")

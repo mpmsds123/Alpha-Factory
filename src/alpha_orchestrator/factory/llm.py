@@ -19,6 +19,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from sqlalchemy import func, select
+
+from alpha_orchestrator.domain.identity import canonical_json, sha256_text
 from alpha_orchestrator.factory.config import FactoryConfig, load_llm_key
 from alpha_orchestrator.factory.ledger import Ledger
 from alpha_orchestrator.factory.models import LLMCallORM
@@ -39,6 +42,10 @@ def is_peak(now: datetime) -> bool:
     """DeepSeek peak hours: Beijing (UTC+8) Monday-Friday 9-12 and 14-18."""
     bj = now.astimezone(UTC) + timedelta(hours=8)
     return bj.weekday() < 5 and (9 <= bj.hour < 12 or 14 <= bj.hour < 18)
+
+
+class LLMUnavailable(RuntimeError):
+    """Infrastructure/output failure; preserve the research state for a retry."""
 
 
 Completion = Callable[[str, str, str], tuple[str, int, int]]
@@ -83,24 +90,54 @@ class FactoryLLM:
             api_key=load_llm_key(self.config.llm.key_file),
             base_url=self.config.llm.base_url,
             timeout=self.config.llm.timeout_s,
+            max_retries=0,
         )
-        response = client.chat.completions.create(
-            model=model,
-            temperature=self.config.llm.temperature,
-            response_format={"type": "json_object"},
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        )
-        usage = response.usage
-        return (
-            response.choices[0].message.content or "{}",
-            getattr(usage, "prompt_tokens", 0) or 0,
-            getattr(usage, "completion_tokens", 0) or 0,
-        )
+        with client:
+            response = client.chat.completions.create(
+                model=model,
+                temperature=self.config.llm.temperature,
+                max_tokens=self.config.llm.max_completion_tokens,
+                response_format={"type": "json_object"},
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            )
+            usage = response.usage
+            return (
+                response.choices[0].message.content or "{}",
+                getattr(usage, "prompt_tokens", 0) or 0,
+                getattr(usage, "completion_tokens", 0) or 0,
+            )
 
     def ask(self, purpose: str, user: str, *, strong: bool = False) -> dict[str, Any]:
         model = self.config.llm.strong_model if strong else self.config.llm.model
+        provenance = {
+            "request_hash": sha256_text(
+                canonical_json(
+                    {
+                        "model": model,
+                        "system": SYSTEM,
+                        "user": user,
+                        "temperature": self.config.llm.temperature,
+                        "max_tokens": self.config.llm.max_completion_tokens,
+                    }
+                )
+            ),
+            "system_hash": sha256_text(SYSTEM),
+        }
         last_error = ""
         for _ in range(2):
+            start = datetime.combine(datetime.now(UTC).date(), datetime.min.time(), tzinfo=UTC)
+            with self.ledger.session() as s:
+                used = int(
+                    s.scalar(
+                        select(func.count())
+                        .select_from(LLMCallORM)
+                        .where(LLMCallORM.created_at >= start)
+                    )
+                    or 0
+                )
+            if used >= self.config.llm.max_calls_per_day:
+                raise LLMUnavailable("Daily LLM call budget exhausted")
+            text = ""
             try:
                 text, p_tok, c_tok = self._complete(model, SYSTEM, user)
                 data = json.loads(text)
@@ -116,6 +153,8 @@ class FactoryLLM:
                             ok=False,
                             error=last_error,
                             idea_id=self.idea_id,
+                            **provenance,
+                            response_hash=sha256_text(text) if text else "",
                         )
                     )
                 continue
@@ -127,13 +166,15 @@ class FactoryLLM:
                     completion_tokens=c_tok,
                     cost_cny=self.cost(model, p_tok, c_tok),
                     idea_id=self.idea_id,
+                    **provenance,
+                    response_hash=sha256_text(text),
                 )
                 s.add(row)
                 s.flush()
                 if self.idea_id is None:
                     self.unbilled.append(row.id)
             return data
-        raise RuntimeError(f"LLM {purpose} failed twice: {last_error}")
+        raise LLMUnavailable(f"LLM {purpose} failed twice: {last_error}")
 
     # ---------- jobs ----------
     def group_fields(
@@ -376,7 +417,7 @@ class FactoryLLM:
     def field_groups(
         self,
         dataset: dict[str, Any],
-        fields: Sequence[dict[str, str]],
+        fields: Sequence[dict[str, Any]],
         n: int,
         tried: Sequence[str] = (),
     ) -> list[dict[str, Any]]:

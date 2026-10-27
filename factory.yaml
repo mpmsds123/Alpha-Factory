@@ -6,10 +6,11 @@ scanner_runs: ~/Desktop/因子挖掘/scanner/runs   # 第 3 问：只挖扫描�
 only_datasets: ["EUR|1|TOP2500|other466", "GLB|1|TOP3000|intraday_pv_feats", "USA|1|TOP3000|option_chart_model"]   # 10/15 跑出信号的 3 个；名单为空时按扫描器一阶命中率排
 
 budget:
-  v1_daily_cap: 300          # 10/15 第一次正式跑：3 个数据集 x 100 次，LLM 约 ¥6
-  daily_sim_cap: 2400        # 并发 10 × 12 小时 × 每小时 20 次（约 3 分钟一次）
+  v1_daily_cap: 1000         # Factory allocation: at most 1,000 launched children / UTC day
+  daily_sim_cap: 1000        # Same hard cap for the legacy entrypoint
+  quota_reserve: 0          # This factory has its own 1,000-simulation allocation
   active_datasets: 1         # 你定的：一次只做一个数据集
-  dataset_sim_cap: 100       # 现行设计 第 1 步：每个数据集 100 次
+  dataset_sim_cap: 1000      # Per-dataset lifetime allowance; daily hard cap still applies
   health_sample: 40          # 体检抽多少个家族
   survey_per_stratum: 2      # 普查每层抽几个家族（家族总数 ≤40 时全部普查）
   survey_max_families: 100

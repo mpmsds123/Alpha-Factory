@@ -64,7 +64,9 @@ class SessionStore:
     """Cookies and login bookkeeping kept outside the repository, readable only by you."""
 
     def __init__(self, state_dir: Path | None = None) -> None:
-        self.dir = (state_dir or DEFAULT_STATE_DIR).expanduser()
+        self.dir = (
+            state_dir or Path(os.getenv("BRAIN_STATE_DIR", str(DEFAULT_STATE_DIR)))
+        ).expanduser()
         self.cookies_path = self.dir / "brain_cookies.json"
         self.meta_path = self.dir / "brain_session.json"
 

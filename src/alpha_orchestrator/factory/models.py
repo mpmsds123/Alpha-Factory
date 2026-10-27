@@ -228,6 +228,9 @@ class LLMCallORM(FactoryBase):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     purpose: Mapped[str] = mapped_column(String(64))
     model: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64), default="")
+    response_hash: Mapped[str] = mapped_column(String(64), default="")
+    system_hash: Mapped[str] = mapped_column(String(64), default="")
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)  # unused since 10/14

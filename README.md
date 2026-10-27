@@ -1,5 +1,11 @@
 # Alpha Research Orchestrator
 
+For the private **Alpha Factory** runtime (`alpha-factory`), use the
+[production runbook](docs/PRODUCTION_RUNBOOK.md). It documents the 1,000-child daily cap,
+restart/reconciliation behavior, live acceptance gates and deployment limits. The
+`alpha-lab` workflow below is a separate, older entrypoint.
+
+
 An offline-first, evidence-gated research engine for bounded and reconstructable Alpha
 experiments. SQLite is the source of truth: candidate identities, state transitions, gate
 decisions, simulation attempts, retries, lineage, policy snapshots, and stop reasons are

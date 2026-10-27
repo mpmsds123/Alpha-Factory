@@ -140,8 +140,14 @@ def arity_issues(expression: str, signatures: Mapping[str, tuple[int, int]]) -> 
 # 2026-10-14: group_rank(x, <an ordinary field>) cancelled a batch ("Incompatible unit
 # ... expected Unit[Group:1]"). The group input sits at this positional index.
 GROUP_INPUT = {
-    "group_rank": 1, "group_zscore": 1, "group_neutralize": 1, "group_scale": 1,
-    "group_max": 1, "group_min": 1, "group_backfill": 1, "group_mean": 2,
+    "group_rank": 1,
+    "group_zscore": 1,
+    "group_neutralize": 1,
+    "group_scale": 1,
+    "group_max": 1,
+    "group_min": 1,
+    "group_backfill": 1,
+    "group_mean": 2,
 }
 GROUP_MAKERS = ("bucket(", "densify(", "group_cartesian_product(")
 

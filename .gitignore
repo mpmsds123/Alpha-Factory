@@ -35,3 +35,6 @@ platform-brain.json
 reports/
 factory.db*
 .alpha_factory/
+
+# OS worker locks have no research content and must stay local.
+*.worker.lock
