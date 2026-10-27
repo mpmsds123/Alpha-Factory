@@ -40,9 +40,10 @@ ledger cannot coordinate spending by another independent scanner or another ledg
 `quota_reserve` is configurable and defaults to zero for this factory's allocated quota.
 The final batch is trimmed to the remaining allocation and reported headroom. A quota is
 a ceiling: exhausted research ideas may stop earlier. Do not invent weak tests just to
-consume the remainder. The three explicitly selected datasets and research thresholds are preserved. The old
-100-child pilot dataset allowance is raised to 1,000. Only budget-stopped selected cells
-with unfinished work resume; prior candidates and failure evidence are retained.
+consume the remainder. Research thresholds are preserved. Production clears the old three-dataset pilot
+whitelist and uses the existing scanner eligibility/ranking, with one active dataset.
+The 100-child pilot dataset allowance is raised to 1,000. Explicitly selected budget-stopped
+cells with unfinished work can resume; prior candidates and failure evidence are retained.
 
 Only one worker can own a ledger. Its OS lock releases after a crash. Existing in-flight
 URLs are polled before new LLM proposals. The deadline stops further work between HTTP
