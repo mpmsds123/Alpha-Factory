@@ -390,3 +390,67 @@ def test_research_failure_is_not_reopened_by_a_budget_increase() -> None:
         cell.plan = {"design": DESIGN, "groups": [{"name": "unused"}], "outcome": "noise"}
     engine = Engine(FakeBrainAPI(metrics), ledger, cfg, Metadata(), FactoryLLM(cfg, ledger))
     assert engine._current_dataset() is None
+
+
+def test_duplicate_group_refill_stops_repeating_the_same_request() -> None:
+    from alpha_orchestrator.factory.engine import GROUP_REFILLS, Engine
+    from alpha_orchestrator.factory.llm import FactoryLLM
+    from alpha_orchestrator.factory.models import CellORM, FieldORM
+    from alpha_orchestrator.factory.research import Metadata
+
+    ledger = setup(0)
+    cfg = FactoryConfig()
+    with ledger.session() as s:
+        s.add(
+            FieldORM(
+                cell_id="USA|1|TOP3000|ds",
+                field_id="f1",
+                type="MATRIX",
+                eligible=True,
+                coverage=1.0,
+                family="f1",
+                representative=True,
+            )
+        )
+        cell = s.get(CellORM, "USA|1|TOP3000|ds")
+        cell.plan = {
+            "groups": [{"name": "existing", "fields": ["f1"]}],
+            "next_group": 1,
+            "refills": 0,
+        }
+    import json
+
+    llm = FactoryLLM(
+        cfg,
+        ledger,
+        complete=lambda *_: (
+            json.dumps({"groups": [{"name": "existing", "fields": ["f1"]}]}),
+            10,
+            10,
+        ),
+    )
+    engine = Engine(FakeBrainAPI(metrics), ledger, cfg, Metadata(), llm)
+    engine._groups("USA|1|TOP3000|ds", refill=True)
+    with ledger.session() as s:
+        assert s.get(CellORM, "USA|1|TOP3000|ds").plan["refills"] == GROUP_REFILLS
+
+
+def test_ready_queue_runs_before_any_new_llm_work(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from alpha_orchestrator.factory import engine
+    from alpha_orchestrator.factory.llm import FactoryLLM
+    from alpha_orchestrator.factory.research import Metadata
+
+    ledger = setup(3)
+    api = FakeBrainAPI(metrics)
+    cfg = FactoryConfig()
+    cfg.budget.v1_daily_cap = 3
+    cfg.budget.min_batch_interval_s = 0
+
+    def forbidden(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        pytest.fail("proposal generation delayed already queued work")
+
+    monkeypatch.setattr(engine.Engine, "advance", forbidden)
+    monkeypatch.setattr("alpha_orchestrator.factory.daily.catalog_is_stale", lambda _: False)
+    monkeypatch.setattr(engine, "store_passing", lambda *_: [])
+    engine.run_day(cfg, api, ledger, FactoryLLM(cfg, ledger), meta=Metadata(), sleep=lambda _: None)
+    assert api.started == 3

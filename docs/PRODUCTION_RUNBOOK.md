@@ -44,6 +44,8 @@ consume the remainder. Research thresholds are preserved. Production clears the 
 whitelist and uses the existing scanner eligibility/ranking, with one active dataset.
 The 100-child pilot dataset allowance is raised to 1,000. Explicitly selected budget-stopped
 cells with unfinished work can resume; prior candidates and failure evidence are retained.
+Ready simulation work is drained before new LLM planning. A refill that supplies no new
+field groups stops further refills for that dataset.
 
 Only one worker can own a ledger. Its OS lock releases after a crash. Existing in-flight
 URLs are polled before new LLM proposals. The deadline stops further work between HTTP
