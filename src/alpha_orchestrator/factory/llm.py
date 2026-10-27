@@ -539,16 +539,26 @@ class FactoryLLM:
         problems: Sequence[str],
         n: int,
         rejected: str = "",
+        *,
+        requirements: dict[str, float] | None = None,
     ) -> dict[str, Any]:
         """第 5+6 步: diagnose the best formula from the WHOLE history of this idea, then
         give up or propose n one-change variants of the best one."""
         prompt = {
             "task": "Diagnose why the best formula of this idea does not pass the "
-            "submission line (Sharpe >= 1.58, Fitness >= 1, turnover 1%-70%), using the "
+            "configured acceptance requirements, using the "
             f"whole history below. Then either give up, or write {n} new formulas, each "
             "changing exactly ONE thing in the best formula to fix the diagnosed problem.",
             "idea": idea,
             "best": best,
+            "acceptance_requirements": requirements
+            if requirements is not None
+            else {
+                "sharpe_min": 1.58,
+                "fitness_min": 1.0,
+                "turnover_min": 0.01,
+                "turnover_max": 0.70,
+            },
             "history_all_tries": list(history),
             "fields": list(fields),
             "operators": list(operators),

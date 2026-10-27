@@ -636,6 +636,13 @@ class Engine:
             best["neutralization"] = (parent.settings or {}).get("neutralization")
             best["neutralization_options"] = self.meta.neutralizations(cell.region)
             alpha_id = parent.alpha_id
+            requirements = {
+                "sharpe_min": self.config.sharpe_floor(cell.region),
+                "fitness_min": self.config.thresholds.submit_fitness,
+                "turnover_min": self.config.thresholds.turnover_min,
+                "turnover_max": self.config.thresholds.turnover_max,
+                "margin_min": self.config.margin_floor(cell.region) / 10_000,
+            }
             usable = {f.field_id: f for f in study.usable_fields(s, idea.cell_id)}
             group = idea.extra.get("group") or {}
             info = [
@@ -669,6 +676,7 @@ class Engine:
                     PROBLEMS,
                     VARIANTS,
                     rejected,
+                    requirements=requirements,
                 )
             except LLMUnavailable:
                 raise
@@ -1269,6 +1277,7 @@ def _row(c: CandidateORM) -> dict[str, Any]:
         "sharpe": c.sharpe,
         "fitness": c.fitness,
         "turnover": c.turnover,
+        "margin": c.margin,
         "returns": c.returns,
         "drawdown": c.drawdown,
         "long_count": c.long_count,

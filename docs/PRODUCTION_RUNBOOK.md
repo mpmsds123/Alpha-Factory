@@ -86,6 +86,12 @@ and evidence are unavailable output, never research conclusions. Failed output r
 provider's reported token usage when available. An exhausted output budget must not close
 an idea or count as a successful diagnosis.
 
+Diagnosis receives the actual configured market thresholds, including margin in raw
+return-per-traded-value units, and the margin observed for each historical candidate.
+This aligns the information given to the LLM with the existing deterministic gates;
+it does not alter acceptance thresholds, parent selection or stopping rules, and does
+not by itself establish improved research yield.
+
 ## Promotion and acceptance
 
 Empty, warning, pending, erroneous or missing required platform checks cannot promote a
