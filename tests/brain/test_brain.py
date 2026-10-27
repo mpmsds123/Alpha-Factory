@@ -201,3 +201,65 @@ def test_yearly_stats_and_pnl_tables(tmp_path: Path) -> None:
     }
     _, client = make(lambda r: httpx.Response(200, json=table), tmp_path)
     assert BrainAPI(client).daily_pnl("A") == {"2020-01-02": 10.0, "2020-01-03": -2.5}
+
+
+@pytest.mark.parametrize("operation", ["ensure", "login"])
+def test_pending_face_check_blocks_unattended_requests_across_restarts(
+    tmp_path: Path, operation: str
+) -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        return httpx.Response(
+            401,
+            headers={
+                "WWW-Authenticate": "persona",
+                "Location": "/authentication/persona?inquiry=pending",
+            },
+        )
+
+    session, _ = make(handler, tmp_path)
+    with pytest.raises(NeedBiometric):
+        session.login()
+    session.close()
+    for _ in range(3):
+        restarted, _ = make(handler, tmp_path, clock=lambda: 100_000.0)
+        with pytest.raises(NeedBiometric, match="pending"):
+            getattr(restarted, operation)()
+        restarted.close()
+    assert calls == ["POST"]  # Neither a status probe nor a new password login repeats.
+
+
+def test_explicit_persona_completion_releases_the_authentication_pause(tmp_path: Path) -> None:
+    url = "https://api.worldquantbrain.com/authentication/persona?inquiry=pending"
+    session, _ = make(
+        lambda request: (
+            httpx.Response(201)
+            if request.method == "POST"
+            else httpx.Response(200, json={"token": {"expiry": 14400}})
+        ),
+        tmp_path,
+    )
+    session.store.update_meta(pending_biometric=url)
+    assert session.complete_biometric(url)
+    assert session.ensure() == 14400
+    assert session.store.meta()["pending_biometric"] is None
+
+
+def test_pending_persona_prevents_relogin_after_an_authenticated_request_expires(
+    tmp_path: Path,
+) -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        return httpx.Response(401)
+
+    session, client = make(handler, tmp_path, clock=lambda: 100_000.0)
+    session.store.update_meta(
+        pending_biometric="https://api.worldquantbrain.com/authentication/persona?inquiry=pending"
+    )
+    with pytest.raises(NeedBiometric):
+        client.request("GET", "/simulations/existing")
+    assert calls == ["GET"]
