@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "research_snapshot_at_utc": "2026-10-27T04:16:05.640463+00:00",
+  "scope": "Private working system; separate from the README research cohort",
+  "research": {
+    "candidate_rows": 180,
+    "completed": 179,
+    "inflight": 1,
+    "failed": 0,
+    "locally_marked_ready": 0,
+    "locally_marked_robust_pass": 0,
+    "shortfalls": {
+      "fitness_below_floor": 177,
+      "sharpe_below_floor": 173,
+      "margin_below_floor": 138,
+      "turnover_outside_range": 47
+    }
+  },
+  "engineering": {
+    "hundred_case_stage_passed": true,
+    "regular_scheduled_start_verified": true,
+    "local_rollover_with_real_requests_verified": true,
+    "private_working_tree_checks": {
+      "passed": 296,
+      "skipped": 5,
+      "coverage_percent": 86.02
+    }
+  },
+  "limits": [
+    "Private runtime changes are not all in the public source snapshot.",
+    "Private working-tree checks are not the public repository CI results.",
+    "The 100-case stage is a subset of the campaign, not an additional 100 results.",
+    "Candidates include related variants, not independent discoveries.",
+    "Failure categories overlap; their counts must not be summed.",
+    "Local rollover does not verify the platform global quota counter.",
+    "A controlled yield improvement and out-of-sample value remain unproven."
+  ]
+}
