@@ -454,3 +454,28 @@ def test_ready_queue_runs_before_any_new_llm_work(monkeypatch) -> None:  # type:
     monkeypatch.setattr(engine, "store_passing", lambda *_: [])
     engine.run_day(cfg, api, ledger, FactoryLLM(cfg, ledger), meta=Metadata(), sleep=lambda _: None)
     assert api.started == 3
+
+
+@pytest.mark.parametrize("kind", ["throttled", "expired", "biometric"])
+def test_explicit_refusal_does_not_create_a_phantom_unknown_batch(kind: str) -> None:
+    from alpha_orchestrator.brain.client import RateLimited, SessionExpired
+    from alpha_orchestrator.brain.session import NeedBiometric
+
+    ledger = setup(2)
+    api = FakeBrainAPI(metrics)
+    errors = {
+        "throttled": RateLimited("429"),
+        "expired": SessionExpired("401"),
+        "biometric": NeedBiometric("https://example.invalid/verify"),
+    }
+
+    def refused(*_args):  # type: ignore[no-untyped-def]
+        raise errors[kind]
+
+    api.start_multi_simulation = refused  # type: ignore[method-assign]
+    with pytest.raises(type(errors[kind])):
+        sim(ledger, api).run(2)
+    with ledger.session() as s:
+        assert ledger.sims_reserved_today(s) == 0
+        assert s.scalar(select(BatchORM.status)) == "REFUSED"
+        assert {c.status for c in s.scalars(select(CandidateORM))} == {"QUEUED"}

@@ -16,7 +16,8 @@ from typing import Any
 from sqlalchemy import select
 
 from alpha_orchestrator.brain.api import BrainAPI, simulation_payload
-from alpha_orchestrator.brain.client import AmbiguousRequest
+from alpha_orchestrator.brain.client import AmbiguousRequest, RateLimited, SessionExpired
+from alpha_orchestrator.brain.session import AuthenticationFailed, NeedBiometric
 from alpha_orchestrator.domain.models import utc_now
 from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ledger import Ledger, fingerprint
@@ -245,6 +246,11 @@ class Simulator:
             self._release(batch_id, str(exc))
             self.sleep(60)
             return REFUSED
+        except (RateLimited, SessionExpired, AuthenticationFailed, NeedBiometric) as exc:
+            # These arise after explicit HTTP refusals, not a lost create response.
+            # Preserve the queued candidates for a normal auth/throttle retry.
+            self._release(batch_id, type(exc).__name__)
+            raise
         except Exception:
             with self.ledger.session() as s:
                 unknown = s.get(BatchORM, batch_id)
