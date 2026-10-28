@@ -1,30 +1,42 @@
 {
-  "schema_version": 1,
-  "research_snapshot_at_utc": "2026-10-27T04:16:05.640463+00:00",
+  "schema_version": 2,
+  "research_snapshot_at_utc": "2026-10-28T03:15:11.004085+00:00",
   "scope": "Private working system; separate from the README research cohort",
   "research": {
-    "candidate_rows": 180,
-    "completed": 179,
-    "inflight": 1,
+    "candidate_rows": 344,
+    "completed": 338,
+    "inflight": 0,
     "failed": 0,
     "locally_marked_ready": 0,
     "locally_marked_robust_pass": 0,
     "shortfalls": {
-      "fitness_below_floor": 177,
-      "sharpe_below_floor": 173,
-      "margin_below_floor": 138,
-      "turnover_outside_range": 47
-    }
+      "fitness_below_floor": 331,
+      "sharpe_below_floor": 332,
+      "margin_below_floor": 271,
+      "turnover_outside_range": 51
+    },
+    "unknown": 6,
+    "quarantined_batches": 1,
+    "new_simulation_tasks_on_journal_date_as_of_snapshot": 0,
+    "shortlisted_for_human_review": 0,
+    "submitted": 0
   },
   "engineering": {
     "hundred_case_stage_passed": true,
-    "regular_scheduled_start_verified": true,
+    "regular_scheduled_start_verified": false,
     "local_rollover_with_real_requests_verified": true,
     "private_working_tree_checks": {
-      "passed": 296,
+      "passed": 305,
       "skipped": 5,
-      "coverage_percent": 86.02
-    }
+      "coverage_percent": 86.22
+    },
+    "runtime_status": "paused_for_result_reconciliation",
+    "historical_scheduled_start_verified": true,
+    "daytime_schedule_guard_observed": true,
+    "daytime_research_execution_verified": false,
+    "human_verification_handoff_observed": true,
+    "latest_startup_and_auth_persistence_live_acceptance_complete": false,
+    "production_acceptance_complete": false
   },
   "limits": [
     "Private runtime changes are not all in the public source snapshot.",
@@ -33,6 +45,13 @@
     "Candidates include related variants, not independent discoveries.",
     "Failure categories overlap; their counts must not be summed.",
     "Local rollover does not verify the platform global quota counter.",
-    "A controlled yield improvement and out-of-sample value remain unproven."
-  ]
+    "A controlled yield improvement and out-of-sample value remain unproven.",
+    "UNKNOWN overrides raw candidate RUNNING labels: six tasks remain quarantined, not actively running.",
+    "Four matching records do not reconcile the entire six-task batch; all six reservations remain.",
+    "The previous schedule has live evidence; the new daytime schedule has only a real guarded invocation, not successful research execution.",
+    "This report uses the last saved evidence snapshot; no platform login, simulation or new research LLM call was made to publish it.",
+    "Factory allocation is 1000 simulation tasks per allocation day; the independent scanner allocation is 4000 and its results are excluded."
+  ],
+  "publication_prepared_at_utc": "2026-10-28T09:13:35.047483+00:00",
+  "journal_date_pacific": "2026-10-27"
 }
