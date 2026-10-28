@@ -10,6 +10,7 @@ Repeated forced logins have locked this account before.
 
 import json
 import os
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,6 +61,25 @@ def _current(cookies: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [c for c in cookies if c.get("domain") or c["name"] not in with_domain]
 
 
+def _write_private_json(path: Path, payload: Any) -> None:
+    """Sync staged private JSON before atomically replacing the destination."""
+    encoded = json.dumps(payload).encode("utf-8")
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
 class SessionStore:
     """Cookies and login bookkeeping kept outside the repository, readable only by you."""
 
@@ -98,8 +118,7 @@ class SessionStore:
                 for c in cookies.jar
             ]
         )
-        self.cookies_path.write_text(json.dumps(payload))
-        self.cookies_path.chmod(0o600)
+        _write_private_json(self.cookies_path, payload)
 
     def meta(self) -> dict[str, Any]:
         if not self.meta_path.exists():
@@ -109,7 +128,7 @@ class SessionStore:
     def update_meta(self, **values: Any) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
         merged = {**self.meta(), **values}
-        self.meta_path.write_text(json.dumps(merged))
+        _write_private_json(self.meta_path, merged)
 
 
 class BrainSession:
