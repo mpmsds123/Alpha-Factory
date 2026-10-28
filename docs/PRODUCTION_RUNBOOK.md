@@ -36,6 +36,12 @@ clears the stop; an interactive login can replace an expired challenge. The acce
 heartbeat pauses itself after notifying the owner, and resumes only after confirmation.
 A 30-minute follow-up interval does not extend the platform's session lifetime.
 
+Session cookies and metadata are staged in private same-directory temporary files,
+flushed and synced, then atomically replaced. A failure before replacement leaves the
+previous complete state available. Both destination files have mode 0600; cookie-domain
+handling, the login cooldown and the explicit biometric-completion requirement remain
+unchanged. Offline interruption tests do not establish live authentication availability.
+
 ## Budget and recovery
 
 Both `v1_daily_cap` and `daily_sim_cap` are 1,000 in the release configuration. The lower
@@ -58,6 +64,9 @@ field groups stops further refills for that dataset.
 Only one worker can own a ledger. Its OS lock releases after a crash. Existing in-flight
 URLs are polled before new LLM proposals. The deadline stops further work between HTTP
 operations; an individual network request/backoff may still take its configured timeout.
+The factory CLI also holds ownership before the authentication check, so a competing
+startup cannot issue an extra authentication request before being rejected. Lock contention
+at ledger initialization or startup produces the explicit safe-pause exit code 4.
 
 An ambiguous creation response or a crash before its URL commits leaves an `UNKNOWN`
 batch. The allocation remains reserved and further runs block. Inspect the request on the

@@ -169,7 +169,11 @@ def run(
     from alpha_orchestrator.factory.engine import run_day, run_llm_only
     from alpha_orchestrator.factory.record import render_record
 
-    cfg, ledger = _ctx(config)
+    try:
+        cfg, ledger = _ctx(config)
+    except WorkerAlreadyRunning as exc:
+        typer.echo(f"安全暂停：{exc}")
+        raise typer.Exit(4) from None
     llm = _llm(cfg, ledger)
     if llm is None:
         typer.echo("设计文档 v1 需要 DeepSeek 想点子、挑字段；找不到密钥就不跑。")
@@ -181,26 +185,27 @@ def run(
 
     api = _api()
     try:
-        api.client.session.ensure()
-        if llm_only:
-            preview = run_llm_only(cfg, api, ledger, llm)
-            if preview is None:
-                typer.echo("没有可生成点子的数据集；回测次数 = 0")
+        with ledger.writer_lock():
+            api.client.session.ensure()
+            if llm_only:
+                preview = run_llm_only(cfg, api, ledger, llm)
+                if preview is None:
+                    typer.echo("没有可生成点子的数据集；回测次数 = 0")
+                    return
+                typer.echo(f"点子：{preview.title}")
+                typer.echo(f"机制：{preview.mechanism}")
+                for index, formula in enumerate(preview.formulas, 1):
+                    typer.echo(f"公式 {index}：{formula}")
+                typer.echo("回测次数 = 0")
                 return
-            typer.echo(f"点子：{preview.title}")
-            typer.echo(f"机制：{preview.mechanism}")
-            for index, formula in enumerate(preview.formulas, 1):
-                typer.echo(f"公式 {index}：{formula}")
-            typer.echo("回测次数 = 0")
-            return
-        report = run_day(
-            cfg,
-            api,
-            ledger,
-            llm,
-            minutes=minutes,
-            on_progress=refresh_record,
-        )
+            report = run_day(
+                cfg,
+                api,
+                ledger,
+                llm,
+                minutes=minutes,
+                on_progress=refresh_record,
+            )
     except (AmbiguousRequest, WorkerAlreadyRunning) as exc:
         typer.echo(f"安全暂停：{exc}")
         raise typer.Exit(4) from None
