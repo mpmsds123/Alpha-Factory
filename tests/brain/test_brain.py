@@ -44,6 +44,82 @@ def test_login_saves_cookies_privately(tmp_path: Path) -> None:
     assert oct(session.store.cookies_path.stat().st_mode)[-3:] == "600"
 
 
+def test_failed_meta_replace_retains_pending_stop_across_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from alpha_orchestrator.brain import session as module
+
+    store = SessionStore(tmp_path)
+    url = "https://api.worldquantbrain.com/authentication/persona?inquiry=retained"
+    store.update_meta(pending_biometric=url, last_password_login=123)
+    before = store.meta_path.read_bytes()
+
+    def interrupted(*_args):  # type: ignore[no-untyped-def]
+        raise OSError("replace interrupted")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module.os, "replace", interrupted)
+        with pytest.raises(OSError, match="interrupted"):
+            store.update_meta(pending_biometric=None)
+    assert store.meta_path.read_bytes() == before
+    assert not list(tmp_path.glob("*.tmp"))
+    calls = []
+
+    def network(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200)
+
+    restarted = BrainSession(CREDS, SessionStore(tmp_path), transport=httpx.MockTransport(network))
+    try:
+        with pytest.raises(NeedBiometric, match="retained"):
+            restarted.ensure()
+        assert calls == []
+    finally:
+        restarted.close()
+
+
+def test_failed_cookie_sync_preserves_previous_domain_aware_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from alpha_orchestrator.brain import session as module
+
+    store = SessionStore(tmp_path)
+    previous = httpx.Cookies()
+    previous.set("t", "old-api", domain="api.worldquantbrain.com")
+    previous.set("t", "old-web", domain=".worldquantbrain.com")
+    store.save_cookies(previous)
+    before = store.cookies_path.read_bytes()
+
+    def interrupted(_fd: int) -> None:
+        raise OSError("sync interrupted")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module.os, "fsync", interrupted)
+        with pytest.raises(OSError, match="interrupted"):
+            store.save_cookies(httpx.Cookies({"t": "new"}))
+    assert store.cookies_path.read_bytes() == before
+    assert sorted(c.value for c in SessionStore(tmp_path).load_cookies().jar) == [
+        "old-api",
+        "old-web",
+    ]
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_state_replacement_is_private_and_preserves_other_metadata(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    store.update_meta(last_password_login=123)
+    store.meta_path.chmod(0o644)
+    store.update_meta(pending_biometric="inquiry-test")
+    assert SessionStore(tmp_path).meta() == {
+        "last_password_login": 123,
+        "pending_biometric": "inquiry-test",
+    }
+    assert store.meta_path.stat().st_mode & 0o777 == 0o600
+    store.save_cookies(httpx.Cookies({"t": "private-test"}))
+    assert store.cookies_path.stat().st_mode & 0o777 == 0o600
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 def test_same_cookie_name_on_two_domains_round_trips(tmp_path: Path) -> None:
     """The platform sets `t` for more than one domain; saving must not crash."""
     from alpha_orchestrator.brain.session import SessionStore
