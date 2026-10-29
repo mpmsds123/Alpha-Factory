@@ -1,6 +1,8 @@
 # Development progress
 
-Research snapshot: **2026-10-28T03:15:11.004085+00:00**.
+Campaign accounting checked locally: **2026-10-29T04:58:50.883906+00:00**.
+Research-metric audit retained from **2026-10-28T03:15:11.004085+00:00**; private software
+checks were recorded on **Oct 27**. No new platform observation is implied.
 This is a reviewed snapshot, not a continuously streaming dashboard.
 
 [Development journal](progress/README.md) · [Machine-readable snapshot](progress/latest.json)
@@ -25,7 +27,9 @@ cohort is separate: do not add its figures to this campaign or compare them as a
 | Actively in flight | 0 |
 | Quarantined simulation tasks (UNKNOWN) | 6 |
 | Quarantined batches containing those tasks | 1 |
-| New factory simulation tasks on Oct 27, as of snapshot | 0 |
+| New factory simulation tasks on Oct 28, as of ledger check | 0 |
+| New batch submissions on Oct 28, as of ledger check | 0 |
+| New research LLM calls on Oct 28, as of ledger check | 0 |
 | Submitted alphas | 0 |
 | Execution failures | 0 |
 | Locally marked ready for further checks | 0 |
@@ -60,6 +64,14 @@ Private working-tree verification: **305 passed, 5 skipped;
 For the public source's recorded checks, see [test evidence](TEST_EVIDENCE.md) and its CI runs.
 The platform's global remaining-quota counter was not exposed by the read-only probes.
 
+## Today: no new research or program changes
+
+The three reserved daytime authentication checks inspected local state only. No verification
+request was needed while operator review remained the blocking condition. The scheduled
+worker remains disabled and unloaded; zero factory workers were present at the local check.
+These checks are neither simulations nor new research results. No additional private-source
+fix or prompt experiment was performed today. See the [Oct 28 journal](progress/2026-10-28.md).
+
 ## Current blocker and next evidence
 
 A returned result failed the submitted-identity check. The factory retained the original
@@ -87,8 +99,9 @@ executed experiment. No controlled yield improvement or out-of-sample value is e
 
 Updates record meaningful changes: **observation → change or hypothesis → evidence → next step**.
 Routine polling is not a new milestone. Dated entries retain the earlier interpretation and
-its limits; corrections should be explicit. Daily publication is scheduled for 22:00 Pacific. This Oct 27 entry was prepared after that
-scheduled time, using the explicitly dated saved snapshot; publication does not refresh BRAIN.
+its limits; corrections should be explicit. Daily publication is scheduled for 22:00 Pacific.
+This Oct 28 update combines a dated local ledger check with earlier research and engineering
+evidence. Publishing the journal does not refresh platform results or authentication.
 
 Readers can [open an issue](https://github.com/mpmsds123/Alpha-Factory/issues/new) with a
 reproducible failure, a competing explanation, or a proposed test, and can reproduce the
