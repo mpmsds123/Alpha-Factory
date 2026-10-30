@@ -54,16 +54,24 @@
     "Campaign accounting was rechecked from the local ledger; research metrics and engineering checks retain their earlier evidence dates. No platform request was made for publication.",
     "Factory allocation is 1000 simulation tasks per allocation day; the independent scanner allocation is 4000 and its results are excluded."
   ],
-  "journal_date_pacific": "2026-10-28",
-  "publication_prepared_at_utc": "2026-10-29T05:00:00.030184+00:00",
-  "ledger_snapshot_at_utc": "2026-10-29T04:58:50.883906+00:00",
+  "journal_date_pacific": "2026-10-29",
+  "publication_prepared_at_utc": "2026-10-30T05:03:47.659539+00:00",
+  "ledger_snapshot_at_utc": "2026-10-30T05:01:55.331650+00:00",
   "operations": {
-    "local_authentication_slot_checks_on_journal_date": 3,
+    "local_authentication_slot_checks_on_journal_date": 2,
     "verification_notifications_sent_on_journal_date": 0,
     "current_factory_worker_count": 0,
     "launchd_disabled": true,
     "launchd_unloaded": true,
     "research_followup_paused": true,
     "platform_requests_for_publication": 0
+  },
+  "literature_review": {
+    "full_text_papers_reviewed": 10,
+    "repositories_inspected": 5,
+    "proposed_improvement_directions": 30,
+    "factory_changes_implemented_from_review": 0,
+    "simulation_tasks_used_for_review": 0,
+    "controlled_research_experiments_executed_from_review": 0
   }
 }
