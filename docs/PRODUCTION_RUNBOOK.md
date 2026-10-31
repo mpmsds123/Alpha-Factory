@@ -155,3 +155,14 @@ Any new UNKNOWN, changed frozen identity or expired authorization blocks executi
 Default configurations still block on every UNKNOWN; the daytime schedule stays disabled.
 The 1,000-task allocation ceiling, research thresholds and manual submission remain.
 317 offline tests passed, 5 skipped, coverage 86.38%; live acceptance remains incomplete.
+
+## Owner-authorized continuation supersedes the October 30 23:00 stop
+
+After confirming the actual stop, the owner explicitly requested continued execution.
+The new private continuation config expires at the current allocation boundary, not 23:00.
+The factory counts the six newly accepted tasks against the same 1,000-task allocation;
+it resumes their durable URLs before creating anything else. The older six-task UNKNOWN
+batch, its reservations and dataset isolation remain unchanged. A new ambiguity, auth
+requirement, exhausted research, or the allocation ceiling still stops execution.
+The default daytime schedule remains disabled; this does not authorize future allocations.
+The immutable-quarantine authorization duration is bounded to at most 24 hours.
