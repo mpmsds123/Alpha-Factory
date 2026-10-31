@@ -174,3 +174,15 @@ def test_absolute_cutoff_cannot_be_extended_by_delayed_start(monkeypatch, minute
 
     monkeypatch.setattr(eng, "Simulator", StopBeforeResearch)
     assert eng.run_day(cfg, None, ledger, None, minutes=minutes).stopped_because == "deadline"
+
+
+@pytest.mark.parametrize("hours", [3, 22])
+def test_explicit_continuation_within_one_day_keeps_quarantine(hours):
+    ledger, cfg, old_id = fixture()
+    cfg.quarantine_exception["expires_at"] = (
+        datetime.now(UTC) + timedelta(hours=hours)
+    ).isoformat()
+    Simulator(FakeBrainAPI(metrics), ledger, cfg).assert_recoverable()
+    with ledger.session() as s:
+        assert s.get(BatchORM, old_id).status == "UNKNOWN"
+        assert ledger.sims_reserved_today(s) == 6

@@ -44,7 +44,7 @@ def exception_scope(
         instant = now or datetime.now(UTC)
         if start.tzinfo is None or end.tzinfo is None or instant.tzinfo is None:
             return set(), set()
-        if not 0 < (end - start).total_seconds() <= 7200 or not start <= instant < end:
+        if not 0 < (end - start).total_seconds() <= 86400 or not start <= instant < end:
             return set(), set()
         batch = s.get(BatchORM, spec["batch_id"])
         if batch is None or batch.status != "UNKNOWN" or not batch.location:
