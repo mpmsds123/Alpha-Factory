@@ -128,6 +128,7 @@ class FactoryConfig:
     scanner_runs: str = ""
     # 现行设计 第 1 步: the pilot digs only these cells ("USA|1|TOP3000|analyst_consensus")
     only_datasets: list[str] = field(default_factory=list)
+    quarantine_exception: dict[str, str] = field(default_factory=dict)
     budget: Budget = field(default_factory=Budget)
     thresholds: Thresholds = field(default_factory=Thresholds)
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -146,6 +147,7 @@ class FactoryConfig:
             scanner_progress=raw.get("scanner_progress", cls.scanner_progress),
             scanner_runs=raw.get("scanner_runs", cls.scanner_runs),
             only_datasets=list(raw.get("only_datasets") or []),
+            quarantine_exception=dict(raw.get("quarantine_exception") or {}),
             budget=Budget(**raw.get("budget", {})),
             thresholds=Thresholds(**raw.get("thresholds", {})),
             llm=LLMConfig(**raw.get("llm", {})),

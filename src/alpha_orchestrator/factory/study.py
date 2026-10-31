@@ -17,6 +17,7 @@ from alpha_orchestrator.factory import datasets
 from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ledger import Ledger
 from alpha_orchestrator.factory.models import CellORM, CellState, FieldORM
+from alpha_orchestrator.factory.quarantine import exception_scope
 
 DESIGN = "v5"  # 10/15 晚: 侦察+有信号才加码; earlier verdicts do not count (reset_old_verdicts)
 FILL_DAYS = 63  # 第 2 步: quarterly data carried one quarter (官方小贴士 10)
@@ -58,10 +59,11 @@ def choose_dataset(s: Session, config: FactoryConfig) -> str | None:
     """第 3 问: only datasets the template scanner found worth digging (first-pass hit rate
     >= 2%), highest hit rate first, each once under this design. Without the scanner's
     folder, the old ranking (best score, coverage known and >= min_coverage)."""
+    _, excluded = exception_scope(s, config)
     if config.only_datasets:
         for cell_id in config.only_datasets:
             cell = s.get(CellORM, cell_id)
-            if cell is None:
+            if cell is None or cell.cell_id in excluded:
                 continue
             if cell.state != CellState.NEW and (cell.plan or {}).get("design") == DESIGN:
                 continue
@@ -70,7 +72,7 @@ def choose_dataset(s: Session, config: FactoryConfig) -> str | None:
     if config.scanner_runs:
         for w in scanner_worth(config.scanner_runs):
             cell = s.get(CellORM, f"{w['region']}|1|{w['universe']}|{w['dataset']}")
-            if cell is None:
+            if cell is None or cell.cell_id in excluded:
                 continue
             if cell.state != CellState.NEW and (cell.plan or {}).get("design") == DESIGN:
                 continue  # already dug under this design
@@ -83,7 +85,7 @@ def choose_dataset(s: Session, config: FactoryConfig) -> str | None:
     best_judged: tuple[float, str] | None = None
     for r in datasets.rank(s, config):
         cell = s.get(CellORM, r.cell_id)
-        if cell is None or cell.coverage < floor:
+        if cell is None or cell.cell_id in excluded or cell.coverage < floor:
             continue
         score = r.score * evidence.get(cell.region, 1.0)
         if best is None or score > best[0]:
