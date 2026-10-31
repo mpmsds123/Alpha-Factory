@@ -1,6 +1,6 @@
 # Development progress
 
-Campaign accounting checked locally: **2026-10-30T05:01:55.331650+00:00**.
+Campaign accounting checked locally: **2026-10-31T05:02:59.565084+00:00**.
 Research-metric audit retained from **2026-10-28T03:15:11.004085+00:00**; private software
 checks were recorded on **Oct 27**. No new platform observation is implied.
 This is a reviewed snapshot, not a continuously streaming dashboard.
@@ -27,9 +27,9 @@ cohort is separate: do not add its figures to this campaign or compare them as a
 | Actively in flight | 0 |
 | Quarantined simulation tasks (UNKNOWN) | 6 |
 | Quarantined batches containing those tasks | 1 |
-| New factory simulation tasks on Oct 29, as of ledger check | 0 |
-| New batch submissions on Oct 29, as of ledger check | 0 |
-| New research LLM calls on Oct 29, as of ledger check | 0 |
+| New factory simulation tasks on Oct 30, as of ledger check | 0 |
+| New batch submissions on Oct 30, as of ledger check | 0 |
+| New research LLM calls on Oct 30, as of ledger check | 0 |
 | Submitted alphas | 0 |
 | Execution failures | 0 |
 | Locally marked ready for further checks | 0 |
@@ -64,29 +64,31 @@ Private working-tree verification: **305 passed, 5 skipped;
 For the public source's recorded checks, see [test evidence](TEST_EVIDENCE.md) and its CI runs.
 The platform's global remaining-quota counter was not exposed by the read-only probes.
 
-## Today: research review, execution remains paused
+## Today: a tested exception proposal, not a running factory
 
-A read-only literature and code comparison covered **10 full-text papers and five
-repositories**, producing **30 proposed improvement directions**. It compared the private
-working implementation with the reviewed methods. This was an analysis deliverable: no
-factory code or prompt was changed, no research LLM was called and no simulation was created
-for the review. The private report and source material are not part of this public update.
+At the owner's request, a candidate implementation was prepared for a short, bounded
+operational exception. It would keep the original uncertain batch immutable, isolate its
+dataset and permit unrelated new work only within an explicit expiry. Any new uncertainty
+would still stop execution. Default research gates and human submission control are preserved.
 
-The prioritized hypotheses concern task-level model evaluation, appropriately scoped reuse
-of earlier research experience, hypothesis-to-formula semantic checks, and duplicate/family
-diagnostics. These are proposals, not evidence of improved qualified-alpha yield. None was
-implemented or tested in a controlled platform experiment today.
+The candidate passed **317 local tests, with 5 skipped and 86.38% coverage**, plus lint,
+format and type checks. These checks concern a working copy: the candidate has **not been
+deployed or started**. The last deployed private-source checks remain 305 passed/5 skipped.
+Deployment is awaiting an additional explicit write approval; no code from this candidate
+was uploaded here. Offline checks do not prove live recovery or improved research yield.
 
-Two local authentication-slot checks are recorded for this date. They did not request
-verification while result reconciliation remained the blocking condition. The scheduled
-worker remains disabled and unloaded; zero factory workers were present at the ledger check.
-These checks are not simulations. See the [Oct 29 journal](progress/2026-10-29.md).
+The owner completed a new human-verification handoff, and the platform confirmed it. A bounded
+read of the original progress reference returned not-found; this does not establish either
+missing task's final outcome. The existing quarantine and all six reservations remain.
+Three reserved authentication-slot checks are recorded for today. No new factory simulation
+or research LLM call is recorded. See the [Oct 30 journal](progress/2026-10-30.md).
 
 ## Current blocker and next evidence
 
 A returned result failed the submitted-identity check. The factory retained the original
 progress reference and stopped. That progress endpoint subsequently returned server errors.
-An exhaustive read-only search of the fixed account-history range did not locate the two
+Today a bounded recheck returned not-found. This is not a terminal outcome.
+An earlier exhaustive read-only search of the fixed account-history range did not locate the two
 missing factory identities. Account-history records are not additional factory simulations,
 and absence from that list is not proof of failure or non-acceptance.
 
@@ -110,8 +112,8 @@ executed experiment. No controlled yield improvement or out-of-sample value is e
 Updates record meaningful changes: **observation → change or hypothesis → evidence → next step**.
 Routine polling is not a new milestone. Dated entries retain the earlier interpretation and
 its limits; corrections should be explicit. Daily publication is scheduled for 22:00 Pacific.
-This Oct 29 update combines a dated local ledger check, a completed research review, and
-earlier research-metric and engineering evidence. Publishing the journal does not refresh platform results or authentication.
+This Oct 30 update combines a dated local ledger check, candidate-only engineering checks,
+and earlier research-metric and deployed-source evidence. Publishing the journal does not refresh platform results or authentication.
 
 Readers can [open an issue](https://github.com/mpmsds123/Alpha-Factory/issues/new) with a
 reproducible failure, a competing explanation, or a proposed test, and can reproduce the
