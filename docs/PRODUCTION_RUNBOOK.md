@@ -144,3 +144,14 @@ unknown-result quarantine, worker ownership, deadlines, result identity, incompl
 checks, LLM outage recovery, provenance migration and a synthetic 1,000-child day.
 These establish engineering controls; they do not demonstrate live Alpha quality,
 research independence, out-of-sample returns or the benefit of LLM proposals.
+
+## Explicit one-night exception: October 30, 2026
+
+The owner approved isolating the existing six-task UNKNOWN batch and its dataset
+while allowing unrelated research only until 23:00 America/Los_Angeles on this date.
+The private one-off configuration pins the immutable batch digest and absolute expiry.
+Original outcomes and all reservations remain unchanged; no child is recreated.
+Any new UNKNOWN, changed frozen identity or expired authorization blocks execution.
+Default configurations still block on every UNKNOWN; the daytime schedule stays disabled.
+The 1,000-task allocation ceiling, research thresholds and manual submission remain.
+317 offline tests passed, 5 skipped, coverage 86.38%; live acceptance remains incomplete.

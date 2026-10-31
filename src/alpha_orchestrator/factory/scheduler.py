@@ -22,6 +22,7 @@ from alpha_orchestrator.domain.models import utc_now
 from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ledger import Ledger, fingerprint
 from alpha_orchestrator.factory.models import BatchORM, CandidateORM, CandidateStatus
+from alpha_orchestrator.factory.quarantine import exception_scope
 
 QUOTA_RESERVE = 0  # Compatibility import; actual reserve is configured per factory.
 REFUSED = -1
@@ -129,7 +130,8 @@ class Simulator:
             )
             for batch in uncertain:
                 batch.status = "UNKNOWN"
-            ids = [b.id for b in uncertain]
+            permitted, _ = exception_scope(s, self.config)
+            ids = [b.id for b in uncertain if b.id not in permitted]
         if ids:
             raise AmbiguousRequest(
                 "Reconcile uncertain simulation batches before running: " + ", ".join(ids)
@@ -148,6 +150,7 @@ class Simulator:
         started = 0
         refusals = 0
         while True:
+            self.assert_recoverable()
             if deadline is not None and self.clock() >= deadline:
                 stats.stopped_because = "deadline"
                 return stats  # In-flight URLs remain durable for the next worker.
@@ -215,16 +218,18 @@ class Simulator:
             self.sleep(min(wait, max(0, deadline - self.clock())) if deadline else wait)
         if deadline is not None and self.clock() >= deadline:
             return 0
+        self.assert_recoverable()
         budget_left = min(budget_left, self._remaining_daily())
         if budget_left <= 0:
             return 0
         with self.ledger.session() as s:
-            groups = sorted(self.ledger.queue_groups(s), key=lambda g: -g[3])
+            _, excluded = exception_scope(s, self.config)
+            groups = sorted(self.ledger.queue_groups(s, excluded), key=lambda g: -g[3])
             if not groups:
                 return 0
             region, delay, _, _ = groups[0]
             size = min(self.config.budget.children_per_slot, budget_left)
-            batch = self.ledger.queued(s, region, delay, size)
+            batch = self.ledger.queued(s, region, delay, size, excluded)
             if not batch:
                 return 0
             payloads = [simulation_payload(c.expression, c.settings) for c in batch]

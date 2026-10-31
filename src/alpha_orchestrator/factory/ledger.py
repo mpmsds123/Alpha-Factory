@@ -161,7 +161,14 @@ class Ledger:
         s.flush()
         return candidate, True
 
-    def queued(self, s: Session, region: str, delay: int, limit: int) -> list[CandidateORM]:
+    def queued(
+        self,
+        s: Session,
+        region: str,
+        delay: int,
+        limit: int,
+        excluded_cells: set[str] | None = None,
+    ) -> list[CandidateORM]:
         from alpha_orchestrator.factory.models import CellORM
 
         stmt = (
@@ -169,6 +176,7 @@ class Ledger:
             .join(CellORM, CellORM.cell_id == CandidateORM.cell_id)
             .where(
                 CandidateORM.status == CandidateStatus.QUEUED,
+                CandidateORM.cell_id.not_in(excluded_cells or set()),
                 CellORM.region == region,
                 CellORM.delay == delay,
             )
@@ -177,14 +185,19 @@ class Ledger:
         )
         return list(s.scalars(stmt))
 
-    def queue_groups(self, s: Session) -> list[tuple[str, int, int, float]]:
+    def queue_groups(
+        self, s: Session, excluded_cells: set[str] | None = None
+    ) -> list[tuple[str, int, int, float]]:
         """(region, delay, queued count, best priority) for every non-empty queue."""
         from alpha_orchestrator.factory.models import CellORM
 
         stmt = (
             select(CellORM.region, CellORM.delay, func.count(), func.max(CandidateORM.priority))
             .join(CellORM, CellORM.cell_id == CandidateORM.cell_id)
-            .where(CandidateORM.status == CandidateStatus.QUEUED)
+            .where(
+                CandidateORM.status == CandidateStatus.QUEUED,
+                CandidateORM.cell_id.not_in(excluded_cells or set()),
+            )
             .group_by(CellORM.region, CellORM.delay)
         )
         return [(r, d, int(n), float(p or 0)) for r, d, n, p in s.execute(stmt)]

@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from statistics import NormalDist
 from typing import Any
 
@@ -36,6 +37,7 @@ from alpha_orchestrator.factory.models import (
     ReviewORM,
     Stage,
 )
+from alpha_orchestrator.factory.quarantine import exception_scope
 from alpha_orchestrator.factory.research import Metadata
 from alpha_orchestrator.factory.scheduler import Simulator
 from alpha_orchestrator.factory.select import store_passing
@@ -166,12 +168,17 @@ class Engine:
 
     def _current_dataset(self) -> str | None:
         with self.ledger.session() as s:
+            _, excluded = exception_scope(s, self.config)
             for c in s.scalars(select(CellORM).where(CellORM.state == CellState.RESEARCH)):
+                if c.cell_id in excluded:
+                    continue
                 if (c.plan or {}).get("design") == study.DESIGN:
                     return c.cell_id
             # A pilot cap is an operational stop, not a permanent research verdict.
             # Resume only explicitly selected cells and retain their prior evidence.
             for cell_id in self.config.only_datasets:
+                if cell_id in excluded:
+                    continue
                 cell = s.get(CellORM, cell_id)
                 if (
                     cell is None
@@ -1122,12 +1129,13 @@ class Engine:
 
     def _enhancing_ideas(self) -> list[str]:
         with self.ledger.session() as s:
+            _, excluded = exception_scope(s, self.config)
             return [
                 i.id
                 for i in s.scalars(
                     select(ResearchIdeaORM).where(ResearchIdeaORM.status == IdeaStatus.PROMISING)
                 )
-                if (i.extra or {}).get("phase") == "enhance"
+                if i.cell_id not in excluded and (i.extra or {}).get("phase") == "enhance"
             ]
 
     def revive_near_misses(self) -> int:
@@ -1135,7 +1143,10 @@ class Engine:
         (the datasets in only_datasets, current design)."""
         n = 0
         with self.ledger.session() as s:
+            _, excluded = exception_scope(s, self.config)
             for cell_id in self.config.only_datasets:
+                if cell_id in excluded:
+                    continue
                 cell = s.get(CellORM, cell_id)
                 if cell is None or (cell.plan or {}).get("design") != study.DESIGN:
                     continue
@@ -1433,6 +1444,11 @@ def run_day(
 
     report = DayReport()
     deadline = time.monotonic() + minutes * 60
+    if config.quarantine_exception:
+        cutoff = datetime.fromisoformat(config.quarantine_exception["expires_at"])
+        deadline = min(
+            deadline, time.monotonic() + max(0, (cutoff - datetime.now(UTC)).total_seconds())
+        )
     simulator = Simulator(api, ledger, config, sleep=sleep)
     simulator.assert_recoverable()
     # Drain durable requests before an unavailable LLM can prevent their recovery.
@@ -1462,7 +1478,8 @@ def run_day(
     while spent < budget and time.monotonic() < deadline:
         try:
             with ledger.session() as s:
-                queued = bool(ledger.queue_groups(s))
+                _, excluded = exception_scope(s, config)
+                queued = bool(ledger.queue_groups(s, excluded))
             moved = {"queued_work": 1} if queued else engine.advance()
         except LLMUnavailable as exc:
             report.stopped_because = f"LLM 调用失败（余额或网络）：{exc}"[:300]
