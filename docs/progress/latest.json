@@ -38,7 +38,14 @@
     "daytime_research_execution_verified": false,
     "human_verification_handoff_observed": true,
     "latest_startup_and_auth_persistence_live_acceptance_complete": false,
-    "production_acceptance_complete": false
+    "production_acceptance_complete": false,
+    "candidate_oneoff_exception_checks": {
+      "passed": 317,
+      "skipped": 5,
+      "coverage_percent": 86.38,
+      "deployed": false,
+      "live_acceptance_complete": false
+    }
   },
   "limits": [
     "Private runtime changes are not all in the public source snapshot.",
@@ -54,17 +61,18 @@
     "Campaign accounting was rechecked from the local ledger; research metrics and engineering checks retain their earlier evidence dates. No platform request was made for publication.",
     "Factory allocation is 1000 simulation tasks per allocation day; the independent scanner allocation is 4000 and its results are excluded."
   ],
-  "journal_date_pacific": "2026-10-29",
-  "publication_prepared_at_utc": "2026-10-30T05:03:47.659539+00:00",
-  "ledger_snapshot_at_utc": "2026-10-30T05:01:55.331650+00:00",
+  "journal_date_pacific": "2026-10-30",
+  "publication_prepared_at_utc": "2026-10-31T05:03:47.008635+00:00",
+  "ledger_snapshot_at_utc": "2026-10-31T05:02:59.565084+00:00",
   "operations": {
-    "local_authentication_slot_checks_on_journal_date": 2,
+    "local_authentication_slot_checks_on_journal_date": 3,
     "verification_notifications_sent_on_journal_date": 0,
     "current_factory_worker_count": 0,
     "launchd_disabled": true,
     "launchd_unloaded": true,
     "research_followup_paused": true,
-    "platform_requests_for_publication": 0
+    "platform_requests_for_publication": 0,
+    "manual_human_verification_confirmed_today": true
   },
   "literature_review": {
     "full_text_papers_reviewed": 10,
