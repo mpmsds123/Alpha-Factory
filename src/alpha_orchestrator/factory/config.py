@@ -129,6 +129,10 @@ class FactoryConfig:
     # 现行设计 第 1 步: the pilot digs only these cells ("USA|1|TOP3000|analyst_consensus")
     only_datasets: list[str] = field(default_factory=list)
     quarantine_exception: dict[str, str] = field(default_factory=dict)
+    # Item 7: DeepSeek reads the whole pool of a dataset's ideas and proposes which to stop or
+    # enhance; the program checks every proposal. Off = fixed thresholds only (current design).
+    pool_review: bool = False
+    pool_review_max_calls: int = 10  # per dataset; about one review per 5 ideas
     budget: Budget = field(default_factory=Budget)
     thresholds: Thresholds = field(default_factory=Thresholds)
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -148,6 +152,8 @@ class FactoryConfig:
             scanner_runs=raw.get("scanner_runs", cls.scanner_runs),
             only_datasets=list(raw.get("only_datasets") or []),
             quarantine_exception=dict(raw.get("quarantine_exception") or {}),
+            pool_review=bool(raw.get("pool_review", cls.pool_review)),
+            pool_review_max_calls=int(raw.get("pool_review_max_calls", cls.pool_review_max_calls)),
             budget=Budget(**raw.get("budget", {})),
             thresholds=Thresholds(**raw.get("thresholds", {})),
             llm=LLMConfig(**raw.get("llm", {})),

@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from alpha_orchestrator.brain.api import BrainAPI
 from alpha_orchestrator.factory import catalog, study
 from alpha_orchestrator.factory import generators as gen
+from alpha_orchestrator.factory import pool_review as pr
 from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.direction import direction_label, expected_sign
 from alpha_orchestrator.factory.ideas import tokens
@@ -157,6 +158,8 @@ class Engine:
         cell_id = self._current_dataset() or self._open_dataset()
         if cell_id is None:
             return moved
+        if self.config.pool_review:  # before stepping: ideas whose results just came back
+            moved["pool_decisions"] = self._pool_review(cell_id)
         for idea_id in self._active_ideas(cell_id):
             moved["ideas_moved"] += self._step_idea(idea_id)
         attempts = 0
@@ -242,6 +245,128 @@ class Engine:
                     self.ledger.log(s, "dataset_opened", cell_id)
                 return cell_id
         return None
+
+    def _band_sample(self, s: Session) -> list[tuple[float, bool]]:
+        """(best first-formula |Sharpe|, whether the idea later reached the Sharpe line) for
+        every finished idea of the current design, to read hit probabilities off."""
+        out: list[tuple[float, bool]] = []
+        for idea in s.scalars(
+            select(ResearchIdeaORM).where(
+                ResearchIdeaORM.status.in_([IdeaStatus.DEAD, IdeaStatus.DONE])
+            )
+        ):
+            cell = s.get(CellORM, idea.cell_id)
+            rows = [c for c in self._idea_rows(s, idea.id) if c.sharpe is not None]
+            first = [abs(c.sharpe or 0) for c in rows if c.stage == Stage.FIELD]
+            if cell is None or not first:
+                continue
+            line = self.config.sharpe_floor(cell.region)
+            out.append((max(first), any((c.sharpe or 0) >= line for c in rows)))
+        return out
+
+    def _pool_review(self, cell_id: str) -> int:
+        """Item 7. DeepSeek reads the dataset's whole pool of ideas next to numbers the program
+        computed, and proposes stop / enhance per active idea; only allowed proposals run."""
+        with self.ledger.session() as s:
+            cell = s.get(CellORM, cell_id)
+            assert cell is not None
+            state = dict((cell.plan or {}).get("pool_review") or {})
+            if int(state.get("calls", 0)) >= self.config.pool_review_max_calls:
+                return 0
+            rates = pr.band_rates(self._band_sample(s))
+            table: list[dict[str, Any]] = []
+            allowed: dict[str, list[str]] = {}
+            for idea in s.scalars(
+                select(ResearchIdeaORM)
+                .where(
+                    ResearchIdeaORM.cell_id == cell_id, ResearchIdeaORM.status != IdeaStatus.RETIRED
+                )
+                .order_by(ResearchIdeaORM.created_at)
+            ):
+                rows = [c for c in self._idea_rows(s, idea.id) if c.sharpe is not None]
+                first = [abs(c.sharpe or 0) for c in rows if c.stage == Stage.FIELD]
+                best = max(rows, key=lambda c: c.sharpe or 0, default=None)
+                parents = (idea.extra or {}).get("parents") or [{}]
+                is_active = (
+                    idea.status == IdeaStatus.PROMISING
+                    and (idea.extra or {}).get("phase") == "improve"
+                    and not self._pending(s, idea.id)
+                )
+                actions = ["continue", "stop"] if is_active else []
+                if is_active and idea.best_sharpe >= NEAR_MISS and "enhance" not in idea.extra:
+                    actions.append("enhance")
+                if actions:
+                    allowed[idea.id] = actions
+                b = pr.band(max(first, default=0.0))
+                table.append(
+                    {
+                        "id": idea.id[:8],
+                        "title": idea.title[:60],
+                        "status": idea.status,
+                        "first_formula_best": round(max(first, default=0.0), 2),
+                        "best_now": round(idea.best_sharpe, 2),
+                        "rounds_used": parents[0].get("rounds", 0),
+                        "rounds_without_gain": parents[0].get("dry", 0),
+                        "first_failed_check": ((best.fails or "").split(",")[0] if best else ""),
+                        "simulations": len(rows),
+                        "hit_probability": round(rates[b]["p"], 3),
+                        "allowed_actions": actions,
+                    }
+                )
+            if not allowed:
+                return 0
+            sig = repr(sorted((k, repr(v)) for k, v in allowed.items()))
+            sig += repr([(t["id"], t["status"], t["rounds_used"], t["best_now"]) for t in table])
+            if sig == state.get("sig"):
+                return 0
+            spent = cell.sims_used - int((cell.plan or {}).get("sims_at_open", 0))
+            left = self.config.budget.dataset_sim_cap - spent
+            brief = self._brief(cell)
+        self.llm.idea_id = None
+        try:
+            raw = self.llm.pool_review(brief, table[-40:], left)
+        except LLMUnavailable:
+            raise
+        except RuntimeError:
+            return 0
+        decisions, problems = pr.parse(raw, allowed)
+        done = 0
+        with self.ledger.session() as s:
+            cell = s.get(CellORM, cell_id)
+            assert cell is not None
+            for d in decisions:
+                target = s.get(ResearchIdeaORM, d.idea)
+                if (
+                    target is None
+                    or target.status != IdeaStatus.PROMISING
+                    or self._pending(s, d.idea)
+                ):
+                    continue
+                if d.action == "stop":
+                    target.status = IdeaStatus.DEAD
+                    target.extra = {**target.extra, "why_dead": f"pool review: {d.why}"}
+                    done += 1
+                elif d.action == "enhance":
+                    rows = [
+                        c
+                        for c in self._idea_rows(s, target.id)
+                        if c.stage in (Stage.FIELD, Stage.IMPROVE, Stage.ENHANCE)
+                        and c.status == CandidateStatus.DONE
+                        and not self._suspicious(c)
+                    ]
+                    done += bool(self._start_enhance(s, target, cell, rows))
+            plan = dict(cell.plan or {})
+            plan["pool_review"] = {"calls": int(state.get("calls", 0)) + 1, "sig": sig}
+            cell.plan = plan
+            self.ledger.log(
+                s,
+                "pool_review",
+                cell_id,
+                proposed=[(d.idea[:8], d.action, d.why) for d in decisions],
+                executed=done,
+                rejected=problems[:5],
+            )
+        return done
 
     def _pending_count(self) -> int:
         """Simulations created but not finished (waiting or running), across the ledger."""

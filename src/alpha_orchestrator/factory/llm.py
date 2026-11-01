@@ -601,6 +601,34 @@ class FactoryLLM:
             prompt["your_last_answer_was_rejected_because"] = rejected
         return self.ask("diagnose", json.dumps(prompt, ensure_ascii=False), strong=True)
 
+    def pool_review(
+        self, dataset: dict[str, Any], table: Sequence[dict[str, Any]], budget_left: int
+    ) -> dict[str, Any]:
+        """Item 7: read the whole pool of one dataset's ideas and say which to stop or enhance."""
+        prompt = {
+            "task": "Review this pool of ideas on one dataset and decide, for each idea that is "
+            "still active, whether to continue, stop or enhance it.",
+            "dataset": dataset,
+            "simulations_left_on_this_dataset": budget_left,
+            "ideas": list(table),
+            "rules": [
+                "Each row has hit_probability: the share of earlier ideas in the same band of "
+                "first-formula Sharpe that later reached the Sharpe line. Trust it over the "
+                "story an idea tells.",
+                "stop: the idea is unlikely to reach the line (low hit_probability and no gain "
+                "in its recent rounds). continue: leave it to the fixed rules. enhance: only "
+                "for ideas whose allowed_actions include it.",
+                "Use only the actions listed in each row's allowed_actions. Refer to an idea by "
+                "its id exactly as listed. One decision per idea; you may leave ideas out.",
+                "Give a one-sentence reason that cites a number from the row.",
+            ],
+            "output_fields": {
+                "decisions": "list of objects with idea (id), action (continue|stop|enhance), "
+                "why (one sentence)"
+            },
+        }
+        return self.ask("pool_review", json.dumps(prompt, ensure_ascii=False), strong=True)
+
     def describe(self, alpha: dict[str, Any]) -> str:
         prompt = {
             "task": "Write the alpha description for submission: 'Idea:' then 'Rationale:', "
