@@ -474,10 +474,19 @@ class FactoryLLM:
                 "most 2 groups of the same kind (e.g. two 'estimate revision' groups); "
                 "cover different kinds of meaning.",
                 "direction: 'higher is better' or 'lower is better'.",
+                "field_signs: for EACH field in the group say 'high' if a higher value should "
+                "predict higher returns, 'low' if a lower value should. Think about the "
+                "field's own meaning (a cost or a risk is usually 'low').",
+                "horizon_days: the window over which the effect should show, chosen from "
+                "5, 21, 63, 126, 252. Pick the one the mechanism implies; do not default to 21.",
+                "falsifier: one sentence saying what test result would show this idea is "
+                "wrong (for example 'top-minus-bottom quintile return is not positive over "
+                "63 days').",
             ],
             "output_fields": {
                 "groups": "list of objects with name, meaning, direction, why (one sentence), "
-                "fields (list of up to 3 field ids)"
+                "fields (list of up to 3 field ids), field_signs (object: field id -> "
+                "'high' or 'low'), horizon_days (integer), falsifier (string)"
             },
         }
         if tried:
@@ -512,7 +521,9 @@ class FactoryLLM:
                 "operators per formula.",
                 "Positional inputs exactly as each operator's definition; optional inputs "
                 "only by name, e.g. winsorize(x, std=4).",
-                "Higher formula value = buy. Follow the idea's direction.",
+                "Higher formula value = buy. Follow the idea's field_signs: negate a field "
+                "marked 'low' (or write the formula so it falls when that field rises).",
+                "Use the idea's horizon_days as the main window of the formulas.",
                 "Fields are already cleaned: do not add filling.",
             ],
             "output_fields": {

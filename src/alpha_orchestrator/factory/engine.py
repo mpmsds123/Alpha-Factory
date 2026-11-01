@@ -23,6 +23,7 @@ from alpha_orchestrator.brain.api import BrainAPI
 from alpha_orchestrator.factory import catalog, study
 from alpha_orchestrator.factory import generators as gen
 from alpha_orchestrator.factory.config import FactoryConfig
+from alpha_orchestrator.factory.direction import direction_label, expected_sign
 from alpha_orchestrator.factory.ideas import tokens
 from alpha_orchestrator.factory.ledger import Ledger, ledger_locked
 from alpha_orchestrator.factory.llm import FactoryLLM, LLMUnavailable
@@ -69,7 +70,13 @@ GROUPS = 8  # 第 2 步: 100 simulations / 12 per idea
 FIRST_FORMULAS = 3  # 第 3 步
 FIRST_OPERATORS = 5  # 第 3 步: 5 + one change per round x 3 rounds = 8, the Power Pool limit
 FORMULA_MAX_FIELDS = 3  # Power Pool
-FIRST_GATE = 0.8  # 第 7 步: the luck line of 3 noise formulas is 0.76
+# 第 7 步. Was 0.8 (the 5% luck line of 3 noise formulas at sigma 0.316). Measured sigma is
+# 0.36-0.58 per dataset (pooled 0.49), so 0.8 is passed by noise 9%-77% of the time. At 1.0
+# the 23 ideas whose best first formula sat in 0.8-1.0 are no longer improved: they cost 49
+# backtests (6% of 817) and none later reached 1.2; all 17 ideas that reached 1.2, and all 8
+# that reached 1.58, had a first formula of at least 1.0. Ledger of 2026-10-31.
+FIRST_GATE = 1.0
+HORIZONS = (5, 21, 63, 126, 252)  # the windows the system prompt allows
 GROUP_FIELD_LINES = 400
 # 10/15 第一次正式跑后的修改
 GROUP_REFILLS = 10  # 安全上限；真正的停止条件是数据集预算（100 次）用完
@@ -338,15 +345,9 @@ class Engine:
             for g in raw:
                 ids = [str(x) for x in (g.get("fields") or []) if str(x) in known]
                 if ids:
-                    groups.append(
-                        {
-                            "name": str(g.get("name", ""))[:120],
-                            "meaning": str(g.get("meaning", ""))[:300],
-                            "direction": str(g.get("direction", ""))[:40],
-                            "why": str(g.get("why", ""))[:300],
-                            "fields": ids[:FORMULA_MAX_FIELDS],
-                        }
-                    )
+                    card = _idea_card(g, ids[:FORMULA_MAX_FIELDS])
+                    if card is not None:
+                        groups.append(card)
             if groups:
                 break
         with self.ledger.session() as s:
@@ -412,7 +413,8 @@ class Engine:
                 mechanism=g["meaning"] + " " + g["why"],
                 long_side=g["direction"],
                 short_side="",
-                horizon_days=21,
+                # groups saved in a dataset's plan before this field existed ran on 21 days
+                horizon_days=int(g.get("horizon_days") or 21),
                 query=" ".join(g["fields"]),
                 extra={"group": g, "n": k},
             )
@@ -471,9 +473,18 @@ class Engine:
                 self.ledger.log(s, "idea_dead", idea.cell_id, idea=idea_id, reason="no formulas")
                 return 0
             idea.form = exprs[0][0]
+            signs = _group_signs(group)
             idea.extra = {
                 **idea.extra,
-                "formulas": [{"expression": e, "why": w, "field": f} for e, w, f in exprs],
+                "formulas": [
+                    {
+                        "expression": e,
+                        "why": w,
+                        "field": f,
+                        "direction": direction_label(e, signs),
+                    }
+                    for e, w, f in exprs
+                ],
             }
             settings = self._settings(cell)
             for expr, why, fid in exprs:
@@ -491,7 +502,7 @@ class Engine:
 
     @staticmethod
     def _has_signal(s: Session, cell_id: str) -> bool:
-        """At least one field group of this dataset passed the first gate (0.8)."""
+        """At least one field group of this dataset passed the first gate (FIRST_GATE)."""
         return (
             s.scalar(
                 select(func.count())
@@ -1226,6 +1237,46 @@ def _main_formulas(
         first = sorted(v.fields_used & set(types))[0]
         out.append((expr, f.get("way", ""), first))
     return out
+
+
+def _group_signs(group: dict[str, Any]) -> dict[str, int]:
+    """field id -> +1 (higher value should predict higher returns) / -1, as the idea states."""
+    out: dict[str, int] = {}
+    for fid, word in (group.get("field_signs") or {}).items():
+        sign = expected_sign(str(word))
+        if sign is not None:
+            out[str(fid)] = sign
+    return out
+
+
+def _idea_card(g: dict[str, Any], ids: list[str]) -> dict[str, Any] | None:
+    """A field group becomes an idea only if it can be proven wrong: it names its window
+    (one of HORIZONS, not a default), what result would show it wrong, and for each field
+    whether higher or lower should predict higher returns. Otherwise it is dropped."""
+    try:
+        horizon = int(g.get("horizon_days"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    falsifier = str(g.get("falsifier") or "").strip()
+    raw = g.get("field_signs")
+    signs = {
+        fid: ("high" if expected_sign(str(raw.get(fid, ""))) == 1 else "low")
+        for fid in ids
+        if isinstance(raw, dict) and expected_sign(str(raw.get(fid, ""))) is not None
+    }
+    if horizon not in HORIZONS or len(falsifier) < 10 or len(signs) != len(ids):
+        return None
+    highs = sum(v == "high" for v in signs.values())
+    return {
+        "name": str(g.get("name", ""))[:120],
+        "meaning": str(g.get("meaning", ""))[:300],
+        "direction": "higher is better" if highs * 2 >= len(ids) else "lower is better",
+        "why": str(g.get("why", ""))[:300],
+        "fields": ids,
+        "horizon_days": horizon,
+        "falsifier": falsifier[:300],
+        "field_signs": signs,
+    }
 
 
 def _first_formulas(

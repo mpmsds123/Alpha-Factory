@@ -28,6 +28,12 @@ from alpha_orchestrator.factory.models import (
 from .world import World, analyst_fields
 
 
+def eps_fields(strength: float = 1.4):  # type: ignore[no-untyped-def]
+    """Every eps statistic carries the signal (the stub LLM picks the first two eps fields),
+    so a first formula clears the first gate (1.0) in this world, which noise (0.89) does not."""
+    return analyst_fields("eps", strength=strength, signal_stats=("mean", "median", "high", "low"))
+
+
 def honest_llm(model: str, system: str, user: str) -> tuple[str, int, int]:
     p = json.loads(user)
     task = p["task"]
@@ -41,6 +47,9 @@ def honest_llm(model: str, system: str, user: str) -> tuple[str, int, int]:
                 "direction": "higher is better",
                 "why": "underreaction",
                 "fields": [*eps[:2], "not_a_field"],
+                "field_signs": {f: "high" for f in [*eps[:2], "not_a_field"]},
+                "horizon_days": 63,
+                "falsifier": "top-minus-bottom quintile return is not positive over 63 days",
             },
             {
                 "name": "Other",
@@ -48,6 +57,9 @@ def honest_llm(model: str, system: str, user: str) -> tuple[str, int, int]:
                 "direction": "higher is better",
                 "why": "none",
                 "fields": other[:1],
+                "field_signs": {f: "high" for f in other[:1]},
+                "horizon_days": 21,
+                "falsifier": "top-minus-bottom quintile return is not positive over 21 days",
             },
         ]
         return json.dumps({"groups": groups}), 900, 200
@@ -165,12 +177,20 @@ def run(world: World, minutes: float = 10, **budget: Any):  # type: ignore[no-un
 
 
 def test_signal_is_found_improved_and_handed_over_never_submitted() -> None:
-    ledger, api, report = run(World({"est": analyst_fields("eps")}))
+    ledger, api, report = run(World({"est": eps_fields()}))
     with ledger.session() as s:
         idea = s.scalars(select(ResearchIdeaORM)).first()
         assert idea is not None, report
         assert idea.extra.get("diagnoses"), idea.extra  # 第 5+6 步 ran on the whole history
         assert idea.extra["group"]["fields"] and "not_a_field" not in idea.extra["group"]["fields"]
+        assert idea.horizon_days == 63  # the window the LLM named, not a default
+        assert "quintile" in idea.extra["group"]["falsifier"]
+        assert {f["direction"] for f in idea.extra["formulas"]} <= {
+            "match",
+            "opposite",
+            "mixed",
+            "unknown",
+        }
         first = [c for c in s.scalars(select(CandidateORM)) if c.stage == Stage.FIELD]
         assert first and any("eps" in c.expression for c in first)
         improved = [c for c in s.scalars(select(CandidateORM)) if c.stage == Stage.IMPROVE]
@@ -181,7 +201,7 @@ def test_signal_is_found_improved_and_handed_over_never_submitted() -> None:
 @pytest.mark.skip(reason="v3 设计，已被 10/14 晚现行设计取代")
 def test_llm_only_stops_after_one_idea_and_five_formulas() -> None:
     ledger = Ledger("sqlite://")
-    api = World({"est": analyst_fields("eps")}).platform()
+    api = World({"est": eps_fields()}).platform()
     cfg = FactoryConfig()
     llm = FactoryLLM(cfg, ledger, complete=honest_llm)
 
@@ -257,7 +277,7 @@ def test_no_example_formula_in_any_prompt() -> None:
         return honest_llm(model, system, user)
 
     ledger = Ledger("sqlite://")
-    api = World({"est": analyst_fields("eps")}).platform()
+    api = World({"est": eps_fields()}).platform()
     cfg = FactoryConfig()
     cfg.budget.min_batch_interval_s = 0
     llm = FactoryLLM(cfg, ledger, complete=spy)
@@ -289,7 +309,7 @@ def test_first_gate_is_081_for_five_formulas() -> None:
 def test_record_page_lists_every_step(tmp_path) -> None:  # type: ignore[no-untyped-def]
     from alpha_orchestrator.factory.record import render_record
 
-    ledger, _api, _ = run(World({"est": analyst_fields("eps")}))
+    ledger, _api, _ = run(World({"est": eps_fields()}))
     text = render_record(ledger, tmp_path / "record.html").read_text(encoding="utf-8")
     for marker in ("第1-2步", "第3步", "第4步", "第7-8步", "第8步", "EPS revision drift"):
         assert marker in text
@@ -315,7 +335,7 @@ def test_an_unreachable_llm_stops_the_day_and_closes_nothing() -> None:
         raise TypeError("'NoneType' object is not subscriptable")  # what an empty balance gave
 
     ledger = Ledger("sqlite://")
-    api = World({"est": analyst_fields("eps")}).platform()
+    api = World({"est": eps_fields()}).platform()
     cfg = FactoryConfig()
     cfg.budget.min_batch_interval_s = 0
     llm = FactoryLLM(cfg, ledger, complete=broke)
@@ -341,7 +361,7 @@ def test_a_rejected_citation_asks_for_a_card_and_does_not_count_as_no_idea() -> 
         return honest_llm(model, system, user)
 
     ledger = Ledger("sqlite://")
-    api = World({"est": analyst_fields("eps")}).platform()
+    api = World({"est": eps_fields()}).platform()
     cfg = FactoryConfig()
     cfg.budget.min_batch_interval_s = 0
     llm = FactoryLLM(cfg, ledger, complete=cites_badly)
@@ -353,7 +373,7 @@ def test_a_rejected_citation_asks_for_a_card_and_does_not_count_as_no_idea() -> 
 
 
 def test_refill_skips_repeated_groups_and_near_miss_keeps_improving() -> None:
-    ledger, _api, _report = run(World({"est": analyst_fields("eps")}))
+    ledger, _api, _report = run(World({"est": eps_fields()}))
     with ledger.session() as s:
         cell = s.scalars(select(CellORM)).first()
         names = [g["name"] for g in (cell.plan or {}).get("groups", [])]
@@ -373,7 +393,7 @@ def test_no_signal_after_scouting_means_next_dataset_no_refill() -> None:
 
 
 def test_signal_found_means_more_groups_are_asked_for() -> None:
-    ledger, _, _ = run(World({"est": analyst_fields("eps")}), minutes=30)
+    ledger, _, _ = run(World({"est": eps_fields()}), minutes=30)
     assert "field_groups_refill" in _kinds(ledger)
 
 
@@ -405,9 +425,7 @@ def _enhance_rows(ledger: Ledger) -> dict[str, list[CandidateORM]]:
 
 
 def test_a_near_miss_is_enhanced_by_deciles_and_passes() -> None:
-    world = _SizeWorld(
-        {"est": analyst_fields("eps", strength=1.0, signal_stats=("mean", "median", "high", "low"))}
-    )
+    world = _SizeWorld({"est": eps_fields(1.1)})
     world.bucket_gain = 0.6
     ledger, _, _ = run(world, minutes=30)
     rows = _enhance_rows(ledger)
@@ -423,9 +441,7 @@ def test_a_near_miss_is_enhanced_by_deciles_and_passes() -> None:
 
 
 def test_enhance_tries_trade_when_on_the_best_wrapper_then_closes() -> None:
-    world = _SizeWorld(
-        {"est": analyst_fields("eps", strength=1.0, signal_stats=("mean", "median", "high", "low"))}
-    )
+    world = _SizeWorld({"est": eps_fields(1.1)})
     ledger, _, _ = run(world, minutes=30)
     rows = _enhance_rows(ledger)
     assert rows
@@ -456,7 +472,7 @@ def test_empty_diagnosis_preserves_active_idea_instead_of_finishing() -> None:
     llm = FactoryLLM(cfg, ledger, complete=empty_diagnosis)
     report = eng.run_day(
         cfg,
-        World({"est": analyst_fields("eps")}).platform(),
+        World({"est": eps_fields()}).platform(),
         ledger,
         llm,
         rng=random.Random(3),
@@ -486,7 +502,7 @@ def test_diagnosis_receives_actual_configured_gates_and_margin_history() -> None
     llm = FactoryLLM(cfg, ledger, complete=capture)
     eng.run_day(
         cfg,
-        World({"est": analyst_fields("eps")}).platform(),
+        World({"est": eps_fields()}).platform(),
         ledger,
         llm,
         rng=random.Random(3),
