@@ -566,3 +566,42 @@ def test_utc_midnight_does_not_release_same_scanner_day_reservations() -> None:
     assert worker._remaining_daily() == 0
     cfg.budget.window_start = lambda now=None: datetime(2026, 10, 27, 4, tzinfo=UTC)  # type: ignore[method-assign]
     assert worker._remaining_daily() == 10
+
+
+def test_one_foreign_child_does_not_discard_the_matching_ones() -> None:
+    ledger = setup(3)
+    api = FakeBrainAPI(lambda *_: is_metrics(sharpe=1.0, fitness=1.0))
+    original = api.alpha
+    seen: list[str] = []
+
+    def one_wrong(alpha_id):  # type: ignore[no-untyped-def]
+        alpha = original(alpha_id)
+        seen.append(alpha_id)
+        if len(seen) == 1:
+            return {**alpha, "regular": {"code": "rank(other_alias_of_same_field)"}}
+        return alpha
+
+    api.alpha = one_wrong  # type: ignore[method-assign]
+    sim(ledger, api).run(3)
+    with ledger.session() as s:
+        rows = list(s.scalars(select(CandidateORM)))
+        assert sorted(c.status for c in rows) == ["DONE", "DONE", "FAILED"]
+        assert s.scalar(select(BatchORM.status)) == "DONE"
+
+
+def test_an_expired_progress_url_closes_the_batch_as_lost() -> None:
+    import httpx
+
+    ledger = setup(2)
+    api = FakeBrainAPI(metrics)
+
+    def gone(location):  # type: ignore[no-untyped-def]
+        req = httpx.Request("GET", "https://x/" + location)
+        raise httpx.HTTPStatusError("404", request=req, response=httpx.Response(404, request=req))
+
+    api.poll = gone  # type: ignore[method-assign]
+    stats = sim(ledger, api).run(2)
+    assert stats.failed == 2
+    with ledger.session() as s:
+        assert s.scalar(select(BatchORM.status)) == "DONE"
+        assert {c.status for c in s.scalars(select(CandidateORM))} == {"FAILED"}
