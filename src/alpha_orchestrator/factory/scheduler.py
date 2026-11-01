@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 from sqlalchemy import select
 
 from alpha_orchestrator.brain.api import BrainAPI, simulation_payload
@@ -310,6 +311,20 @@ class Simulator:
             row.status = "UNKNOWN"
             self.ledger.log(s, "batch_unknown", batch=batch_id)
 
+    def _close_lost(self, batch_id: str, member_ids: list[str]) -> int:
+        with self.ledger.session() as s:
+            for mid in member_ids:
+                c = s.get(CandidateORM, mid)
+                assert c is not None
+                c.status = CandidateStatus.FAILED
+                c.error = "result lost: progress URL expired (404)"
+                c.completed_at = utc_now()
+            row = s.get(BatchORM, batch_id)
+            assert row is not None
+            row.status, row.finished_at = "DONE", utc_now()
+            self.ledger.log(s, "batch_closed_lost", batch=batch_id, candidates=len(member_ids))
+        return len(member_ids)
+
     def _poll(self, batch_id: str) -> tuple[int, int]:
         with self.ledger.session() as s:
             row = s.get(BatchORM, batch_id)
@@ -325,7 +340,14 @@ class Simulator:
             member_ids = [m.id for m in members]
         if not location:
             raise AmbiguousRequest(f"Batch {batch_id} has no confirmed progress URL")
-        progress = self.api.poll(location)
+        try:
+            progress = self.api.poll(location)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            # The platform keeps a progress address for only a few days. Gone means the
+            # results cannot be fetched this way; close the batch instead of crashing.
+            return 0, self._close_lost(batch_id, member_ids)
         if not progress.done:
             return 0, 0
 
@@ -343,6 +365,7 @@ class Simulator:
             )
 
         results: dict[str, dict[str, Any]] = {}
+        unmatched: list[str] = []
 
         def attach(alpha_id: str) -> None:
             alpha = self.api.alpha(alpha_id)
@@ -366,9 +389,15 @@ class Simulator:
                     # authentication payload. Do not export these audit events.
                     alpha={k: alpha[k] for k in ("regular", "settings", "is") if k in alpha},
                 )
-            if len(matches) != 1 or matches[0] in results:
+            if len(matches) > 1 or (matches and matches[0] in results):
                 self._quarantine(batch_id)
                 raise AmbiguousRequest(f"Batch {batch_id}: result identity mismatch")
+            if not matches:
+                # The platform can answer one child with an older alpha of the same data
+                # under another field alias. It is not ours, so it is never attached; the
+                # candidate it was meant for stays without a result and is marked failed.
+                unmatched.append(alpha_id)
+                return
             results[matches[0]] = {"alpha": alpha, "alpha_id": alpha_id}
 
         if progress.children:
@@ -392,6 +421,9 @@ class Simulator:
                     attach(child.alpha_id)
                 else:
                     errors.append(child.message or child.status)
+            if unmatched and not results:  # nothing of ours came back: do not guess
+                self._quarantine(batch_id)
+                raise AmbiguousRequest(f"Batch {batch_id}: result identity mismatch")
             # Failed children do not expose an expression. Preserve their messages at
             # batch scope rather than guessing their identities from response order.
             reason = " | ".join(sorted(set(errors)))
