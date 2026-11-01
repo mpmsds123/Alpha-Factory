@@ -519,3 +519,14 @@ def test_diagnosis_receives_actual_configured_gates_and_margin_history() -> None
         }
         assert p["best"]["margin"] is not None
         assert all("margin" in row for row in p["history_all_tries"])
+
+
+def test_no_new_idea_is_opened_while_the_queue_is_full(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(eng, "QUEUE_CAP", 0)
+    ledger, _api, _report = run(World({"est": eps_fields()}), minutes=0.02)
+    with ledger.session() as s:
+        assert s.scalars(select(ResearchIdeaORM)).first() is None
+
+
+def test_the_queue_cap_is_two_batches() -> None:
+    assert eng.QUEUE_CAP == 20

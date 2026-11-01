@@ -111,6 +111,10 @@ PROBLEMS = (
 SAME_FAIL_LIMIT = 3  # alpha-mining: 3 variants failing the same check -> change the formula
 # 第 5 节
 ACTIVE_IDEAS = 2  # 提议
+# Item 3. No new idea is opened while this many simulations are already waiting or running.
+# A batch holds 10 simulations: one batch on the platform plus one ready behind it keeps the
+# platform busy and builds no backlog. The ledger of 2026-10-31 shows up to 48 waiting at once.
+QUEUE_CAP = 20
 CHUNK = 20  # simulations between decisions
 NO_FLIP_REGIONS = frozenset({"CHN"})  # 第 6 步: short side is constrained in China
 ROBUST_ROLES = frozenset({"neutralization"})  # 第 7 问: the platform checks sub-universe
@@ -159,6 +163,9 @@ class Engine:
         while len(self._active_ideas(cell_id)) < ACTIVE_IDEAS and attempts < ACTIVE_IDEAS:
             attempts += 1
             if self._dataset_finished(cell_id):
+                break
+            if self._pending_count() >= QUEUE_CAP:
+                moved["queue_full"] = moved.get("queue_full", 0) + 1
                 break
             if self._new_idea(cell_id):
                 moved["ideas_new"] += 1
@@ -235,6 +242,18 @@ class Engine:
                     self.ledger.log(s, "dataset_opened", cell_id)
                 return cell_id
         return None
+
+    def _pending_count(self) -> int:
+        """Simulations created but not finished (waiting or running), across the ledger."""
+        with self.ledger.session() as s:
+            return int(
+                s.scalar(
+                    select(func.count())
+                    .select_from(CandidateORM)
+                    .where(CandidateORM.status.in_(PENDING))
+                )
+                or 0
+            )
 
     def _active_ideas(self, cell_id: str) -> list[str]:
         with self.ledger.session() as s:
