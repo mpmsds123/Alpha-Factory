@@ -32,6 +32,7 @@ from alpha_orchestrator.factory.models import (
     ReviewORM,
     ReviewStatus,
 )
+from alpha_orchestrator.factory.progress import write_progress
 from alpha_orchestrator.factory.select import approve, reject
 
 app = typer.Typer(help="Alpha 工厂：WorldQuant BRAIN 自动挖掘流水线", no_args_is_help=True)
@@ -51,8 +52,14 @@ def _ctx(config_path: Path) -> tuple[FactoryConfig, Ledger]:
     return config, Ledger.at(Path(config.db_path))
 
 
+# The session that just passed the face check in `login --then-run`. The run reuses this
+# live object (as the scanner does) instead of rebuilding one from the cookie file, which
+# came back unrecognised and forced a new password login, i.e. a new face check.
+_live_session: BrainSession | None = None
+
+
 def _api() -> BrainAPI:
-    return BrainAPI(BrainClient(BrainSession()))
+    return BrainAPI(BrainClient(_live_session or BrainSession()))
 
 
 def _llm(config: FactoryConfig, ledger: Ledger) -> FactoryLLM | None:
@@ -152,6 +159,8 @@ def login(
     finally:
         session.close()
     if then_run:
+        global _live_session
+        _live_session = session
         run(config=config)
 
 
@@ -174,16 +183,26 @@ def run(
     except WorkerAlreadyRunning as exc:
         typer.echo(f"安全暂停：{exc}")
         raise typer.Exit(4) from None
+
+    def progress(status: str) -> None:
+        try:
+            write_progress(ledger, cfg, status)
+        except Exception as exc:  # the progress file must never stop a run
+            typer.echo(f"进度文件没写成：{exc}")
+
     llm = _llm(cfg, ledger)
     if llm is None:
+        progress("没跑：找不到 DeepSeek 密钥")
         typer.echo("设计文档 v1 需要 DeepSeek 想点子、挑字段；找不到密钥就不跑。")
         raise typer.Exit(1)
     record_path = Path(cfg.reports_dir) / "record.html"
 
     def refresh_record() -> None:
         render_record(ledger, record_path)
+        progress("运行中")
 
     api = _api()
+    progress("运行中：登录")
     try:
         with ledger.writer_lock():
             api.client.session.ensure()
@@ -191,12 +210,14 @@ def run(
                 preview = run_llm_only(cfg, api, ledger, llm)
                 if preview is None:
                     typer.echo("没有可生成点子的数据集；回测次数 = 0")
+                    progress("预览：没有可生成点子的数据集")
                     return
                 typer.echo(f"点子：{preview.title}")
                 typer.echo(f"机制：{preview.mechanism}")
                 for index, formula in enumerate(preview.formulas, 1):
                     typer.echo(f"公式 {index}：{formula}")
                 typer.echo("回测次数 = 0")
+                progress("预览完成（只生成点子，没有回测）")
                 return
             report = run_day(
                 cfg,
@@ -207,19 +228,26 @@ def run(
                 on_progress=refresh_record,
             )
     except (AmbiguousRequest, WorkerAlreadyRunning) as exc:
+        progress(f"停了：安全暂停（{str(exc)[:80]}）")
         typer.echo(f"安全暂停：{exc}")
         raise typer.Exit(4) from None
     except NeedBiometric:
+        progress("停了：平台要求刷脸，运行 alpha-factory login --then-run")
         notify("平台要求刷脸：运行 alpha-factory login --then-run，会从断点继续")
         render_record(ledger, record_path)
         raise typer.Exit(2) from None
     except (AuthenticationFailed, SessionExpired, RateLimited) as exc:
+        progress(f"停了：{type(exc).__name__}（{str(exc)[:80]}）")
         notify(f"运行暂停：{exc}。进度已保存，稍后重跑 alpha-factory run 会接着来")
         render_record(ledger, record_path)
         raise typer.Exit(3) from None
+    except Exception as exc:
+        progress(f"停了：程序出错 {type(exc).__name__}（{str(exc)[:80]}）")
+        raise
     finally:
         api.client.session.close()
     render_record(ledger, record_path)
+    progress(f"今天结束：{report.stopped_because or '完成'}")
     msg = (
         f"本次完成 {report.simulations}（失败 {report.failed}），过门槛 {report.ready}，"
         f"新存入待挑选 {len(report.reviews)} 条"
