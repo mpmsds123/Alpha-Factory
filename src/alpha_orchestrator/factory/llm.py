@@ -175,6 +175,11 @@ class FactoryLLM:
                         raise ValueError("invalid diagnosis decision")
                     if not isinstance(data.get("variants"), list):
                         raise ValueError("diagnosis variants must be a list")
+                if purpose == "pick_fixes":
+                    if data.get("decision") not in {"change", "give_up"}:
+                        raise ValueError("invalid pick_fixes decision")
+                    if not isinstance(data.get("picks", []), list):
+                        raise ValueError("pick_fixes picks must be a list")
             except Exception as exc:  # network, quota, malformed JSON: all recorded
                 if isinstance(exc, IncompleteOutput):
                     text, p_tok, c_tok = exc.text, exc.prompt_tokens, exc.completion_tokens
@@ -457,9 +462,11 @@ class FactoryLLM:
         fields: Sequence[dict[str, Any]],
         n: int,
         tried: Sequence[str] = (),
+        past: Sequence[dict[str, Any]] = (),
     ) -> list[dict[str, Any]]:
         """第 2 步: read every field description; return up to n groups, each one economic
-        meaning a researcher would test, with its expected direction and up to 3 fields."""
+        meaning a researcher would test, with its expected direction and up to 3 fields.
+        v7: `past` carries finished ideas from every dataset (R&D-Agent(Q) knowledge forest)."""
         prompt = {
             "task": f"You are a quant researcher reading a new dataset. Read the field "
             f"descriptions and pick up to {n} field groups worth testing as stock-selection "
@@ -491,6 +498,17 @@ class FactoryLLM:
         }
         if tried:
             prompt["groups_already_tried_do_not_repeat"] = list(tried)
+        if past:
+            prompt["past_ideas_and_results"] = list(past)
+            prompt["rules"] = [
+                *prompt["rules"],
+                "past_ideas_and_results are finished ideas from earlier datasets with their "
+                "best Sharpe and why they stopped. Prefer kinds of economic meaning that "
+                "reached a high Sharpe; do not propose a kind that failed repeatedly unless "
+                "this dataset measures it in a clearly different way.",
+                "A field marked scanner_found_signal passed an earlier template scan. It is "
+                "evidence, not a requirement.",
+            ]
         data = self.ask("field_groups", json.dumps(prompt, ensure_ascii=False), strong=True)
         return [g for g in (data.get("groups") or []) if isinstance(g, dict)][:n]
 
@@ -600,6 +618,38 @@ class FactoryLLM:
         if rejected:
             prompt["your_last_answer_was_rejected_because"] = rejected
         return self.ask("diagnose", json.dumps(prompt, ensure_ascii=False), strong=True)
+
+    def pick_fixes(
+        self,
+        idea: dict[str, Any],
+        best: dict[str, Any],
+        problem: str,
+        menu: Sequence[dict[str, Any]],
+        n: int,
+    ) -> dict[str, Any]:
+        """v7 第 6 步: the program has diagnosed the problem; the LLM picks up to n fixes from
+        the menu that suit this idea's economics, or gives up. It writes no formula."""
+        prompt = {
+            "task": "Choose fixes for the best formula of this idea. The program has "
+            "already diagnosed its main problem from the platform's checks. Pick up to "
+            f"{n} fixes from the menu that make economic sense for this idea, or give up.",
+            "idea": idea,
+            "best": best,
+            "diagnosed_problem": problem,
+            "menu": list(menu),
+            "rules": [
+                "Pick only fixes listed in the menu, by their exact name.",
+                "Each menu item shows how often that fix has worked on this problem so far "
+                "(successes/tries). Use it, but judge the fit to this idea's mechanism.",
+                "Give one sentence per pick that names the property of the idea it relies on.",
+                "Give up only when the idea's mechanism cannot survive the diagnosed problem.",
+            ],
+            "output_fields": {
+                "decision": "'change' or 'give_up'",
+                "picks": "list of objects with fix (a menu name) and why (one sentence)",
+            },
+        }
+        return self.ask("pick_fixes", json.dumps(prompt, ensure_ascii=False), strong=True)
 
     def pool_review(
         self, dataset: dict[str, Any], table: Sequence[dict[str, Any]], budget_left: int

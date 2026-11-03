@@ -276,6 +276,20 @@ def status(config: ConfigOpt = DEFAULT_CONFIG) -> None:
 
 
 @app.command()
+def weekly(
+    days: Annotated[int, typer.Option(help="统计最近几天")] = 7,
+    config: ConfigOpt = DEFAULT_CONFIG,
+) -> None:
+    """周报：额度利用、点子漏斗、瓶颈、每种改法的成功率、花费。写进 reports/工厂_周报.csv。"""
+    from alpha_orchestrator.factory.weekly import weekly_rows, write_weekly
+
+    cfg, ledger = _ctx(config)
+    for k, v in weekly_rows(ledger, cfg, days):
+        typer.echo(f"{k}：{v}")
+    typer.echo(f"已写入：{write_weekly(ledger, cfg, days).resolve()}")
+
+
+@app.command()
 def dashboard(
     open_: Annotated[bool, typer.Option("--open")] = True, config: ConfigOpt = DEFAULT_CONFIG
 ) -> None:

@@ -5,6 +5,7 @@ document does not contain does not belong in this file.
 """
 
 import csv
+import random
 import re
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,7 @@ from alpha_orchestrator.factory.models import CellORM, CellState, FieldORM
 from alpha_orchestrator.factory.quarantine import exception_scope
 
 # 11/02: only fields the scanner found signal in; v5 datasets are redone (reset_old_verdicts)
-DESIGN = "v6"
+DESIGN = "v7"
 FILL_DAYS = 63  # 第 2 步: quarterly data carried one quarter (官方小贴士 10)
 NUMERIC_TYPES = ("MATRIX", "VECTOR")
 
@@ -56,7 +57,9 @@ def reset_old_verdicts(ledger: Ledger) -> int:
 
 
 # ---------- 第 1 步 选数据集 ----------
-def choose_dataset(s: Session, config: FactoryConfig) -> str | None:
+def choose_dataset(
+    s: Session, config: FactoryConfig, rng: random.Random | None = None
+) -> str | None:
     """第 3 问: only datasets the template scanner found worth digging (first-pass hit rate
     >= 2%), highest hit rate first, each once under this design. Without the scanner's
     folder, the old ranking (best score, coverage known and >= min_coverage)."""
@@ -70,6 +73,22 @@ def choose_dataset(s: Session, config: FactoryConfig) -> str | None:
                 continue
             return cell.cell_id
         return None
+    if config.design == "v7":
+        # v7: a uniformly random dataset not yet dug under this design. No ranking, so no
+        # assumption (e.g. "the scanner found nothing, so nothing is there"). A dataset
+        # without signal is closed after its scouting ideas, so a bad draw is cheap.
+        pool = [
+            c.cell_id
+            for c in s.scalars(
+                select(CellORM).where(CellORM.state == CellState.NEW).order_by(CellORM.cell_id)
+            )
+            if c.active
+            and c.cell_id not in excluded
+            and (not config.policy.regions or c.region in config.policy.regions)
+            and c.delay in config.policy.delays
+            and (c.plan or {}).get("design") != DESIGN
+        ]
+        return (rng or random.Random()).choice(pool) if pool else None
     if config.scanner_runs:
         for w in scanner_worth(config.scanner_runs):
             cell = s.get(CellORM, f"{w['region']}|1|{w['universe']}|{w['dataset']}")
@@ -292,7 +311,7 @@ def load_fields(api: BrainAPI, ledger: Ledger, cell_id: str, config: FactoryConf
             if config.scanner_runs
             else None
         )
-        if signal is not None:
+        if signal is not None and config.design != "v7":
             # Step 1 is the scanner: the LLM only works on fields where it found signal.
             usable = 0
             for f in loaded:

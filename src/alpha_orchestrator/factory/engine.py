@@ -20,7 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from alpha_orchestrator.brain.api import BrainAPI
-from alpha_orchestrator.factory import catalog, study
+from alpha_orchestrator.factory import catalog, fixes, study
 from alpha_orchestrator.factory import generators as gen
 from alpha_orchestrator.factory import pool_review as pr
 from alpha_orchestrator.factory.config import FactoryConfig
@@ -112,6 +112,12 @@ PROBLEMS = (
 SAME_FAIL_LIMIT = 3  # alpha-mining: 3 variants failing the same check -> change the formula
 # 第 5 节
 ACTIVE_IDEAS = 2  # 提议
+# v7: 6 ideas in flight. In v6 two ideas used 17% of the daily quota (peak 321 of 1,000):
+# each idea waits for its own backtests, so more ideas in parallel keep the platform busy.
+V7_ACTIVE_IDEAS = 6
+V7_QUEUE_CAP = 40
+V7_DRY_ROUNDS = 2  # v7: two rounds in a row without a better variant end the idea
+PAST_IDEAS = 40  # v7: finished ideas shown to idea generation
 # Item 3. No new idea is opened while this many simulations are already waiting or running.
 # A batch holds 10 simulations: one batch on the platform plus one ready behind it keeps the
 # platform busy and builds no backlog. The ledger of 2026-10-31 shows up to 48 waiting at once.
@@ -163,11 +169,13 @@ class Engine:
         for idea_id in self._active_ideas(cell_id):
             moved["ideas_moved"] += self._step_idea(idea_id)
         attempts = 0
-        while len(self._active_ideas(cell_id)) < ACTIVE_IDEAS and attempts < ACTIVE_IDEAS:
+        v7 = self.config.design == "v7"
+        active, cap = (V7_ACTIVE_IDEAS, V7_QUEUE_CAP) if v7 else (ACTIVE_IDEAS, QUEUE_CAP)
+        while len(self._active_ideas(cell_id)) < active and attempts < active:
             attempts += 1
             if self._dataset_finished(cell_id):
                 break
-            if self._pending_count() >= QUEUE_CAP:
+            if self._pending_count() >= cap:
                 moved["queue_full"] = moved.get("queue_full", 0) + 1
                 break
             if self._new_idea(cell_id):
@@ -233,7 +241,7 @@ class Engine:
         """第 1-2 步, repeated until a dataset has usable fields."""
         for _ in range(30):
             with self.ledger.session() as s:
-                cell_id = study.choose_dataset(s, self.config)
+                cell_id = study.choose_dataset(s, self.config, self.rng)
             if cell_id is None:
                 return None
             if study.load_fields(self.api, self.ledger, cell_id, self.config):
@@ -477,11 +485,24 @@ class Engine:
                 for f in _one_per_family(fields)[:GROUP_FIELD_LINES]
             ]
             known = {f.field_id for f in fields}
+            past: list[dict[str, Any]] = []
+            if self.config.design == "v7":
+                past = _past_ideas(s, PAST_IDEAS)
+                signal = (
+                    study.scanner_signal_fields(
+                        self.config.scanner_runs, cell.region, cell.dataset_id
+                    )
+                    if self.config.scanner_runs
+                    else None
+                )
+                for line in lines:
+                    if signal and line["id"] in signal:
+                        line["scanner_found_signal"] = True
         self.llm.idea_id = None
         groups: list[dict[str, Any]] = []
         for _ in range(2):
             try:
-                raw = self.llm.field_groups(brief, lines, GROUPS, tried)
+                raw = self.llm.field_groups(brief, lines, GROUPS, tried, past)
             except LLMUnavailable:
                 raise
             except RuntimeError:
@@ -772,6 +793,9 @@ class Engine:
         """第 5+6 步: the LLM sees every formula this idea tried (worse ones included), the
         best one's yearly Sharpe and the field descriptions; it gives up or proposes
         VARIANTS one-change variants of the best. Repeats and invalid ones go back once."""
+        if self.config.design == "v7":
+            self._queue_fix_round(idea_id)
+            return
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
             assert idea is not None
@@ -923,6 +947,9 @@ class Engine:
 
     def _settle_round(self, idea_id: str) -> None:
         """第 5 问: a variant replaces its parent only when it is 0.35 better."""
+        if self.config.design == "v7":
+            self._settle_fix_round(idea_id)
+            return
         gain = self.config.thresholds.refine_min_gain
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
@@ -976,6 +1003,208 @@ class Engine:
                 parents=[(p["best"], p["dry"], p["rounds"]) for p in plist],
             )
         self._queue_round(idea_id)
+
+    # ======================= v7 第 5-7 步: menu + Thompson sampling =======================
+    def _fix_stats(self, s: Session) -> fixes.Stats:
+        """Every finished variant whose change is a menu fix, v6 enhancement rows included
+        (same wrappers): (problem, fix) -> [successes, failures]. Success = fewer failed
+        platform checks than the parent."""
+        rows: list[tuple[str, str, bool]] = []
+        for c in s.scalars(
+            select(CandidateORM).where(
+                CandidateORM.stage.in_([Stage.IMPROVE, Stage.ENHANCE]),
+                CandidateORM.status == CandidateStatus.DONE,
+                CandidateORM.parent_id.is_not(None),
+            )
+        ):
+            if c.sharpe is None or self._suspicious(c):
+                continue
+            parent = s.get(CandidateORM, c.parent_id)
+            if parent is None or parent.sharpe is None:
+                continue
+            extra = c.extra or {}
+            fix = extra.get("fix") or fixes.recognize(
+                c.expression, c.settings or {}, parent.expression, parent.settings or {}
+            )
+            if fix is None:
+                continue
+            problem = extra.get("problem") or fixes.diagnose(parent.fails)
+            rows.append((problem, fix, fixes.success(c.fails, parent.fails)))
+        return fixes.tally(rows)
+
+    def _queue_fix_round(self, idea_id: str) -> None:
+        """v7: the program diagnoses the best formula from its failed checks; the LLM picks
+        fixes from that problem's menu; Thompson sampling chooses VARIANTS of them; the
+        program applies each fix to the formula or its settings."""
+        with self.ledger.session() as s:
+            idea = s.get(ResearchIdeaORM, idea_id)
+            assert idea is not None
+            cell = s.get(CellORM, idea.cell_id)
+            assert cell is not None
+            plist = copy.deepcopy(idea.extra.get("parents", []))
+            live = [p for p in plist if p["dry"] < V7_DRY_ROUNDS and p["rounds"] < MAX_ROUNDS]
+            if not live:
+                self._finish_idea(s, idea)
+                return
+            p = live[0]
+            parent = s.get(CandidateORM, p["id"])
+            assert parent is not None
+            if self._passes_floor(parent, cell):
+                self._finish_idea(s, idea)
+                return
+            parent_id, parent_fails = parent.id, parent.fails
+            problem = fixes.diagnose(parent_fails)
+            tried = list(p.get("tried", []))
+            stats = self._fix_stats(s)
+            menu = []
+            for name in fixes.MENU[problem]:
+                if name in tried:
+                    continue
+                won, lost = stats.get((problem, name), [0, 0])
+                menu.append(
+                    {"fix": name, "what": fixes.FIXES[name].what, "worked": f"{won}/{won + lost}"}
+                )
+            card = {"name": idea.title, "meaning": idea.mechanism, "direction": idea.long_side}
+            best = _row(parent)
+            used_neutral = {
+                str((c.settings or {}).get("neutralization", "")).upper()
+                for c in self._idea_rows(s, idea_id)
+            }
+            options = [
+                n.upper()
+                for n in self.meta.neutralizations(cell.region)
+                if n.upper() not in used_neutral
+            ]
+        if not menu:
+            with self.ledger.session() as s:
+                idea = s.get(ResearchIdeaORM, idea_id)
+                assert idea is not None
+                self._finish_idea(s, idea)
+            return
+        self.llm.idea_id = idea_id
+        try:
+            verdict = self.llm.pick_fixes(card, best, problem, menu, VARIANTS)
+        except LLMUnavailable:
+            raise
+        except RuntimeError:
+            verdict = {"decision": "change", "picks": []}
+        picks = [
+            str(x.get("fix"))
+            for x in verdict.get("picks") or []
+            if isinstance(x, dict) and x.get("fix")
+        ]
+        whys = {
+            str(x.get("fix")): str(x.get("why", ""))[:200]
+            for x in verdict.get("picks") or []
+            if isinstance(x, dict)
+        }
+        gave_up = verdict.get("decision") == "give_up"
+        chosen, source = (
+            ([], "llm")
+            if gave_up
+            else fixes.choose(problem, picks, stats, VARIANTS, self.rng, tried)
+        )
+        with self.ledger.session() as s:
+            idea = s.get(ResearchIdeaORM, idea_id)
+            assert idea is not None
+            cell = s.get(CellORM, idea.cell_id)
+            assert cell is not None
+            plist = copy.deepcopy(idea.extra.get("parents", []))
+            p = next(q for q in plist if q["id"] == parent_id)
+            diag = {
+                "round": p["rounds"] + 1,
+                "problem": problem,
+                "failing_checks": sorted(fixes.fail_set(parent_fails)),
+                "llm_picks": picks,
+                "chosen": chosen,
+                "source": source,
+                "decision": "give_up" if gave_up else "change",
+            }
+            idea.extra = {**idea.extra, "diagnoses": [*idea.extra.get("diagnoses", []), diag]}
+            self.ledger.log(s, "diagnosis", idea.cell_id, idea=idea_id, **diag)
+            parent_row = s.get(CandidateORM, parent_id)
+            assert parent_row is not None
+            pending: list[str] = []
+            for name in chosen:
+                fix = fixes.FIXES[name]
+                settings = dict(parent_row.settings)
+                expression = parent_row.expression
+                if fix.shape is not None:
+                    expression = fix.shape.format(f=parent_row.expression)
+                elif fix.setting == "decay":
+                    settings["decay"] = min(512, max(5, 2 * int(settings.get("decay") or 0)))
+                elif fix.setting == "neutralization":
+                    if not options:
+                        continue
+                    settings["neutralization"] = options.pop(0)
+                c = self._add(
+                    s,
+                    cell,
+                    expression,
+                    settings,
+                    Stage.IMPROVE,
+                    idea_id,
+                    field=(parent_row.extra or {}).get("field"),
+                    parent=parent_row,
+                    change=f"{problem}: {name}. {whys.get(name, '')}"[:300],
+                    role="fix",
+                )
+                if c is not None:
+                    c.extra = {**(c.extra or {}), "fix": name, "problem": problem, "source": source}
+                    pending.append(c.id)
+            p["tried"] = [*p.get("tried", []), *chosen]
+            p["pending"] = pending
+            idea.extra = {**idea.extra, "parents": plist}
+            if not pending:
+                self._finish_idea(s, idea)
+
+    def _settle_fix_round(self, idea_id: str) -> None:
+        """v7: the best variant (fewest failed checks, then Sharpe) replaces its parent when it
+        scores higher; otherwise the round is dry. V7_DRY_ROUNDS dry rounds in a row or
+        MAX_ROUNDS rounds end the idea."""
+        with self.ledger.session() as s:
+            idea = s.get(ResearchIdeaORM, idea_id)
+            assert idea is not None
+            cell = s.get(CellORM, idea.cell_id)
+            assert cell is not None
+            plist = copy.deepcopy(idea.extra.get("parents", []))
+            for p in plist:
+                if not p.get("pending"):
+                    continue
+                parent = s.get(CandidateORM, p["id"])
+                kids = [
+                    k
+                    for k in (s.get(CandidateORM, i) for i in p["pending"])
+                    if k is not None and k.sharpe is not None and not self._suspicious(k)
+                ]
+                best = max(kids, key=lambda k: fixes.score(k.fails, k.sharpe), default=None)
+                if (
+                    best is not None
+                    and parent is not None
+                    and fixes.score(best.fails, best.sharpe)
+                    > fixes.score(parent.fails, parent.sharpe)
+                ):
+                    p.update(id=best.id, best=best.sharpe, dry=0, tried=[])
+                    idea.best_sharpe = max(idea.best_sharpe, best.sharpe or 0)
+                else:
+                    p["dry"] += 1
+                p["rounds"] += 1
+                p["pending"] = []
+            idea.extra = {**idea.extra, "parents": plist}
+            if any(
+                c.status == CandidateStatus.DONE and self._passes_floor(c, cell)
+                for c in self._idea_rows(s, idea_id)
+            ):
+                self._finish_idea(s, idea)
+                return
+            self.ledger.log(
+                s,
+                "round_settled",
+                idea.cell_id,
+                idea=idea_id,
+                parents=[(p["best"], p["dry"], p["rounds"]) for p in plist],
+            )
+        self._queue_fix_round(idea_id)
 
     # ======================= 第 8 步 排除运气 =======================
     def evaluate(self) -> int:
@@ -1083,7 +1312,7 @@ class Engine:
             operators=self.meta.operators,
             fields=types,
             signatures=self.meta.signatures,
-            max_operators=None if stage == Stage.ENHANCE else MAX_OPERATORS,
+            max_operators=None if stage == Stage.ENHANCE or role == "fix" else MAX_OPERATORS,
         )
         if not verdict.ok:
             self.ledger.log(
@@ -1179,7 +1408,12 @@ class Engine:
             and not self._suspicious(c)
         ]
         hits = [c.id for c in rows if cell is not None and self._passes_floor(c, cell)]
-        if not hits and cell is not None and self._start_enhance(s, idea, cell, rows):
+        if (
+            not hits
+            and cell is not None
+            and self.config.design != "v7"  # v7: the menu holds the enhancement wrappers
+            and self._start_enhance(s, idea, cell, rows)
+        ):
             return
         idea.best_sharpe = max((c.sharpe or 0.0 for c in rows), default=0.0)
         if hits:
@@ -1532,6 +1766,36 @@ def _knowledge(s: Session) -> tuple[list[str], list[str]]:
         elif i.status == IdeaStatus.DONE and len(worked) < 20:
             worked.append(f"{i.title} (best Sharpe {i.best_sharpe:.2f}): {i.form}"[:300])
     return dead, worked
+
+
+def _past_ideas(s: Session, limit: int) -> list[dict[str, Any]]:
+    """v7 第 2 步 memory (R&D-Agent(Q) knowledge forest): the latest finished ideas from
+    every dataset and design, with what happened to them. No formula text."""
+    out: list[dict[str, Any]] = []
+    for i in s.scalars(
+        select(ResearchIdeaORM)
+        .where(ResearchIdeaORM.status.in_([IdeaStatus.DONE, IdeaStatus.DEAD, IdeaStatus.RETIRED]))
+        .order_by(ResearchIdeaORM.created_at.desc())
+        .limit(limit * 3)
+    ):
+        if len(out) >= limit:
+            break
+        cell = s.get(CellORM, i.cell_id)
+        if i.status != IdeaStatus.DONE and not (i.extra or {}).get("why_dead"):
+            continue  # unfinished (e.g. retired mid-test): no outcome to learn from
+        out.append(
+            {
+                "idea": i.title[:80],
+                "meaning": i.mechanism[:160],
+                "dataset_category": cell.category if cell else "",
+                "region": cell.region if cell else "",
+                "best_sharpe": round(i.best_sharpe, 2),
+                "outcome": "passed the submission line"
+                if i.status == IdeaStatus.DONE
+                else str((i.extra or {}).get("why_dead", "stopped"))[:120],
+            }
+        )
+    return out
 
 
 def _family_lines(fields: list[FieldORM]) -> list[dict[str, str]]:
