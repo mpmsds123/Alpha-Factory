@@ -129,3 +129,24 @@ def test_step2_dataset_without_usable_fields_is_closed() -> None:
     with ledger.session() as s:
         c = s.get(CellORM, "USA|1|TOP3000|thin")
         assert c is not None and c.state == CellState.EXHAUSTED
+
+
+def test_step2_keeps_only_fields_the_scanner_found_signal_in(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    (tmp_path / "USA_est_v6_1阶.csv").write_text(
+        "field,sharpe,turnover\neps_mean,1.9,0.2\neps_list,0.3,0.2\n", encoding="utf-8"
+    )
+    ledger = Ledger("sqlite://")
+    with ledger.session() as s:
+        s.add(cell("est", 0.9))
+    rows = {
+        "est": [
+            {"id": "eps_mean", "type": "MATRIX", "coverage": 0.85},
+            {"id": "eps_list", "type": "VECTOR", "coverage": 0.70},
+        ]
+    }
+    api = FakePlatform(lambda e, st: is_metrics(0.0, 0.0), rows)
+    config = FactoryConfig()
+    config.scanner_runs = str(tmp_path)
+    assert study.load_fields(api, ledger, "USA|1|TOP3000|est", config) == 1
+    with ledger.session() as s:
+        assert [f.field_id for f in study.usable_fields(s, "USA|1|TOP3000|est")] == ["eps_mean"]

@@ -80,3 +80,17 @@ def test_api_reuses_live_session(monkeypatch) -> None:  # type: ignore[no-untype
     live = object()
     monkeypatch.setattr(cli, "_live_session", live)
     assert cli._api().client.session is live
+
+
+def test_scanner_signal_fields(tmp_path: Path) -> None:
+    from alpha_orchestrator.factory.study import scanner_signal_fields
+
+    (tmp_path / "USA_ds1_v6_1阶.csv").write_text(
+        "field,sharpe,turnover\nf_hit,-1.7,0.2\nf_weak,1.2,0.2\nf_churn,2.0,0.9\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "USA_ds1_v6_2阶.csv").write_text(
+        "field,sharpe,turnover\nf_two,1.6,0.1\n", encoding="utf-8"
+    )
+    assert scanner_signal_fields(str(tmp_path), "USA", "ds1") == {"f_hit", "f_two"}
+    assert scanner_signal_fields(str(tmp_path), "USA", "other") is None

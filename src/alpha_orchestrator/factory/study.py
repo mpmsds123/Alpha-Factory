@@ -19,7 +19,8 @@ from alpha_orchestrator.factory.ledger import Ledger
 from alpha_orchestrator.factory.models import CellORM, CellState, FieldORM
 from alpha_orchestrator.factory.quarantine import exception_scope
 
-DESIGN = "v5"  # 10/15 晚: 侦察+有信号才加码; earlier verdicts do not count (reset_old_verdicts)
+# 11/02: only fields the scanner found signal in; v5 datasets are redone (reset_old_verdicts)
+DESIGN = "v6"
 FILL_DAYS = 63  # 第 2 步: quarterly data carried one quarter (官方小贴士 10)
 NUMERIC_TYPES = ("MATRIX", "VECTOR")
 
@@ -227,6 +228,36 @@ def prep(field_id: str, field_type: str, category: str = "fundamental") -> str:
     return base
 
 
+SIGNAL_SHARPE = 1.58  # 11/02: a field "has signal" once any scanner template on it reaches
+# |Sharpe| >= 1.58 with turnover 1-70%. In the scanner's data such a field passes again in
+# another template 23% of the time, against ~0% for fields that never passed.
+ORDER_FILE = re.compile(r"^([A-Z]+)_(.+?)(?:_v\d+)?_\d阶\.csv$")
+
+
+def scanner_signal_fields(folder: str, region: str, dataset: str) -> set[str] | None:
+    """Field ids the template scanner found signal in for this dataset, from all of its
+    order files. None when the scanner has no results for the dataset at all."""
+    root = Path(folder).expanduser()
+    if not root.is_dir():
+        return None
+    seen = False
+    hits: set[str] = set()
+    for f in root.iterdir():
+        m = ORDER_FILE.match(f.name)
+        if not m or (m.group(1), m.group(2)) != (region, dataset):
+            continue
+        seen = True
+        with f.open(encoding="utf-8", newline="") as fh:
+            for r in csv.DictReader(fh):
+                try:
+                    sharpe, turnover = abs(float(r["sharpe"])), float(r["turnover"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if sharpe >= SIGNAL_SHARPE and 0.01 <= turnover <= 0.70 and r.get("field"):
+                    hits.add(str(r["field"]))
+    return hits if seen else None
+
+
 def load_fields(api: BrainAPI, ledger: Ledger, cell_id: str, config: FactoryConfig) -> int:
     """Fetches the dataset's fields and keeps the numeric ones covering at least
     `min_coverage` of the universe. Returns how many are usable."""
@@ -241,6 +272,7 @@ def load_fields(api: BrainAPI, ledger: Ledger, cell_id: str, config: FactoryConf
         existing = {
             f.field_id: f for f in s.scalars(select(FieldORM).where(FieldORM.cell_id == cell_id))
         }
+        loaded: list[FieldORM] = []
         for r in rows:
             field_type = str(r.get("type") or "")
             coverage = float(r.get("coverage") or 0.0)
@@ -253,13 +285,37 @@ def load_fields(api: BrainAPI, ledger: Ledger, cell_id: str, config: FactoryConf
             f.eligible = ok
             f.prep = prep(f.field_id, field_type, category) if ok else ""
             s.add(f)
+            loaded.append(f)
             usable += ok
+        signal = (
+            scanner_signal_fields(config.scanner_runs, region, dataset)
+            if config.scanner_runs
+            else None
+        )
+        if signal is not None:
+            # Step 1 is the scanner: the LLM only works on fields where it found signal.
+            usable = 0
+            for f in loaded:
+                if f.eligible:
+                    f.eligible = f.field_id in signal
+                    usable += f.eligible
         cell = _cell(s, cell_id)
         cell.state = CellState.RESEARCH if usable else CellState.EXHAUSTED
         cell.plan = {**(cell.plan or {}), "design": DESIGN, "usable_fields": usable}
         if not usable:
-            cell.stop_reason = f"no numeric field covers {floor:.0%} of the universe"
-        ledger.log(s, "fields_loaded", cell_id, total=len(rows), usable=usable)
+            cell.stop_reason = (
+                "the scanner found no field with signal in this dataset"
+                if signal is not None
+                else f"no numeric field covers {floor:.0%} of the universe"
+            )
+        ledger.log(
+            s,
+            "fields_loaded",
+            cell_id,
+            total=len(rows),
+            usable=usable,
+            scanner_signal=None if signal is None else len(signal),
+        )
     return usable
 
 
