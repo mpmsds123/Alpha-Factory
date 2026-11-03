@@ -133,6 +133,10 @@ class FactoryConfig:
     # enhance; the program checks every proposal. Off = fixed thresholds only (current design).
     pool_review: bool = False
     pool_review_max_calls: int = 10  # per dataset; about one review per 5 ideas
+    # v7 (2026-11-03, modelled on R&D-Agent(Q)): random dataset order, scanner fields marked
+    # instead of filtered, past ideas fed to idea generation, menu + Thompson-sampling
+    # refinement, 6 ideas in flight. "v6" keeps the earlier behaviour.
+    design: str = "v6"
     budget: Budget = field(default_factory=Budget)
     thresholds: Thresholds = field(default_factory=Thresholds)
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -154,6 +158,7 @@ class FactoryConfig:
             quarantine_exception=dict(raw.get("quarantine_exception") or {}),
             pool_review=bool(raw.get("pool_review", cls.pool_review)),
             pool_review_max_calls=int(raw.get("pool_review_max_calls", cls.pool_review_max_calls)),
+            design=str(raw.get("design", cls.design)),
             budget=Budget(**raw.get("budget", {})),
             thresholds=Thresholds(**raw.get("thresholds", {})),
             llm=LLMConfig(**raw.get("llm", {})),

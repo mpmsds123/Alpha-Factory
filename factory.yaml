@@ -2,8 +2,9 @@
 db_path: ~/.alpha_factory/factory.db     # 账本，放在仓库外
 reports_dir: reports                     # 面板（含真实表达式，已 gitignore）
 scanner_progress: ~/Desktop/因子挖掘/scanner/runs/数据集进度.csv   # 旧，已不用
-scanner_runs: ~/Desktop/因子挖掘/scanner/runs   # 第 3 问：只挖扫描器一阶命中率 ≥ 2% 的数据集
-only_datasets: []                       # Production: existing scanner eligibility/ranking; one active dataset
+scanner_runs: ~/Desktop/因子挖掘/scanner/runs   # v7：只用来给字段做标记，不再用来挑数据集或筛字段
+only_datasets: []                       # 空 = v7 从全部数据集里随机抽
+design: v7                              # v7（11/03）：随机选数据集、点子记忆、菜单改法 + Thompson sampling、同时 6 个点子
 
 budget:
   v1_daily_cap: 1000         # Factory allocation: at most 1,000 launched children / allocation day
@@ -47,5 +48,5 @@ llm:
 policy:
   max_submissions_per_day: 4
   auto_submit: false                     # 提交永远由你确认
-  regions: []                            # 空 = 你账号能用的全部地区
+  regions: [USA, GLB, EUR, ASI, AMR, JPN, GBR, DEU, ALL]   # v7：不抽 CHN、IND（你的经验：这两个地区不出货）
   delays: [1]
