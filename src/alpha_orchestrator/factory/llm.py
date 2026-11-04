@@ -508,6 +508,8 @@ class FactoryLLM:
                 "this dataset measures it in a clearly different way.",
                 "A field marked scanner_found_signal passed an earlier template scan. It is "
                 "evidence, not a requirement.",
+                "Skip identifier and metadata fields (names, name lengths, tickers, codes, "
+                "classification labels): they carry no economic meaning.",
             ]
         data = self.ask("field_groups", json.dumps(prompt, ensure_ascii=False), strong=True)
         return [g for g in (data.get("groups") or []) if isinstance(g, dict)][:n]

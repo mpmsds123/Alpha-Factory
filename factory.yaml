@@ -48,5 +48,5 @@ llm:
 policy:
   max_submissions_per_day: 4
   auto_submit: false                     # 提交永远由你确认
-  regions: [USA, GLB, EUR, ASI, AMR, JPN, GBR, DEU, ALL]   # v7：不抽 CHN、IND（你的经验：这两个地区不出货）
+  regions: [USA, GLB, EUR, ASI, AMR, JPN, GBR, DEU]   # v7：不抽 CHN、IND（你的经验：不出货）；ALL 平台不允许普通回测（11/04 被拒）
   delays: [1]

@@ -1058,7 +1058,7 @@ class Engine:
             stats = self._fix_stats(s)
             menu = []
             for name in fixes.MENU[problem]:
-                if name in tried:
+                if name in tried or fixes.already_applied(name, parent.expression):
                     continue
                 won, lost = stats.get((problem, name), [0, 0])
                 menu.append(

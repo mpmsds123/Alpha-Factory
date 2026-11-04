@@ -210,3 +210,20 @@ def test_weekly_report_shows_the_funnel_bottleneck_and_fix_table(tmp_path) -> No
     assert any(k.startswith("改法：") and "liquidity" in k for k in rows)
     assert "瓶颈（通过率最低的一步）" in rows
     assert write_weekly(ledger, cfg).exists()
+
+
+def test_unlisted_robustness_checks_are_diagnosed_by_pattern() -> None:
+    assert fixes.diagnose("LOW_ASI_JPN_SHARPE") == "fails in part of the universe"
+    assert fixes.diagnose("LOW_ROBUST_UNIVERSE_RETURNS") == "fails in part of the universe"
+    assert (
+        fixes.diagnose("LOW_ROBUST_UNIVERSE_SHARPE.WITH_RATIO") == "fails in part of the universe"
+    )
+    assert fixes.diagnose("IS_LADDER_SHARPE,LOW_ASI_JPN_SHARPE") == "unstable over time"
+    assert fixes.diagnose("LOW_DURATION") == fixes.OTHER
+
+
+def test_a_wrapper_fix_is_not_applied_twice() -> None:
+    once = fixes.FIXES["liquidity_bucket_neutralize"].shape.format(f="rank(x)")  # type: ignore[union-attr]
+    assert fixes.already_applied("liquidity_bucket_neutralize", once)
+    assert not fixes.already_applied("cap_bucket_neutralize", once)
+    assert not fixes.already_applied("raise_decay", once)
