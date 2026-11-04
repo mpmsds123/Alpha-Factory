@@ -145,12 +145,40 @@ def fail_set(fails: str | None) -> set[str]:
     return {x for x in (fails or "").split(",") if x}
 
 
+_REGION_SHARPE = re.compile(r"LOW_[A-Z]+(?:_[A-Z]+)*_SHARPE")
+
+
+def _classify(check: str) -> str | None:
+    """Checks not named in PROBLEM_ORDER, by pattern. The 2026-11-04 run met
+    LOW_ASI_JPN_SHARPE and LOW_ROBUST_UNIVERSE_* on 79 variants; before this they fell into
+    OTHER and no fix aimed at them (0 of 79 helped)."""
+    if "LADDER" in check or "2Y" in check:
+        return "unstable over time"
+    if "UNIVERSE" in check or (_REGION_SHARPE.fullmatch(check) and check != "LOW_SHARPE"):
+        return "fails in part of the universe"
+    return None
+
+
 def diagnose(fails: str | None) -> str:
     got = fail_set(fails)
     for problem, checks in PROBLEM_ORDER:
         if got & checks:
             return problem
+    found = {_classify(c) for c in got} - {None}
+    for problem, _ in PROBLEM_ORDER:
+        if problem in found:
+            return problem
     return OTHER
+
+
+def already_applied(name: str, expression: str) -> bool:
+    """A wrapper fix is not applied twice (the 11-04 run nested the same decile wrapper)."""
+    shape = FIXES[name].shape
+    if shape is None:
+        return False
+    head, tail = (_norm(x) for x in shape.split("{f}"))
+    e = _norm(expression)
+    return e.startswith(head) and e.endswith(tail)
 
 
 def score(fails: str | None, sharpe: float | None) -> tuple[int, float]:

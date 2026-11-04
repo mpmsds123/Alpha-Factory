@@ -20,6 +20,7 @@ from alpha_orchestrator.factory.models import (
     IdeaStatus,
     LLMCallORM,
     ResearchIdeaORM,
+    ReviewORM,
     Stage,
 )
 
@@ -29,7 +30,8 @@ FUNNEL = (
     "过运气线（首批最好 |Sharpe| ≥ 1.0）",
     "改进后 Sharpe ≥ 1.2",
     "过四项线（Sharpe、Fitness、换手、margin）",
-    "平台检查全过 = 可提交",
+    "回测内平台检查全过",
+    "通过提交检查 = 进待挑选表",
 )
 
 
@@ -77,6 +79,8 @@ def weekly_rows(
             )
             if start <= _aware(i.created_at) < end
         ]
+        reviewed = set(s.scalars(select(ReviewORM.candidate_id)))
+        fake = cfg.thresholds.suspicious_sharpe
         counts = [0] * len(FUNNEL)
         for i in ideas:
             cell = s.get(CellORM, i.cell_id)
@@ -84,7 +88,10 @@ def weekly_rows(
             mine = [
                 c
                 for c in (s.get(CandidateORM, k) for k in ids)
-                if c is not None and c.sharpe is not None and c.stage != Stage.ROBUST
+                if c is not None
+                and c.sharpe is not None
+                and c.stage != Stage.ROBUST
+                and abs(c.sharpe) <= fake  # |Sharpe| > 3 is an artefact, not a find
             ]
             first = [abs(c.sharpe or 0) for c in mine if c.stage == Stage.FIELD]
             reached = [
@@ -93,6 +100,7 @@ def weekly_rows(
                 any((c.sharpe or 0) >= NEAR_MISS for c in mine),
                 cell is not None and any(_four_lines(c, cell, cfg) for c in mine),
                 cell is not None and any(_four_lines(c, cell, cfg) and not c.fails for c in mine),
+                any(k in reviewed for k in ids),
             ]
             for k, ok in enumerate(reached):
                 counts[k] += ok
