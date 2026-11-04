@@ -155,13 +155,20 @@ def login(
             typer.echo("还没通过（或链接已过期）。完成后再按回车。")
     except AuthenticationFailed as exc:
         typer.echo(str(exc))
-        raise typer.Exit(1) from exc
-    finally:
         session.close()
-    if then_run:
-        global _live_session
-        _live_session = session
+        raise typer.Exit(1) from exc
+    if not then_run:
+        session.close()
+        return
+    # The run reuses this open session; closing it first made every request fail with
+    # "Cannot send a request, as the client has been closed" (2026-11-03).
+    global _live_session
+    _live_session = session
+    try:
         run(config=config)
+    finally:
+        _live_session = None
+        session.close()
 
 
 @app.command()
