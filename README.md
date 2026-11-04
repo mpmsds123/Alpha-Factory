@@ -2,23 +2,24 @@
 
 Alpha Factory asks a language model to propose candidate trading formulas from a dataset's field descriptions, then lets deterministic software decide which proposals deserve backtest budget. Every backtest, decision and stop is recorded in a ledger, so the search itself can be audited and its design hypotheses tested against its own data.
 
-**Status (data through 2026-10-31): the factory has not produced an accepted alpha.** The best in-sample Sharpe is 1.83; it fails two robustness checks. This page reports what the design assumes, what the ledger says about each assumption, and which parts of the design the data currently contradict.
+**Status: the v6 design has ended without an accepted alpha; v7 starts on 2026-11-04.** v6 found 61 formulas with in-sample Sharpe ≥ 1.58 (best 2.00), and every one failed at least one platform robustness check. v7 changes the refinement step to target exactly those failures (Section 2.1). Sections 3 to 8 document v6 and the evidence that motivated v7.
 
-| Current design, 2026-10-16 to 2026-10-31 | |
+| v6, final (2026-10-16 to 2026-11-02) | |
 |---|---:|
-| Backtests completed (12 more in flight or quarantined) | **817** |
-| Ideas tested to a verdict | **186** (4 more in progress) |
-| Datasets worked | **7** (3 regions) |
-| Ideas passing the first-formula gate (best \|Sharpe\| ≥ 0.8) | **53** (28%) |
-| Formulas with Sharpe ≥ 1.58 | **22**, from 8 ideas |
-| Ideas with zero failed platform checks at Sharpe ≥ 1.58 | **0** |
-| Improvement variants that beat their parent by the 0.35 rule | **0 of 168** |
+| Backtests completed | **1,039** |
+| Ideas tested to a verdict | **235** |
+| Datasets worked | **12** (3 regions) |
+| Ideas stopped before refinement (first-formula gate) | **181** (77.0%) |
+| Formulas with Sharpe ≥ 1.58 | **61**, from 13 ideas |
+| …of which with zero failed platform checks | **0** (sub-universe check failed 49, sub-period check 40) |
+| LLM-written refinement variants that beat their parent by the 0.35 rule | **0 of 206** (mean ΔSharpe −0.215, 95% bootstrap CI −0.257 to −0.174) |
+| LLM cost | ¥22.3 over 415 calls |
 
 ## Table of contents
 
 1. [Problem](#1-problem)
-2. [Design](#2-design)
-3. [Statistical design](#3-statistical-design)
+2. [Design](#2-design) — [2.1 v7](#21-v7-design-from-2026-11-04)
+3. [Statistical design](#3-statistical-design-v6)
 4. [Parameters](#4-parameters)
 5. [Assumptions](#5-assumptions)
 6. [Evidence](#6-evidence)
@@ -67,7 +68,37 @@ Operational rules that matter for the statistics:
 - **Dataset budget.** At most 1,000 simulations per dataset, at most 2 ideas in flight, and a dataset closes after two consecutive failures of the LLM to produce a valid new idea.
 - **Human gate.** Submission requires an explicit approval command; at most 4 submissions per day and 8 per dataset.
 
-## 3. Statistical design
+### 2.1 v7 design (from 2026-11-04)
+
+v7 keeps the ledger, budgets, gates and human submission gate of v6 and changes four things. The refinement loop follows the analysis-plus-bandit structure of R&D-Agent(Q) ([NeurIPS 2025](https://arxiv.org/abs/2505.15155)): a diagnosis of each experiment, then a Thompson-sampling scheduler choosing the next action. Here the actions are refinement types rather than factor-versus-model steps, and the budget is a hard daily quota.
+
+```mermaid
+flowchart TD
+  A["Random dataset (two regions with no yield in earlier scans excluded)"] --> B["LLM groups fields into ideas; sees the last 40 finished ideas and their outcomes"]
+  B --> C["LLM writes 3 first-order formulas per idea"]
+  C --> D{"Gate: best |Sharpe| ≥ 1.0 ?"}
+  D -- no --> X["Idea dead"]
+  D -- yes --> E["Program diagnoses the best formula from its failed platform checks"]
+  E --> F["LLM picks up to 3 fixes from that problem's menu, one reason each"]
+  F --> G["Thompson sampling: theta ~ Beta(1+successes, 1+failures) per (problem, fix); top 3 run"]
+  G --> H{"Variant fails fewer checks than parent?"}
+  H -- yes --> E
+  H -- "no, twice in a row or 3 rounds" --> X
+  E -- "line passed" --> K["Robustness, correlation, human review. Nothing is submitted automatically."]
+```
+
+| Change | Evidence from v6 | v7 rule |
+|---|---|---|
+| Refinement | LLM free-form variants: 0 of 206 gained 0.35; mean −0.215 | The program states the problem; the LLM only chooses among 12 fixed structural or setting fixes; the program applies them |
+| What to fix | All 61 formulas with Sharpe ≥ 1.58 failed a robustness check | Diagnosis order: turnover, concentration, Sharpe, Fitness, sub-period stability, sub-universe; each has its own menu (bucketed comparison, event-gated trading, smoothing, neutralisation, decay) |
+| Budget across fixes | v6 applied a fixed set of six wrappers to every near-miss | Thompson sampling over (problem, fix); success = fewer failed checks than the parent. Past rows that match a menu fix seed the counts |
+| Ideas | Each idea was generated without seeing earlier ones | Idea generation sees the last 40 finished ideas (meaning, best Sharpe, why it stopped), no formula text |
+| Dataset order | Ranked by a separate scanner's hit rate, which assumes datasets the scanner found empty are empty | Uniformly random among unworked datasets; a dataset without signal costs about 24 backtests before it closes |
+| Throughput | 2 ideas in flight used 17% of the quota | 6 ideas in flight |
+
+The control for the whole factory is the sister template scanner on the same platform. Each Friday the program writes a report: quota use, the idea funnel, the step with the lowest pass rate, the success rate of every fix, and cost per submittable idea. Results go to the [changelog](CHANGELOG.md).
+
+## 3. Statistical design (v6)
 
 ### 3.1 First-formula gate
 
