@@ -2,73 +2,47 @@
 
 Alpha Factory asks a language model to propose candidate trading formulas from a dataset's field descriptions, then lets deterministic software decide which proposals deserve backtest budget. Every backtest, decision and stop is recorded in a ledger, so the search itself can be audited and its design hypotheses tested against its own data.
 
-**Status: the v6 design has ended without an accepted alpha; v7 starts on 2026-11-04.** v6 found 61 formulas with in-sample Sharpe ≥ 1.58 (best 2.00), and every one failed at least one platform robustness check. v7 changes the refinement step to target exactly those failures (Section 2.1). Sections 3 to 8 document v6 and the evidence that motivated v7.
+## Current performance
 
-| v6, final (2026-10-16 to 2026-11-02) | |
-|---|---:|
-| Backtests completed | **1,039** |
-| Ideas tested to a verdict | **235** |
-| Datasets worked | **12** (3 regions) |
-| Ideas stopped before refinement (first-formula gate) | **181** (77.0%) |
-| Formulas with Sharpe ≥ 1.58 | **61**, from 13 ideas |
-| …of which with zero failed platform checks | **0** (sub-universe check failed 49, sub-period check 40) |
-| LLM-written refinement variants that beat their parent by the 0.35 rule | **0 of 206** (mean ΔSharpe −0.215, 95% bootstrap CI −0.257 to −0.174) |
-| LLM cost | ¥22.3 over 415 calls |
+**The current design, v7, went live on 2026-11-03.** In its first 3.3 days it produced 10 formulas from 9 ideas that clear every in-backtest platform check and the Sharpe, Fitness, turnover and margin lines. The previous design, v6, produced none in 1,039 backtests.
 
-## Table of contents
+| | v6 (2026-10-16 to 11-02) | v7 (2026-11-03 to 11-06) |
+|---|---:|---:|
+| Backtests completed | 1,039 | **1,992** |
+| Daily quota used¹ | 17% | **59.7%** |
+| Formulas with Sharpe ≥ 1.58 | 61 | **214** |
+| …that also clear every in-backtest check and all four lines | **0** | **10** (9 ideas, best Sharpe 1.89) |
+| Refinement attempts that improved on their parent | 0 of 206 (free-form LLM rewrites, 0.35 Sharpe rule) | 48 of 408 (menu fixes; success = fewer failed checks) |
+| Submitted to the platform | 0 | 0 |
 
-1. [Problem](#1-problem)
-2. [Design](#2-design) — [2.1 v7](#21-v7-design-from-2026-11-04)
-3. [Statistical design](#3-statistical-design-v6)
-4. [Parameters](#4-parameters)
-5. [Assumptions](#5-assumptions)
-6. [Evidence](#6-evidence)
-7. [Results to date](#7-results-to-date)
-8. [Limitations and open questions](#8-limitations-and-open-questions)
-9. [Repository and reproduction](#9-repository-and-reproduction)
+¹ v6: share of the daily limit on its 5 active allocation days; v7: share of the daily limit over its 3.3 calendar days.
 
-**Terms used below.** *Idea*: a group of at most three related data fields plus an economic reason; the LLM writes several formulas per idea. *Formula*: one expression combining fields with operators. *Backtest*: one in-sample simulation of a formula (about ten years of daily data). *Sharpe*: annualised mean-over-volatility of that backtest's daily returns. *Gate*: a threshold on first-formula Sharpe below which an idea is dropped. *Line*: the full acceptance standard (Section 3.5). *Platform checks*: robustness tests the backtest platform runs on each result. *Allocation day*: the platform's quota day, which resets at 21:00 Pacific.
+v7 idea funnel (528 ideas finished in the week to 2026-11-06):
 
-## 1. Problem
+| Step | Ideas | Pass rate |
+|---|---:|---:|
+| Ideas with ≥ 1 valid backtest | 528 | |
+| Best first formula \|Sharpe\| ≥ 1.0 | 115 | 21.8% |
+| Any backtest with Sharpe ≥ 1.2 | 97 | 84.3% |
+| Sharpe, Fitness, turnover and margin lines all met | 28 | 28.9% |
+| Every in-backtest platform check passed | 9 | 32.1% |
+| Submission check passed, in the human pick-list | 0 | 0% |
 
-**Setting.** A research platform grants a fixed simulation quota per day (1,000 for this factory). A dataset offers hundreds to thousands of fields. The universe of formulas built from them is far larger than the quota, and the backtest that scores a formula is noisy and in-sample.
+**Known issue.** The last step is 0 of 9 because of a defect, not the formulas: 7 of the 9 ideas reached the submission check on a day the account's daily submission limit was already used, and the factory recorded that as a permanent failure. The fix and its test are the plan for the week of 2026-11-09 ([report](CHANGELOG.md#2026-11-06--weekly-report-design-v7)).
 
-**Decision problem.** Choose which dataset to open, which formulas to test, and when to stop each path, so that the expected number of formulas meeting the acceptance line per unit of quota is as large as possible, while keeping the false-discovery risk of the accepted set controlled.
+All figures are in-sample and come from the private ledger; formula text and record-level data are not published.
 
-**Why this is a statistics problem.** Three features make it one.
+## Weekly reports
 
-1. *Selection.* The reported Sharpe of the best of $n$ trials is biased upward. If a formula with no information has Sharpe $S\sim N(0,\sigma^2)$, the expected best absolute value after $n$ independent tries is about $\sigma\sqrt{2\ln n}$. Any rule that picks the best and then reports it must be judged against this "luck bar".
-2. *Sequential decisions.* Each backtest result changes what to test next, so thresholds act as stopping rules whose error rates must be computed, not assumed.
-3. *Small effects, expensive samples.* One sample costs one unit of quota; the effect of an improvement step is a few tenths of a Sharpe unit, comparable to the noise.
+Every Friday the factory's own ledger produces a report: quota use, the idea funnel and its weakest step, the success rate of each refinement fix, cost, errors, and one proposed change with the number it rests on and how next week's data will test it. Full entries are in the [changelog](CHANGELOG.md).
 
-**What the LLM is and is not for.** The LLM supplies hypotheses and variants. It never decides what runs, what stops, or what is submitted. Deterministic code owns validation, budgets, thresholds and the human submission gate. Whether the LLM adds value over undirected search is *not* established (Section 8).
+| Week ending | Design | Backtests | In pick-list | Main finding | Change proposed |
+|---|---|---:|---:|---|---|
+| [2026-11-06](CHANGELOG.md#2026-11-06--weekly-report-design-v7) | v7 | 2,214 | 0 | 7 of 9 ideas at the submission check were blocked only by the account's daily submission limit, recorded as a permanent failure | Treat that check as "retry later" and re-check the held formulas |
 
-## 2. Design
+Earlier dated entries: [2026-10-31 offline audit of the LLM steps](CHANGELOG.md#2026-10-31-evening-offline-audit-of-the-llm-touchpoints), [2026-10-31 ledger re-derivation](CHANGELOG.md#2026-10-31).
 
-```mermaid
-flowchart TD
-  A["Choose dataset: first-order hit rate from a separate scanner ≥ 2%, highest first; each design version once"] --> B["Read fields: numeric, coverage ≥ 60%"]
-  B --> C["LLM groups fields: ≤ 8 groups, ≤ 3 fields each"]
-  C --> D["LLM writes 3 first-order formulas per group; local validation, one retry"]
-  D --> E{"Gate: best |Sharpe| ≥ 0.8 ?"}
-  E -- no --> X["Idea dead"]
-  E -- yes --> F["Improve: LLM diagnoses, 3 one-change variants, ≤ 3 rounds"]
-  F --> G["Enhance near-misses (Sharpe ≥ 1.2): 4 bucketing + 2 event-gated variants"]
-  G --> H{"Line: Sharpe, Fitness, turnover, margin, zero failed checks"}
-  H -- no --> X
-  H -- yes --> I["Robustness: other neutralisation keeps ≥ 50% of Sharpe"]
-  I --> J["Platform checks; correlation to own and production alphas < 0.7"]
-  J --> K["Candidate table for human review. Nothing is submitted automatically."]
-```
-
-Operational rules that matter for the statistics:
-
-- **Quota.** At most 1,000 simulations per allocation day, counted when a request is created, including pending and unknown ones. Only a confirmed rejection releases a reservation.
-- **One unknown stops everything.** If a batch's outcome cannot be reconciled, the factory pauses until a human resolves it, rather than re-sending the work.
-- **Dataset budget.** At most 1,000 simulations per dataset, at most 2 ideas in flight, and a dataset closes after two consecutive failures of the LLM to produce a valid new idea.
-- **Human gate.** Submission requires an explicit approval command; at most 4 submissions per day and 8 per dataset.
-
-### 2.1 v7 design (from 2026-11-04)
+## How it works (v7)
 
 v7 keeps the ledger, budgets, gates and human submission gate of v6 and changes four things. The refinement loop follows the analysis-plus-bandit structure of R&D-Agent(Q) ([NeurIPS 2025](https://arxiv.org/abs/2505.15155)): a diagnosis of each experiment, then a Thompson-sampling scheduler choosing the next action. Here the actions are refinement types rather than factor-versus-model steps, and the budget is a hard daily quota.
 
@@ -96,7 +70,62 @@ flowchart TD
 | Dataset order | Ranked by a separate scanner's hit rate, which assumes datasets the scanner found empty are empty | Uniformly random among unworked datasets; a dataset without signal costs about 24 backtests before it closes |
 | Throughput | 2 ideas in flight used 17% of the quota | 6 ideas in flight |
 
-The control for the whole factory is the sister template scanner on the same platform. Each Friday the program writes a report: quota use, the idea funnel, the step with the lowest pass rate, the success rate of every fix, and cost per submittable idea. Results go to the [changelog](CHANGELOG.md).
+Each Friday the program writes a report from the ledger: quota use, the idea funnel, the step with the lowest pass rate, the success rate of every fix, and cost per submittable idea. See [Weekly reports](#weekly-reports).
+
+## Background, v6 design and evidence
+
+The sections that follow give the problem statement, the v6 design and the ledger evidence that motivated v7.
+
+1. [Problem](#1-problem)
+2. [v6 design](#2-v6-design-2026-10-16-to-2026-11-03)
+3. [Statistical design](#3-statistical-design-v6)
+4. [Parameters](#4-parameters)
+5. [Assumptions](#5-assumptions)
+6. [Evidence](#6-evidence)
+7. [Results to date (v6)](#7-results-to-date-v6-as-of-2026-10-31)
+8. [Limitations and open questions](#8-limitations-and-open-questions)
+9. [Repository and reproduction](#9-repository-and-reproduction)
+
+**Terms used below.** *Idea*: a group of at most three related data fields plus an economic reason; the LLM writes several formulas per idea. *Formula*: one expression combining fields with operators. *Backtest*: one in-sample simulation of a formula (about ten years of daily data). *Sharpe*: annualised mean-over-volatility of that backtest's daily returns. *Gate*: a threshold on first-formula Sharpe below which an idea is dropped. *Line*: the full acceptance standard (Section 3.5). *Platform checks*: robustness tests the backtest platform runs on each result. *Allocation day*: the platform's quota day, which resets at 21:00 Pacific.
+
+## 1. Problem
+
+**Setting.** A research platform grants a fixed simulation quota per day (1,000 for this factory). A dataset offers hundreds to thousands of fields. The universe of formulas built from them is far larger than the quota, and the backtest that scores a formula is noisy and in-sample.
+
+**Decision problem.** Choose which dataset to open, which formulas to test, and when to stop each path, so that the expected number of formulas meeting the acceptance line per unit of quota is as large as possible, while keeping the false-discovery risk of the accepted set controlled.
+
+**Why this is a statistics problem.** Three features make it one.
+
+1. *Selection.* The reported Sharpe of the best of $n$ trials is biased upward. If a formula with no information has Sharpe $S\sim N(0,\sigma^2)$, the expected best absolute value after $n$ independent tries is about $\sigma\sqrt{2\ln n}$. Any rule that picks the best and then reports it must be judged against this "luck bar".
+2. *Sequential decisions.* Each backtest result changes what to test next, so thresholds act as stopping rules whose error rates must be computed, not assumed.
+3. *Small effects, expensive samples.* One sample costs one unit of quota; the effect of an improvement step is a few tenths of a Sharpe unit, comparable to the noise.
+
+**What the LLM is and is not for.** The LLM supplies hypotheses and variants. It never decides what runs, what stops, or what is submitted. Deterministic code owns validation, budgets, thresholds and the human submission gate. Whether the LLM adds value over undirected search is *not* established (Section 8).
+
+## 2. v6 design (2026-10-16 to 2026-11-03)
+
+```mermaid
+flowchart TD
+  A["Choose dataset: first-order hit rate from a separate scanner ≥ 2%, highest first; each design version once"] --> B["Read fields: numeric, coverage ≥ 60%"]
+  B --> C["LLM groups fields: ≤ 8 groups, ≤ 3 fields each"]
+  C --> D["LLM writes 3 first-order formulas per group; local validation, one retry"]
+  D --> E{"Gate: best |Sharpe| ≥ 0.8 ?"}
+  E -- no --> X["Idea dead"]
+  E -- yes --> F["Improve: LLM diagnoses, 3 one-change variants, ≤ 3 rounds"]
+  F --> G["Enhance near-misses (Sharpe ≥ 1.2): 4 bucketing + 2 event-gated variants"]
+  G --> H{"Line: Sharpe, Fitness, turnover, margin, zero failed checks"}
+  H -- no --> X
+  H -- yes --> I["Robustness: other neutralisation keeps ≥ 50% of Sharpe"]
+  I --> J["Platform checks; correlation to own and production alphas < 0.7"]
+  J --> K["Candidate table for human review. Nothing is submitted automatically."]
+```
+
+Operational rules that matter for the statistics:
+
+- **Quota.** At most 1,000 simulations per allocation day, counted when a request is created, including pending and unknown ones. Only a confirmed rejection releases a reservation.
+- **One unknown stops everything.** If a batch's outcome cannot be reconciled, the factory pauses until a human resolves it, rather than re-sending the work.
+- **Dataset budget.** At most 1,000 simulations per dataset, at most 2 ideas in flight, and a dataset closes after two consecutive failures of the LLM to produce a valid new idea.
+- **Human gate.** Submission requires an explicit approval command; at most 4 submissions per day and 8 per dataset.
 
 ## 3. Statistical design (v6)
 
@@ -262,7 +291,7 @@ After $n=547$ first formulas, pure noise is expected to reach a best $|S|$ of $\
 
 829 backtests over 5 active allocation days against a capacity of 5,000 (17%); peak 321 in a day. Quota was not the limit on active days; the ledger does not record why other days were idle.
 
-## 7. Results to date
+## 7. Results to date (v6, as of 2026-10-31)
 
 | | Completed | Notes |
 |---|---:|---|
