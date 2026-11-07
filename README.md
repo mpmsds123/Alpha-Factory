@@ -13,7 +13,7 @@ Alpha Factory asks a language model to propose candidate trading formulas from a
 | Formulas with Sharpe ≥ 1.58 | 61 | **214** |
 | …that also clear every in-backtest check and all four lines | **0** | **10** (9 ideas, best Sharpe 1.89) |
 | Refinement attempts that improved on their parent | 0 of 206 (free-form LLM rewrites, 0.35 Sharpe rule) | 48 of 408 (menu fixes; success = fewer failed checks) |
-| Submitted to the platform | 0 | 0 |
+| Submitted to the platform (a human decision) | 0 | 0 (7 awaiting re-check) |
 
 ¹ v6: share of the daily limit on its 5 active allocation days; v7: share of the daily limit over its 3.3 calendar days.
 
@@ -26,9 +26,12 @@ v7 idea funnel (528 ideas finished in the week to 2026-11-06):
 | Any backtest with Sharpe ≥ 1.2 | 97 | 84.3% |
 | Sharpe, Fitness, turnover and margin lines all met | 28 | 28.9% |
 | Every in-backtest platform check passed | 9 | 32.1% |
-| Submission check passed, in the human pick-list | 0 | 0% |
+| Reached the platform's submission check | 9 | 100% |
+| …failed a check on its own merits | 1 | |
+| …same as an alpha already submitted | 1 | |
+| …not yet evaluated: the account's daily submission limit was already used | 7 | |
 
-**Known issue.** The last step is 0 of 9 because of a defect, not the formulas: 7 of the 9 ideas reached the submission check on a day the account's daily submission limit was already used, and the factory recorded that as a permanent failure. The fix and its test are the plan for the week of 2026-11-09 ([report](CHANGELOG.md#2026-11-06--weekly-report-design-v7)).
+**Known issue.** The factory recorded the 7 unevaluated ideas as failed instead of retrying them the next day. The fix, and a re-check of those formulas, is the plan for the week of 2026-11-09 ([report](CHANGELOG.md#2026-11-06--weekly-report-design-v7)).
 
 All figures are in-sample and come from the private ledger; formula text and record-level data are not published.
 
@@ -36,9 +39,9 @@ All figures are in-sample and come from the private ledger; formula text and rec
 
 Every Friday the factory's own ledger produces a report: quota use, the idea funnel and its weakest step, the success rate of each refinement fix, cost, errors, and one proposed change with the number it rests on and how next week's data will test it. Full entries are in the [changelog](CHANGELOG.md).
 
-| Week ending | Design | Backtests | In pick-list | Main finding | Change proposed |
+| Week ending | Design | Backtests | Ideas clearing every in-backtest check | Main finding | Change proposed |
 |---|---|---:|---:|---|---|
-| [2026-11-06](CHANGELOG.md#2026-11-06--weekly-report-design-v7) | v7 | 2,214 | 0 | 7 of 9 ideas at the submission check were blocked only by the account's daily submission limit, recorded as a permanent failure | Treat that check as "retry later" and re-check the held formulas |
+| [2026-11-06](CHANGELOG.md#2026-11-06--weekly-report-design-v7) | v7 | 2,214 | 9 | 7 of the 9 were not evaluated at the submission check because the account's daily submission limit was used, and were recorded as failed | Treat that check as "retry later" and re-check the held formulas |
 
 Earlier dated entries: [2026-10-31 offline audit of the LLM steps](CHANGELOG.md#2026-10-31-evening-offline-audit-of-the-llm-touchpoints), [2026-10-31 ledger re-derivation](CHANGELOG.md#2026-10-31).
 
