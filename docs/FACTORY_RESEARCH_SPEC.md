@@ -89,3 +89,33 @@ each have their own evidence. Report their status separately when releasing.
   probe and the local session records a pending biometric challenge. Live recovery
   and canary acceptance remain pending. After verification, recover the in-flight
   batch and reconcile it before allocating new live canary work.
+
+## Live recovery and first canary, November 10, 2026
+
+- BRAIN authentication returned HTTP 200 after operator verification. A private
+  SQLite backup passed an integrity check and matched the source table counts.
+- Recovery ran with both daily caps set to zero. The old progress URL returned
+  HTTP 404 and its nine children were recorded as results lost. This recovery
+  created zero new simulations.
+- Ten saved candidates received fresh submission checks. Zero entered the review
+  list. The new failures included eight `LOW_2Y_SHARPE` and seven `PROD_CORRELATION`
+  responses, with overlap between failure reasons.
+- The first live canary reserved ten children on the same ledger. After BRAIN
+  returned the progress URL, the worker stopped before its first poll. A new
+  worker used the saved URL and reconciled ten distinct results to the ten original
+  candidate IDs. There was one accepted batch, with zero duplicate creates or
+  outstanding batches when this stage ended.
+
+## Expanded canary, November 10, 2026
+
+- The second stage used a cumulative cap of 100 and enabled the paired refinement
+  trial. It reached its time limit with 34 settled results and six accepted children
+  in flight across both stages. A zero-cap recovery settled those six. The final
+  audit matched 40 distinct BRAIN results to 40 original candidate IDs across six
+  accepted batches. No duplicate results or unresolved batches remained.
+- Three live pairs settled. The model and fixed rule chose the same fix in every
+  pair and each pair used one shared simulation. Two shared fixes cleared their
+  target checks. The three agreements leave comparative improvement unmeasured.
+- Zero new candidates entered the review list. The 100-child ceiling was exercised
+  with a 40-child sample. Full-volume and scheduled acceptance still require
+  observation across an actual quota reset and subsequent rollout verification.
