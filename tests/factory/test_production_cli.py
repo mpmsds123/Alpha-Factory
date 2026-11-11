@@ -59,6 +59,37 @@ def test_context_lock_contention_has_explicit_safe_exit(monkeypatch) -> None:  #
     assert result.exit_code == 4 and "安全暂停" in result.output
 
 
+def test_review_recheck_uses_existing_candidates_without_starting_research(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from alpha_orchestrator.factory import select as selection
+
+    path = tmp_path / "factory.db"
+    ledger = Ledger.at(path)
+    cfg = FactoryConfig()
+    calls = []
+
+    def ensure() -> None:
+        with pytest.raises(WorkerAlreadyRunning):
+            Ledger.at(path)
+        calls.append("auth")
+
+    def recheck(*_args: object) -> list[str]:
+        calls.append("check")
+        return ["review-id"]
+
+    session = SimpleNamespace(ensure=ensure, close=lambda: calls.append("closed"))
+    monkeypatch.setattr(cli, "_ctx", lambda _: (cfg, ledger))
+    monkeypatch.setattr(
+        cli, "_api", lambda: SimpleNamespace(client=SimpleNamespace(session=session))
+    )
+    monkeypatch.setattr(selection, "store_passing", recheck)
+    result = CliRunner().invoke(cli.app, ["review", "recheck"])
+    assert result.exit_code == 0 and "新增待挑选 1 条" in result.output
+    assert calls == ["auth", "check", "closed"]
+
+
 def test_cli_owns_ledger_during_auth_and_releases_after_run(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     from alpha_orchestrator.factory import engine, record
 

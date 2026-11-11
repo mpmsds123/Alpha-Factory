@@ -137,6 +137,8 @@ class FactoryConfig:
     # instead of filtered, past ideas fed to idea generation, menu + Thompson-sampling
     # refinement, 6 ideas in flight. "v6" keeps the earlier behaviour.
     design: str = "v6"
+    direction_trial: bool = False  # v7: compare model-directed dataset research to random
+    refinement_trial: bool = False  # v7: compare one LLM and one rule choice on the same parent
     budget: Budget = field(default_factory=Budget)
     thresholds: Thresholds = field(default_factory=Thresholds)
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -159,6 +161,8 @@ class FactoryConfig:
             pool_review=bool(raw.get("pool_review", cls.pool_review)),
             pool_review_max_calls=int(raw.get("pool_review_max_calls", cls.pool_review_max_calls)),
             design=str(raw.get("design", cls.design)),
+            direction_trial=bool(raw.get("direction_trial", cls.direction_trial)),
+            refinement_trial=raw.get("refinement_trial", cls.refinement_trial) is True,
             budget=Budget(**raw.get("budget", {})),
             thresholds=Thresholds(**raw.get("thresholds", {})),
             llm=LLMConfig(**raw.get("llm", {})),

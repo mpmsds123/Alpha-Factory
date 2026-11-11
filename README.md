@@ -1,10 +1,89 @@
 # Alpha Research Orchestrator
 
-For the private **Alpha Factory** runtime (`alpha-factory`), use the
-[production runbook](docs/PRODUCTION_RUNBOOK.md). It documents the 1,000-child daily cap,
-restart/reconciliation behavior, live acceptance gates and deployment limits. The
-`alpha-lab` workflow below is a separate, older entrypoint.
+This repository has two entrypoints:
 
+- **`alpha-factory`** (current): the private research runtime for WorldQuant BRAIN, described next.
+- **`alpha-lab`** (older): an offline-first replay engine, described under
+  [alpha-lab](#alpha-lab-older-entrypoint).
+
+Project history is in [CHANGELOG.md](CHANGELOG.md).
+
+## Alpha Factory
+
+An LLM proposes field groups and formulas; deterministic code validates, budgets and gates
+them. Nothing is submitted automatically.
+
+**Dataset selection.** v7 samples eligible dataset, region, delay and universe combinations
+uniformly. Scanner results can annotate fields during hypothesis generation. The optional
+[research direction trial](#research-direction-trial) gives the model a decision at this step.
+
+**Gates** (values from `factory.yaml` and `src/alpha_orchestrator/factory/`):
+
+- The first batch's best eligible |Sharpe| must reach 1.0 to enter refinement, unless a
+  formula already clears the regular gate.
+- v7 proposes changes from a menu tied to the failed check. Thompson sampling chooses variants
+  from that menu using prior repairs. These histories guide search and are subject to selection bias.
+- Pass line for the shortlist: Sharpe >= 1.58 (2.08 for CHN) and Fitness >= 1, with a
+  correlation bound of 0.7 and all platform checks passing.
+
+**Budget and recovery.** At most 1,000 child simulations per allocation day; the day resets at
+21:00 America/Los_Angeles. Reservations are counted when a request is created, including pending
+and unknown outcomes. One worker owns one ledger. An ambiguous creation response blocks further
+runs until the batch is reconciled by hand.
+
+**Human control.** `auto_submit` is false. A surviving formula goes to a review list; submission
+happens only through `alpha-factory review approve`, which re-checks the formula first.
+
+**Status and limits.** The factory is a production candidate: live acceptance is not complete,
+and nothing here establishes an economic edge. Offline tests show engineering controls, not
+alpha quality. Operating procedure, recovery steps and acceptance criteria are in the
+[production runbook](docs/PRODUCTION_RUNBOOK.md).
+
+**Not published.** Real expressions, results, reports and the ledger stay on the author's
+machine (see `.gitignore`).
+
+### Research direction trial
+
+Set `direction_trial: true` with `design: v7` in a pilot config. Automatic selection draws
+up to eight eligible combinations. The model nominates one and records its metadata basis,
+economic mechanism, competing explanation and falsifier. It can cite a verified reference ID
+from the built-in evidence set or flag that the mechanism is outside that set. A fair coin
+assigns the next research episode to that nomination with its research brief or to a uniform
+draw from the same shortlist.
+The control still uses v7 to generate and refine alphas. Explicit `only_datasets` and a pool
+with one remaining choice bypass assignment. Existing research continues under its prior plan.
+
+The shortlist, proposal and arm are saved before loading the chosen fields. The first queued
+formula is recorded before the simulator runs. If its direction agrees with the idea and it
+has a new, usable result, the record shows its signed in-sample Sharpe before any mirroring or
+refinement. This is a screening observation. It does not execute the economic falsifier or
+establish that the effect holds over the stated return horizon.
+
+`record.html` shows assignments, closed combinations, combinations with a regular-gate hit,
+distinct regular-gate candidates generated in the episode, and settled simulation records
+at closure.
+Compare the arms at the same settings and inspect unresolved assignments separately. Treat the
+combination as the observation. Related formulas share fields, stocks and dates. The trial
+compares **dataset choice plus the research brief**, and later assignments use a pool and
+history changed by previous episodes. The report is descriptive and makes no significance
+claim. A full comparison should predefine a stopping rule and a prospective evaluation period.
+The existing `experiment-freeze` and `experiment-replay` commands are separate from live search.
+
+Design references include [randomized policy evaluation](https://arxiv.org/abs/1003.5956)
+and [multiple testing in expected-return research](https://www.nber.org/papers/w20592).
+
+### Paired refinement trial
+
+Set `refinement_trial: true` with `design: v7` to compare the model's proposed intervention
+with a fixed-rule choice on the same parent. The model records a hypothesis, alternative,
+prediction and falsifier. The factory commits both planned choices and candidate IDs before
+dispatch and scores the recorded target checks when the pair settles. See the
+[research specification](docs/FACTORY_RESEARCH_SPEC.md) for the protocol and release gates.
+
+Use `alpha-factory review recheck` to refresh existing candidates after authentication
+using the platform checks.
+
+## alpha-lab (older entrypoint)
 
 An offline-first, evidence-gated research engine for bounded and reconstructable Alpha
 experiments. SQLite is the source of truth: candidate identities, state transitions, gate
@@ -69,9 +148,8 @@ interpretation. The package contains no submission capability.
 See the detailed [architecture](docs/ARCHITECTURE.md), [sanitized replay case
 study](docs/case-studies/sanitized-replay.md), [test evidence](docs/TEST_EVIDENCE.md), [design
 tradeoffs](docs/DESIGN_TRADEOFFS.md), [known limits](docs/KNOWN_LIMITS.md), and [60-second technical
-explanation](docs/60_SECOND_EXPLANATION.md). For daily use, begin with
-[START_HERE.md](START_HERE.md); the independently reimplemented public-reference patterns are
-recorded in [PUBLIC_REFERENCE_DESIGN.md](docs/PUBLIC_REFERENCE_DESIGN.md).
+explanation](docs/60_SECOND_EXPLANATION.md). The independently reimplemented public-reference
+patterns are recorded in [PUBLIC_REFERENCE_DESIGN.md](docs/PUBLIC_REFERENCE_DESIGN.md).
 
 ## Implemented milestones
 

@@ -4,9 +4,12 @@ fix has worked, and cost. Read-only on the ledger; one CSV, overwritten each tim
 from __future__ import annotations
 
 import csv
+import tempfile
 from collections import defaultdict
-from datetime import UTC, datetime, timedelta
+from contextlib import suppress
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
@@ -15,9 +18,9 @@ from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.engine import FIRST_GATE, NEAR_MISS
 from alpha_orchestrator.factory.ledger import Ledger
 from alpha_orchestrator.factory.models import (
+    BatchORM,
     CandidateORM,
     CellORM,
-    IdeaStatus,
     LLMCallORM,
     ResearchIdeaORM,
     ReviewORM,
@@ -26,7 +29,7 @@ from alpha_orchestrator.factory.models import (
 
 FILE_NAME = "工厂_周报.csv"
 FUNNEL = (
-    "点子提出",
+    "点子有有效回测",
     "过运气线（首批最好 |Sharpe| ≥ 1.0）",
     "改进后 Sharpe ≥ 1.2",
     "过四项线（Sharpe、Fitness、换手、margin）",
@@ -57,29 +60,80 @@ def weekly_rows(
     end = now or datetime.now(UTC)
     start = end - timedelta(days=days)
     rows: list[tuple[str, str]] = [
-        ("期间", f"{start:%Y-%m-%d} 到 {end:%Y-%m-%d}（UTC）"),
+        ("期间", f"{start.isoformat()} ≤ 时间 < {end.isoformat()}"),
     ]
     with ledger.session() as s:
+        batches = list(
+            s.scalars(
+                select(BatchORM).where(
+                    BatchORM.created_at >= start.astimezone(UTC).replace(tzinfo=None),
+                    BatchORM.created_at < end.astimezone(UTC).replace(tzinfo=None),
+                    BatchORM.status.not_in(["REFUSED", "REJECTED"]),
+                )
+            )
+        )
+        reserved = sum(b.size for b in batches)
+        cohort = (
+            list(
+                s.scalars(
+                    select(CandidateORM).where(CandidateORM.batch_id.in_([b.id for b in batches]))
+                )
+            )
+            if batches
+            else []
+        )
+        cohort_finished = [
+            c for c in cohort if c.completed_at is not None and _aware(c.completed_at) < end
+        ]
         done = [
             c
             for c in s.scalars(select(CandidateORM).where(CandidateORM.completed_at.is_not(None)))
-            if c.sharpe is not None and start <= _aware(c.completed_at) < end
+            if c.sharpe is not None
+            and c.completed_at is not None
+            and start <= _aware(c.completed_at) < end
         ]
         cap = cfg.budget.v1_daily_cap * days
         rows += [
             ("回测完成", str(len(done))),
-            ("额度利用率", f"{len(done)}/{cap} = {len(done) / cap:.1%}"),
+            (
+                "期间进入待挑选",
+                str(
+                    len(
+                        list(
+                            s.scalars(
+                                select(ReviewORM.id).where(
+                                    ReviewORM.created_at
+                                    >= start.astimezone(UTC).replace(tzinfo=None),
+                                    ReviewORM.created_at < end.astimezone(UTC).replace(tzinfo=None),
+                                )
+                            )
+                        )
+                    )
+                ),
+            ),
+            ("本期发起队列：配额预留", str(reserved)),
+            ("额度利用率", f"{reserved}/{cap} = {reserved / cap:.1%}" if cap else "无配额"),
+            ("本期发起队列：已结算", str(len(cohort_finished))),
+            ("本期发起队列：有指标", str(sum(c.sharpe is not None for c in cohort_finished))),
+            ("本期发起队列：未结算或未匹配", str(max(0, reserved - len(cohort_finished)))),
         ]
         ideas = [
             i
             for i in s.scalars(
                 select(ResearchIdeaORM).where(
-                    ResearchIdeaORM.status.in_([IdeaStatus.DONE, IdeaStatus.DEAD])
+                    ResearchIdeaORM.created_at >= start.astimezone(UTC).replace(tzinfo=None),
+                    ResearchIdeaORM.created_at < end.astimezone(UTC).replace(tzinfo=None),
                 )
             )
-            if start <= _aware(i.created_at) < end
         ]
-        reviewed = set(s.scalars(select(ReviewORM.candidate_id)))
+        reviewed = set(
+            s.scalars(
+                select(ReviewORM.candidate_id).where(
+                    ReviewORM.created_at < end.astimezone(UTC).replace(tzinfo=None)
+                )
+            )
+        )
+        rows.append(("本期新建点子", str(len(ideas))))
         fake = cfg.thresholds.suspicious_sharpe
         counts = [0] * len(FUNNEL)
         for i in ideas:
@@ -90,6 +144,8 @@ def weekly_rows(
                 for c in (s.get(CandidateORM, k) for k in ids)
                 if c is not None
                 and c.sharpe is not None
+                and c.completed_at is not None
+                and _aware(c.completed_at) < end
                 and c.stage != Stage.ROBUST
                 and abs(c.sharpe) <= fake  # |Sharpe| > 3 is an artefact, not a find
             ]
@@ -103,7 +159,9 @@ def weekly_rows(
                 any(k in reviewed for k in ids),
             ]
             for k, ok in enumerate(reached):
-                counts[k] += ok
+                if not ok:
+                    break
+                counts[k] += 1
         for name, n in zip(FUNNEL, counts, strict=True):
             rows.append((f"漏斗：{name}", str(n)))
         # The bottleneck is the step with the lowest pass rate, not the largest loss: the
@@ -150,11 +208,43 @@ def weekly_rows(
     return rows
 
 
-def write_weekly(ledger: Ledger, cfg: FactoryConfig, days: int = 7) -> Path:
-    path = Path(cfg.reports_dir) / FILE_NAME
+def friday_cutoff(cfg: FactoryConfig, now: datetime, ending: date | None = None) -> datetime:
+    tz = ZoneInfo(cfg.budget.quota_timezone)
+    local = now.astimezone(tz)
+    friday = ending or (local.date() - timedelta(days=(local.weekday() - 4) % 7))
+    if friday.weekday() != 4:
+        raise ValueError("week ending must be a Friday")
+    end = datetime.combine(friday, time(cfg.budget.quota_reset_hour), tz)
+    if local < end:
+        if ending is not None:
+            raise ValueError("the requested reporting week has not closed")
+        end -= timedelta(days=7)
+    return end
+
+
+def write_weekly(
+    ledger: Ledger, cfg: FactoryConfig, days: int = 7, ending: datetime | None = None
+) -> Path:
+    filename = FILE_NAME if ending is None else f"工厂_周报_{ending:%Y-%m-%d}.csv"
+    path = Path(cfg.reports_dir) / filename
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8-sig", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["项目", "数值"])
-        w.writerows(weekly_rows(ledger, cfg, days))
+    if ending is not None and path.exists():
+        return path
+    rows = weekly_rows(ledger, cfg, days, now=ending)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8-sig", newline="", dir=path.parent, delete=False
+    ) as f:
+        tmp = Path(f.name)
+        try:
+            w = csv.writer(f)
+            w.writerow(["项目", "数值"])
+            w.writerows(rows)
+            f.flush()
+            if ending is None:
+                tmp.replace(path)
+            else:
+                with suppress(FileExistsError):
+                    path.hardlink_to(tmp)
+        finally:
+            tmp.unlink(missing_ok=True)
     return path

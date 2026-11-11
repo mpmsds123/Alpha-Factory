@@ -54,8 +54,9 @@ ledger cannot coordinate spending by another independent scanner or another ledg
 `quota_reserve` is configurable and defaults to zero for this factory's allocated quota.
 The final batch is trimmed to the remaining allocation and reported headroom. A quota is
 a ceiling: exhausted research ideas may stop earlier. Do not invent weak tests just to
-consume the remainder. Research thresholds are preserved. Production clears the old three-dataset pilot
-whitelist and uses the existing scanner eligibility/ranking, with one active dataset.
+consume the remainder. The default v7 configuration samples eligible dataset combinations,
+with one active dataset. Scanner evidence can annotate fields. A pilot can select explicit
+combinations.
 The 100-child pilot dataset allowance is raised to 1,000. Explicitly selected budget-stopped
 cells with unfinished work can resume; prior candidates and failure evidence are retained.
 Ready simulation work is drained before new LLM planning. A refill that supplies no new
@@ -107,6 +108,15 @@ Empty, warning, pending, erroneous or missing required platform checks cannot pr
 candidate. Self/prod correlation must be present, finite and within the configured bound.
 A robustness flag with no actual ratios is insufficient. Submission remains manual and
 checks are revalidated immediately before a requested submission.
+
+After authentication, retry eligible saved candidates independently of the research
+worker with `alpha-factory review recheck --config CONFIG`. This refreshes the pick list
+using the existing checks and handles prior quota-only failures across allocation
+windows. The command takes the same ledger writer lock as a research run.
+
+The paired refinement feature and its acceptance criteria are defined in the
+[research specification](FACTORY_RESEARCH_SPEC.md). Turn on the pilot feature under
+evaluation. Keep a configuration snapshot with the tested commit and backup.
 
 Roll out against one authoritative ledger: at most 10 live simulations first, then 100,
 then the 1,000 daily ceiling. Reuse that same ledger as caps increase. Before moving a

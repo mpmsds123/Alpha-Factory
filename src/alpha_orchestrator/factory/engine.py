@@ -20,13 +20,13 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from alpha_orchestrator.brain.api import BrainAPI
-from alpha_orchestrator.factory import catalog, fixes, study
+from alpha_orchestrator.factory import catalog, fixes, refinement_trial, study
 from alpha_orchestrator.factory import generators as gen
 from alpha_orchestrator.factory import pool_review as pr
 from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.direction import direction_label, expected_sign
 from alpha_orchestrator.factory.ideas import tokens
-from alpha_orchestrator.factory.ledger import Ledger, ledger_locked
+from alpha_orchestrator.factory.ledger import Ledger, fingerprint, ledger_locked
 from alpha_orchestrator.factory.llm import FactoryLLM, LLMUnavailable
 from alpha_orchestrator.factory.models import (
     CandidateORM,
@@ -79,6 +79,7 @@ FORMULA_MAX_FIELDS = 3  # Power Pool
 FIRST_GATE = 1.0
 HORIZONS = (5, 21, 63, 126, 252)  # the windows the system prompt allows
 GROUP_FIELD_LINES = 400
+DIRECTION_SHORTLIST = 8
 # 10/15 第一次正式跑后的修改
 GROUP_REFILLS = 10  # 安全上限；真正的停止条件是数据集预算（100 次）用完
 # 10/15 定：先侦察 8 组；一个都没过 0.8 → 这个数据集没信号，换下一个；有过的 → 补新组
@@ -182,6 +183,7 @@ class Engine:
                 moved["ideas_new"] += 1
         if not self._active_ideas(cell_id) and self._dataset_finished(cell_id):
             self._close_dataset(cell_id)
+            moved["datasets_closed"] = 1
         return moved
 
     def generate_one(self) -> str | None:
@@ -240,8 +242,11 @@ class Engine:
     def _open_dataset(self) -> str | None:
         """第 1-2 步, repeated until a dataset has usable fields."""
         for _ in range(30):
-            with self.ledger.session() as s:
-                cell_id = study.choose_dataset(s, self.config, self.rng)
+            if self.config.design == "v7" and self.config.direction_trial:
+                cell_id = self._choose_direction()
+            else:
+                with self.ledger.session() as s:
+                    cell_id = study.choose_dataset(s, self.config, self.rng)
             if cell_id is None:
                 return None
             if study.load_fields(self.api, self.ledger, cell_id, self.config):
@@ -253,6 +258,55 @@ class Engine:
                     self.ledger.log(s, "dataset_opened", cell_id)
                 return cell_id
         return None
+
+    def _choose_direction(self) -> str | None:
+        with self.ledger.session() as s:
+            if self.config.only_datasets:
+                return study.choose_dataset(s, self.config, self.rng)
+            _, excluded = exception_scope(s, self.config)
+            pool = study.v7_dataset_pool(s, self.config, excluded)
+            for cell in pool:
+                if (cell.plan or {}).get("direction_trial"):
+                    # A metadata request can fail after assignment. Reuse that assignment.
+                    return cell.cell_id
+            if len(pool) < 2:
+                return pool[0].cell_id if pool else None
+            choices = [
+                {
+                    **self._brief(cell),
+                    "cell_id": cell.cell_id,
+                    "delay": cell.delay,
+                    "catalogue_coverage": cell.coverage,
+                    "catalogue_field_count": cell.field_count,
+                }
+                for cell in self.rng.sample(pool, min(DIRECTION_SHORTLIST, len(pool)))
+            ]
+
+        self.llm.idea_id = None
+        proposal = self.llm.research_direction(choices)
+        # Randomize after collecting the proposal so both arms have the same entry criteria.
+        guided = self.rng.random() < 0.5
+        cell_id = proposal["cell_id"] if guided else str(self.rng.choice(choices)["cell_id"])
+        trial = {
+            "version": 1,
+            "arm": "guided" if guided else "random",
+            "guided_probability": 0.5,
+            "pool_size": len(pool),
+            "shortlist": [choice["cell_id"] for choice in choices],
+            "proposal": proposal,
+            "model": self.config.llm.strong_model,
+            "dataset_cap": self.config.budget.dataset_sim_cap,
+        }
+        with self.ledger.session() as s:
+            chosen = s.get(CellORM, cell_id)
+            assert chosen is not None
+            chosen.plan = {
+                **(chosen.plan or {}),
+                "direction_trial": trial,
+                "sims_at_open": chosen.sims_used,
+            }
+            self.ledger.log(s, "direction_assigned", cell_id, **trial, catalogue=choices)
+        return cell_id
 
     def _band_sample(self, s: Session) -> list[tuple[float, bool]]:
         """(best first-formula |Sharpe|, whether the idea later reached the Sharpe line) for
@@ -439,11 +493,33 @@ class Engine:
             plan = cell.plan or {}
             spent = cell.sims_used - int(plan.get("sims_at_open", 0))
             budget_stop = spent >= self.config.budget.dataset_sim_cap
-            outcome = "budget" if budget_stop else ("signal" if worked else "noise")
+            outcome = (
+                "unavailable"
+                if plan.get("no_usable_groups")
+                else "budget"
+                if budget_stop
+                else "signal"
+                if worked
+                else "noise"
+            )
             cell.state = CellState.EXHAUSTED
             cell.plan = {**plan, "verdict": outcome, "outcome": outcome, "sims_spent": spent}
+            if plan.get("direction_trial") and "direction_result" not in plan:
+                hits = {
+                    cid
+                    for idea in ideas
+                    for cid in idea.extra.get("regular_hits", [])
+                    if (candidate := s.get(CandidateORM, cid)) is not None
+                    and (candidate.extra or {}).get("idea") == idea.id
+                }
+                cell.plan = {
+                    **cell.plan,
+                    "direction_result": {"settled": spent, "regular_candidates": len(hits)},
+                }
             why = (
-                "budget spent"
+                "no usable field groups"
+                if plan.get("no_usable_groups")
+                else "budget spent"
                 if spent >= self.config.budget.dataset_sim_cap
                 else "no valid new idea twice in a row"
             )
@@ -454,7 +530,7 @@ class Engine:
 
     # ======================= 现行设计 第 2-4 步 =======================
     def _brief(self, cell: CellORM) -> dict[str, Any]:
-        return {
+        brief = {
             "id": cell.dataset_id,
             "name": cell.dataset_name,
             "category": cell.category,
@@ -462,6 +538,10 @@ class Engine:
             "universe": cell.universe,
             "description": cell.description[:1500],
         }
+        trial = (cell.plan or {}).get("direction_trial") or {}
+        if trial.get("arm") == "guided":
+            brief["research_direction"] = trial["proposal"]
+        return brief
 
     def _groups(self, cell_id: str, refill: bool = False) -> list[dict[str, Any]] | None:
         """第 2 步: one LLM call per dataset reads every field description and returns up
@@ -539,7 +619,7 @@ class Engine:
                 )
                 return merged
             if not groups:
-                self.ledger.log(s, "llm_unavailable", cell_id, reasons=["no field groups"])
+                self.ledger.log(s, "field_groups_unusable", cell_id)
                 return None
             cell.plan = {**plan, "groups": groups, "next_group": 0}
             self.ledger.log(s, "field_groups", cell_id, groups=[g["name"] for g in groups])
@@ -549,7 +629,11 @@ class Engine:
         """第 3 步: the next field group becomes an idea; its 3 first formulas are queued."""
         groups = self._groups(cell_id)
         if groups is None:
-            raise LLMUnavailable("the LLM gave no field groups")
+            with self.ledger.session() as s:
+                cell = s.get(CellORM, cell_id)
+                assert cell is not None
+                cell.plan = {**(cell.plan or {}), "groups": [], "no_usable_groups": True}
+            return None
         with self.ledger.session() as s:
             cell = s.get(CellORM, cell_id)
             assert cell is not None
@@ -653,8 +737,20 @@ class Engine:
             }
             settings = self._settings(cell)
             for expr, why, fid in exprs:
-                if self._add(s, cell, expr, settings, Stage.FIELD, idea_id, field=fid, change=why):
+                candidate = self._add(
+                    s, cell, expr, settings, Stage.FIELD, idea_id, field=fid, change=why
+                )
+                if candidate is not None:
                     added += 1
+                    if added == 1 and (cell.plan or {}).get("direction_trial"):
+                        idea.extra = {
+                            **idea.extra,
+                            "direction_probe": {
+                                "candidate": candidate.id,
+                                "alignment": direction_label(expr, signs),
+                                "reused": (candidate.extra or {}).get("idea") != idea_id,
+                            },
+                        }
             self.ledger.log(
                 s,
                 "tests_queued",
@@ -718,6 +814,21 @@ class Engine:
             assert idea is not None
             cell = s.get(CellORM, idea.cell_id)
             assert cell is not None
+            probe = (idea.extra or {}).get("direction_probe")
+            if probe and "signed_sharpe" not in probe:
+                first = s.get(CandidateORM, probe["candidate"])
+                signed = None
+                if (
+                    first is not None
+                    and first.status == CandidateStatus.DONE
+                    and first.sharpe is not None
+                    and math.isfinite(first.sharpe)
+                    and not self._suspicious(first)
+                    and probe["alignment"] == "match"
+                    and not probe["reused"]
+                ):
+                    signed = first.sharpe
+                idea.extra = {**idea.extra, "direction_probe": {**probe, "signed_sharpe": signed}}
             done = [c for c in self._results(s, idea_id, Stage.FIELD) if not self._suspicious(c)]
             usable = [c for c in done if (c.sharpe or 0) > 0 or cell.region not in NO_FLIP_REGIONS]
             usable.sort(key=lambda c: -abs(c.sharpe or 0))
@@ -1064,7 +1175,16 @@ class Engine:
                 menu.append(
                     {"fix": name, "what": fixes.FIXES[name].what, "worked": f"{won}/{won + lost}"}
                 )
-            card = {"name": idea.title, "meaning": idea.mechanism, "direction": idea.long_side}
+            card: dict[str, Any] = {
+                "name": idea.title,
+                "meaning": idea.mechanism,
+                "direction": idea.long_side,
+            }
+            if (cell.plan or {}).get("direction_trial"):
+                card.update(
+                    first_formula_observation=idea.extra.get("direction_probe"),
+                    falsifier=(idea.extra.get("group") or {}).get("falsifier"),
+                )
             best = _row(parent)
             used_neutral = {
                 str((c.settings or {}).get("neutralization", "")).upper()
@@ -1075,6 +1195,9 @@ class Engine:
                 for n in self.meta.neutralizations(cell.region)
                 if n.upper() not in used_neutral
             ]
+            paired = self.config.refinement_trial and not idea.extra.get("refinement_trial")
+        if paired and self._queue_refinement_trial(idea_id, parent, problem, menu, stats, card):
+            return
         if not menu:
             with self.ledger.session() as s:
                 idea = s.get(ResearchIdeaORM, idea_id)
@@ -1119,6 +1242,8 @@ class Engine:
                 "chosen": chosen,
                 "source": source,
                 "decision": "give_up" if gave_up else "change",
+                "why": str(verdict.get("why") or "")[:500],
+                "proposed_reasons": whys,
             }
             idea.extra = {**idea.extra, "diagnoses": [*idea.extra.get("diagnoses", []), diag]}
             self.ledger.log(s, "diagnosis", idea.cell_id, idea=idea_id, **diag)
@@ -1157,6 +1282,125 @@ class Engine:
             idea.extra = {**idea.extra, "parents": plist}
             if not pending:
                 self._finish_idea(s, idea)
+
+    def _queue_refinement_trial(
+        self,
+        idea_id: str,
+        parent: CandidateORM,
+        problem: str,
+        menu: list[dict[str, str]],
+        stats: fixes.Stats,
+        card: dict[str, Any],
+    ) -> bool:
+        targets = fixes.target_checks(parent.fails, problem)
+        if not targets:
+            return False
+        expressions: dict[str, str] = {}
+        with self.ledger.session() as s:
+            if s.scalar(
+                select(ResearchIdeaORM.id)
+                .where(
+                    func.json_extract(ResearchIdeaORM.extra, "$.refinement_trial.parent")
+                    == parent.id
+                )
+                .limit(1)
+            ):
+                return False
+            fields = {
+                f.field_id: f.type
+                for f in s.scalars(select(FieldORM).where(FieldORM.cell_id == parent.cell_id))
+            }
+            for item in menu:
+                name = item["fix"]
+                shape = fixes.FIXES[name].shape
+                if shape is None:  # Compare formula changes at identical simulation settings.
+                    continue
+                expression = shape.format(f=parent.expression)
+                if not check(
+                    expression,
+                    operators=self.meta.operators,
+                    fields=fields,
+                    signatures=self.meta.signatures,
+                    max_operators=None,
+                ).ok:
+                    continue
+                exists = s.scalar(
+                    select(CandidateORM.id).where(
+                        CandidateORM.fingerprint == fingerprint(expression, parent.settings)
+                    )
+                )
+                if exists is None:
+                    expressions[name] = expression
+        if len(expressions) < 2:
+            return False
+
+        rule = refinement_trial.rule_choice(list(expressions), problem, stats)
+        evidence = {
+            "idea": card,
+            "parent": _row(parent),
+            "problem": problem,
+            "target_checks": targets,
+            "success_rule": "all target checks explicitly PASS and no new failed checks",
+            "menu": [item for item in menu if item["fix"] in expressions],
+        }
+        self.llm.idea_id = idea_id
+        proposal = self.llm.plan_refinement(evidence)
+        choices = {"rule": rule, "llm": proposal["fix"]}
+        order = [name for name in dict.fromkeys(choices.values()) if name is not None]
+        self.rng.shuffle(order)
+        with self.ledger.session() as s:
+            idea = s.get(ResearchIdeaORM, idea_id)
+            cell = s.get(CellORM, parent.cell_id)
+            assert idea is not None and cell is not None
+            parents = copy.deepcopy(idea.extra["parents"])
+            work = next(p for p in parents if p["id"] == parent.id)
+            candidates: dict[str, str] = {}
+            for name in order:
+                c = self._add(
+                    s,
+                    cell,
+                    expressions[name],
+                    dict(parent.settings),
+                    Stage.IMPROVE,
+                    idea_id,
+                    field=(parent.extra or {}).get("field"),
+                    parent=parent,
+                    change=f"{problem}: {name}",
+                    role="fix",
+                )
+                if c is None:
+                    raise RuntimeError("Validated paired refinement could not be queued")
+                c.extra = {
+                    **c.extra,
+                    "fix": name,
+                    "problem": problem,
+                    "source": "refinement_trial",
+                }
+                candidates[name] = c.id
+            work["pending"] = list(candidates.values())
+            work["tried"] = [*work.get("tried", []), *order]
+            trial = {
+                "version": refinement_trial.VERSION,
+                "parent": parent.id,
+                "parent_checks": sorted(fixes.fail_set(parent.fails)),
+                "target_checks": targets,
+                "suspicious_sharpe": self.config.thresholds.suspicious_sharpe,
+                "choices": choices,
+                "candidates": candidates,
+                "evidence": evidence,
+                "proposal": proposal,
+                "model": self.config.llm.strong_model,
+            }
+            idea.extra = {**idea.extra, "parents": parents, "refinement_trial": trial}
+            self.ledger.log(
+                s,
+                "refinement_trial_queued",
+                cell.cell_id,
+                idea=idea_id,
+                parent=parent.id,
+                candidates=candidates,
+            )
+        return True
 
     def _settle_fix_round(self, idea_id: str) -> None:
         """v7: the best variant (fewest failed checks, then Sharpe) replaces its parent when it
@@ -1232,6 +1476,7 @@ class Engine:
                     ready += 1
                     self._queue_robust(s, cell, c)
             self._settle_robust(s)
+            refinement_trial.settle(s)
         return ready
 
     def _queue_robust(self, s: Session, cell: CellORM, c: CandidateORM) -> None:
@@ -1783,6 +2028,7 @@ def _past_ideas(s: Session, limit: int) -> list[dict[str, Any]]:
         cell = s.get(CellORM, i.cell_id)
         if i.status != IdeaStatus.DONE and not (i.extra or {}).get("why_dead"):
             continue  # unfinished (e.g. retired mid-test): no outcome to learn from
+        probe = (i.extra or {}).get("direction_probe") or {}
         out.append(
             {
                 "idea": i.title[:80],
@@ -1790,6 +2036,7 @@ def _past_ideas(s: Session, limit: int) -> list[dict[str, Any]]:
                 "dataset_category": cell.category if cell else "",
                 "region": cell.region if cell else "",
                 "best_sharpe": round(i.best_sharpe, 2),
+                "signed_first_formula_sharpe": probe.get("signed_sharpe"),
                 "outcome": "passed the submission line"
                 if i.status == IdeaStatus.DONE
                 else str((i.extra or {}).get("why_dead", "stopped"))[:120],

@@ -87,7 +87,7 @@ def write_progress(ledger: Ledger, cfg: FactoryConfig, status: str) -> Path:
     cost: dict[str, float] = defaultdict(float)
     with ledger.session() as s:
         for c in s.scalars(select(CandidateORM).where(CandidateORM.completed_at.is_not(None))):
-            if c.sharpe is None:
+            if c.sharpe is None or c.completed_at is None:
                 continue
             d = _day(c.completed_at, cfg)
             done[d] += 1
