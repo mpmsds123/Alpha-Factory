@@ -5,6 +5,8 @@ scanner_progress: ~/Desktop/因子挖掘/scanner/runs/数据集进度.csv   # �
 scanner_runs: ~/Desktop/因子挖掘/scanner/runs   # v7：只用来给字段做标记，不再用来挑数据集或筛字段
 only_datasets: []                       # 空 = v7 从全部数据集里随机抽
 design: v7                              # v7（11/03）：随机选数据集、点子记忆、菜单改法 + Thompson sampling、同时 6 个点子
+direction_trial: false                  # 试验开关：LLM 定向与随机对照；仅对下一次自动选数据集生效
+refinement_trial: false                 # 试验开关：同一母公式的 LLM 改法与固定规则配对比较
 
 budget:
   v1_daily_cap: 1000         # Factory allocation: at most 1,000 launched children / allocation day

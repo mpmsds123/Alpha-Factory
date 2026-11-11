@@ -22,6 +22,7 @@ from alpha_orchestrator.factory.llm import FactoryLLM
 from alpha_orchestrator.factory.models import (
     CandidateORM,
     CellORM,
+    EventORM,
     HypothesisORM,
     ReviewORM,
     ReviewStatus,
@@ -258,11 +259,66 @@ EXPORT_COLUMNS = (
 )
 
 
-def store_passing(api: BrainAPI, ledger: Ledger, config: FactoryConfig) -> list[str]:
+def quota_only(checks: list[dict[str, Any]]) -> bool:
+    """Recognize the observed exhausted regular-submission allowance, fail closed otherwise."""
+    failed = [check for check in checks if check.get("result") == "FAIL"]
+    if len(failed) != 1 or failed[0].get("name") != "REGULAR_SUBMISSION":
+        return False
+    check = failed[0]
+    limit, value = check.get("limit"), check.get("value")
+    return (
+        isinstance(limit, (int, float))
+        and not isinstance(limit, bool)
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(limit)
+        and limit > 0
+        and value == limit
+    )
+
+
+def _eligible_check(s: Any, candidate: CandidateORM, config: FactoryConfig, window: str) -> bool:
+    extra = candidate.extra or {}
+    if extra.get("quota_deferred_window") == window:
+        return False
+    if not extra.get("platform_failed"):
+        return True
+    # Reclassify old rows only when the saved response and failure event agree.
+    if extra.get("platform_failed") != ["REGULAR_SUBMISSION"] or not quota_only(
+        extra.get("submission_check") or []
+    ):
+        return False
+    event = s.scalar(
+        select(EventORM)
+        .where(
+            EventORM.kind == "platform_check_failed",
+            EventORM.payload["alpha"].as_string() == candidate.alpha_id,
+        )
+        .order_by(EventORM.id.desc())
+        .limit(1)
+    )
+    if event is None:
+        return False
+    timestamp = event.at if event.at.tzinfo else event.at.replace(tzinfo=UTC)
+    previous_window = config.budget.window_start(timestamp).isoformat()
+    candidate.extra = {
+        **extra,
+        "platform_failed": [],
+        "quota_deferred_window": previous_window,
+        "platform_check_state": "deferred_quota",
+    }
+    s.add(EventORM(kind="platform_check_quota_reclassified", payload={"alpha": candidate.alpha_id}))
+    return previous_window != window
+
+
+def store_passing(
+    api: BrainAPI, ledger: Ledger, config: FactoryConfig, *, now: datetime | None = None
+) -> list[str]:
     """第 7、10 问: every regular-line alpha that kept its Sharpe under the other
     neutralization gets the platform's submission check (IS ladder, sub-universe,
     correlation) and, if nothing FAILs, a row in the pick-list. No daily limit, no ranking:
     you pick. Then the whole pick-list is written to the CSV."""
+    window = config.budget.window_start(now).isoformat()
     with ledger.session() as s:
         reviewed = set(s.scalars(select(ReviewORM.candidate_id)))
         pool = [
@@ -272,7 +328,7 @@ def store_passing(api: BrainAPI, ledger: Ledger, config: FactoryConfig) -> list[
             and c.alpha_id
             and (c.extra or {}).get("ready")
             and robust_passed(c.extra or {}, config.thresholds.robust_keep_ratio)
-            and not (c.extra or {}).get("platform_failed")
+            and _eligible_check(s, c, config, window)
         ]
     stored: list[str] = []
     for cid, alpha_id in pool:
@@ -282,17 +338,31 @@ def store_passing(api: BrainAPI, ledger: Ledger, config: FactoryConfig) -> list[
             row = s.get(CandidateORM, cid)
             assert row is not None
             row.extra = {**row.extra, "submission_check": checks}
+            if quota_only(checks):
+                row.extra = {
+                    **row.extra,
+                    "platform_check_state": "deferred_quota",
+                    "quota_deferred_window": window,
+                }
+                ledger.log(s, "platform_check_quota_deferred", alpha=alpha_id, window=window)
+                continue
             if fails:
-                row.extra = {**row.extra, "platform_failed": fails}
+                row.extra = {
+                    **row.extra,
+                    "platform_failed": fails,
+                    "platform_check_state": "failed",
+                }
                 ledger.log(s, "platform_check_failed", alpha=alpha_id, fails=fails)
                 continue
             if not checks_passed(checks, config.thresholds.pnl_corr_max):
+                row.extra = {**row.extra, "platform_check_state": "pending"}
                 ledger.log(s, "platform_check_deferred", alpha=alpha_id, checks=checks)
                 continue
             score = {
                 "prod_corr": check_value(checks, "PROD_CORRELATION"),
                 "self_corr": check_value(checks, "SELF_CORRELATION"),
             }
+            row.extra = {**row.extra, "platform_check_state": "passed"}
             s.add(ReviewORM(candidate_id=cid, alpha_id=alpha_id, score=score))
             ledger.log(s, "stored_for_pick", alpha=alpha_id, score=score)
         stored.append(alpha_id)

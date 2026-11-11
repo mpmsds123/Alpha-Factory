@@ -284,16 +284,96 @@ def status(config: ConfigOpt = DEFAULT_CONFIG) -> None:
 
 @app.command()
 def weekly(
-    days: Annotated[int, typer.Option(help="统计最近几天")] = 7,
+    days: Annotated[int, typer.Option(min=1, help="兼容旧版的滚动统计天数")] | None = None,
+    week_ending: Annotated[str | None, typer.Option(help="结束周五（YYYY-MM-DD）")] = None,
     config: ConfigOpt = DEFAULT_CONFIG,
 ) -> None:
-    """周报：额度利用、点子漏斗、瓶颈、每种改法的成功率、花费。写进 reports/工厂_周报.csv。"""
-    from alpha_orchestrator.factory.weekly import weekly_rows, write_weekly
+    """默认写最近已收口的周五快照；指定 --days 时保留旧版滚动口径。"""
+    import csv
+    from datetime import UTC, date, datetime
+
+    from alpha_orchestrator.factory.weekly import friday_cutoff, write_weekly
 
     cfg, ledger = _ctx(config)
-    for k, v in weekly_rows(ledger, cfg, days):
-        typer.echo(f"{k}：{v}")
-    typer.echo(f"已写入：{write_weekly(ledger, cfg, days).resolve()}")
+    if days is not None and week_ending is not None:
+        raise typer.BadParameter("--days 和 --week-ending 只能选一个")
+    try:
+        ending = (
+            None
+            if days is not None
+            else friday_cutoff(
+                cfg, datetime.now(UTC), date.fromisoformat(week_ending) if week_ending else None
+            )
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    path = write_weekly(ledger, cfg, days or 7, ending=ending)
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        reader = csv.reader(f)
+        next(reader)
+        for key, value in reader:
+            typer.echo(f"{key}：{value}")
+    typer.echo(f"已写入：{path.resolve()}")
+
+
+@app.command()
+def experiment_propose(input_file: Path, config: ConfigOpt = DEFAULT_CONFIG) -> None:
+    """用输入文件里的证据和序列清单，请 DeepSeek 提出一份试验建议。"""
+    import json
+
+    from alpha_orchestrator.factory.experiment import propose
+
+    inputs = json.loads(input_file.read_text(encoding="utf-8"))
+    cfg, ledger = _ctx(config)
+    llm = _llm(cfg, ledger)
+    if llm is None:
+        raise typer.BadParameter("未找到 DeepSeek 密钥")
+    with ledger.writer_lock():
+        result = propose(llm, inputs["evidence"], inputs["allowed_series"])
+    typer.echo(result.model_dump_json(indent=2))
+
+
+@app.command()
+def experiment_freeze(
+    proposal_file: Path,
+    start: Annotated[str, typer.Option()],
+    end: Annotated[str, typer.Option()],
+    min_observations: Annotated[int, typer.Option(min=4)],
+    min_signed_mean: Annotated[float, typer.Option(min=0.0)],
+) -> None:
+    """按人工设定的阈值和未来区间冻结提案，输出带指纹的协议。"""
+    from datetime import UTC, date, datetime
+
+    from alpha_orchestrator.factory.experiment import Proposal, Protocol, proposal_digest
+
+    proposal = Proposal.model_validate_json(proposal_file.read_text(encoding="utf-8"))
+    protocol = Protocol(
+        proposal_digest=proposal_digest(proposal),
+        approved_on=datetime.now(UTC).date(),
+        start=date.fromisoformat(start),
+        end=date.fromisoformat(end),
+        min_observations=min_observations,
+        min_signed_mean=min_signed_mean,
+    )
+    typer.echo(protocol.model_dump_json(indent=2))
+
+
+@app.command()
+def experiment_replay(proposal_file: Path, protocol_file: Path, series_file: Path) -> None:
+    """离线判定预先冻结的候选与基准 PnL 比较。"""
+    import json
+    from datetime import date
+
+    from pydantic import TypeAdapter
+
+    from alpha_orchestrator.factory.experiment import Proposal, Protocol, replay
+
+    proposal = Proposal.model_validate_json(proposal_file.read_text(encoding="utf-8"))
+    protocol = Protocol.model_validate_json(protocol_file.read_text(encoding="utf-8"))
+    series = TypeAdapter(dict[str, dict[date, float]]).validate_json(
+        series_file.read_text(encoding="utf-8")
+    )
+    typer.echo(json.dumps(replay(proposal, protocol, series), ensure_ascii=False))
 
 
 @app.command()
@@ -358,6 +438,32 @@ def review_approve(review_id: str, config: ConfigOpt = DEFAULT_CONFIG) -> None:
         typer.echo("已提交。" if approve(api, ledger, rid, cfg) else "提交失败，详情见面板事件。")
     finally:
         api.client.session.close()
+
+
+@review_app.command("recheck")
+def review_recheck(config: ConfigOpt = DEFAULT_CONFIG) -> None:
+    """复查已有候选，更新待挑选表。无需调用 LLM 或发起仿真。"""
+    from alpha_orchestrator.factory.select import store_passing
+
+    try:
+        cfg, ledger = _ctx(config)
+        with ledger.writer_lock():
+            api = _api()
+            try:
+                api.client.session.ensure()
+                stored = store_passing(api, ledger, cfg)
+            finally:
+                api.client.session.close()
+    except WorkerAlreadyRunning as exc:
+        typer.echo(f"安全暂停：{exc}")
+        raise typer.Exit(4) from None
+    except NeedBiometric:
+        typer.echo("平台要求刷脸。完成 alpha-factory login 后重新执行复查。")
+        raise typer.Exit(2) from None
+    except (AuthenticationFailed, SessionExpired, RateLimited) as exc:
+        typer.echo(f"复查暂停：{type(exc).__name__}")
+        raise typer.Exit(3) from None
+    typer.echo(f"新增待挑选 {len(stored)} 条。")
 
 
 @review_app.command("reject")

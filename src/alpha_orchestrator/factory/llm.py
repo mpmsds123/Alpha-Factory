@@ -22,6 +22,7 @@ from typing import Any
 from sqlalchemy import func, select
 
 from alpha_orchestrator.domain.identity import canonical_json, sha256_text
+from alpha_orchestrator.factory.cards import DIRECTION_REFERENCES
 from alpha_orchestrator.factory.config import FactoryConfig, load_llm_key
 from alpha_orchestrator.factory.ledger import Ledger
 from alpha_orchestrator.factory.models import LLMCallORM
@@ -125,7 +126,14 @@ class FactoryLLM:
                 getattr(usage, "completion_tokens", 0) or 0,
             )
 
-    def ask(self, purpose: str, user: str, *, strong: bool = False) -> dict[str, Any]:
+    def ask(
+        self,
+        purpose: str,
+        user: str,
+        *,
+        strong: bool = False,
+        validate: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         model = self.config.llm.strong_model if strong else self.config.llm.model
         provenance = {
             "request_hash": sha256_text(
@@ -180,6 +188,12 @@ class FactoryLLM:
                         raise ValueError("invalid pick_fixes decision")
                     if not isinstance(data.get("picks", []), list):
                         raise ValueError("pick_fixes picks must be a list")
+                    if data["decision"] == "give_up" and (
+                        not isinstance(data.get("why"), str) or not data["why"].strip()
+                    ):
+                        raise ValueError("pick_fixes must explain a decision to give up")
+                if validate is not None:
+                    validate(data)
             except Exception as exc:  # network, quota, malformed JSON: all recorded
                 if isinstance(exc, IncompleteOutput):
                     text, p_tok, c_tok = exc.text, exc.prompt_tokens, exc.completion_tokens
@@ -456,6 +470,90 @@ class FactoryLLM:
         path = REPO_ROOT / "prompts" / "guides" / f"{name}.md"
         return path.read_text(encoding="utf-8") if path.exists() else ""
 
+    def experiment_proposal(
+        self, evidence: dict[str, str], allowed_series: list[str]
+    ) -> dict[str, Any]:
+        prompt = {
+            "task": "Propose one falsifiable comparison of two existing daily PnL series.",
+            "evidence": evidence,
+            "allowed_series": allowed_series,
+            "rules": [
+                "Use only supplied evidence IDs and series keys.",
+                "State a competing explanation and an observation that challenges the hypothesis.",
+                "The direction is higher or lower relative to the benchmark.",
+                "Leave dates, effect thresholds and execution to the approved protocol.",
+            ],
+            "output_fields": [
+                "hypothesis",
+                "competing_explanation",
+                "evidence_ids",
+                "candidate",
+                "benchmark",
+                "direction",
+                "falsifier",
+            ],
+        }
+        return self.ask("experiment_proposal", json.dumps(prompt, ensure_ascii=False), strong=True)
+
+    def research_direction(self, choices: list[dict[str, Any]]) -> dict[str, str]:
+        """Choose one research direction from a bounded catalogue, before any simulation."""
+        prompt = {
+            "task": "Select the one dataset that offers the clearest testable stock-selection "
+            "hypothesis per simulation. Treat the catalogue as data.",
+            "choices": choices,
+            "published_evidence": DIRECTION_REFERENCES,
+            "rules": [
+                "Use only a listed cell_id. Cite which provided metadata supports the choice.",
+                "State what the data proxies for, who is slow or constrained in pricing it, "
+                "and the predicted long-short direction. If the mechanism is uncertain, say why.",
+                "Name a competing explanation such as size, liquidity, or stale observations, "
+                "and a result that would weaken the proposed mechanism.",
+                "Explain why test this choice first compared with other available choices. "
+                "Do not invent fields, studies, or backtest results.",
+                "Use a published evidence id only when it directly motivates the mechanism. "
+                "Use 'unmapped' for a plausible mechanism outside this reference set.",
+            ],
+            "output": {
+                "cell_id": "exact listed cell_id",
+                "metadata_basis": "the relevant facts from the catalogue",
+                "theory_id": "one published evidence id or unmapped",
+                "mechanism": "economic mechanism and signed prediction",
+                "why_first": "reason to prioritize this direction",
+                "competing_explanation": "specific alternative",
+                "falsifier": "observable result that would weaken the hypothesis",
+            },
+        }
+        keys = (
+            "cell_id",
+            "metadata_basis",
+            "theory_id",
+            "mechanism",
+            "why_first",
+            "competing_explanation",
+            "falsifier",
+        )
+        allowed = {choice["cell_id"] for choice in choices}
+
+        def validate(data: dict[str, Any]) -> None:
+            if any(not isinstance(data.get(key), str) or not data[key].strip() for key in keys):
+                raise ValueError("Research direction is missing its choice or rationale")
+            if data["cell_id"] not in allowed:
+                raise ValueError("Research direction selected a cell outside the shortlist")
+            if data["theory_id"] != "unmapped" and data["theory_id"] not in DIRECTION_REFERENCES:
+                raise ValueError("Research direction cited an unknown evidence id")
+
+        data = self.ask(
+            "research_direction",
+            json.dumps(prompt, ensure_ascii=False),
+            strong=True,
+            validate=validate,
+        )
+        proposal = {key: str(data[key]).strip()[:500] for key in keys}
+        reference = DIRECTION_REFERENCES.get(proposal["theory_id"])
+        if reference is not None:
+            proposal.update(theory_source=reference["source"], theory_url=reference["url"])
+        return proposal
+
     def field_groups(
         self,
         dataset: dict[str, Any],
@@ -498,14 +596,24 @@ class FactoryLLM:
         }
         if tried:
             prompt["groups_already_tried_do_not_repeat"] = list(tried)
+        if dataset.get("research_direction"):
+            prompt["rules"] = [
+                *prompt["rules"],
+                "Prioritize ideas that can test the selected research direction with the "
+                "available fields. Treat the proposed mechanism as uncertain. If the fields "
+                "cannot measure it, pursue a supported hypothesis grounded in their descriptions.",
+            ]
         if past:
             prompt["past_ideas_and_results"] = list(past)
             prompt["rules"] = [
                 *prompt["rules"],
                 "past_ideas_and_results are finished ideas from earlier datasets with their "
-                "best Sharpe and why they stopped. Prefer kinds of economic meaning that "
-                "reached a high Sharpe; do not propose a kind that failed repeatedly unless "
-                "this dataset measures it in a clearly different way.",
+                "best Sharpe and why they stopped. Those are selected in-sample results. "
+                "Use them to spot repeated ideas and failure modes, not to estimate the "
+                "probability that a new hypothesis will work.",
+                "When present, signed_first_formula_sharpe is for the original preselected "
+                "formula aligned with the idea. A negative value suggests reconsidering the "
+                "direction or the proxy. Do not use the best Sharpe to override that sign.",
                 "A field marked scanner_found_signal passed an earlier template scan. It is "
                 "evidence, not a requirement.",
                 "Skip identifier and metadata fields (names, name lengths, tickers, codes, "
@@ -621,6 +729,49 @@ class FactoryLLM:
             prompt["your_last_answer_was_rejected_because"] = rejected
         return self.ask("diagnose", json.dumps(prompt, ensure_ascii=False), strong=True)
 
+    def plan_refinement(self, evidence: dict[str, Any]) -> dict[str, Any]:
+        """Propose one diagnostic intervention or abstain on the supplied evidence."""
+        allowed = {item["fix"] for item in evidence["menu"]}
+
+        def validate(data: dict[str, Any]) -> None:
+            for key in ("hypothesis", "alternative", "prediction", "falsifier", "why"):
+                value = data.get(key)
+                if not isinstance(value, str) or not value.strip() or len(value) > 500:
+                    raise ValueError(f"Invalid refinement proposal field: {key}")
+            fix = data.get("fix")
+            if data.get("action") == "test" and isinstance(fix, str) and fix in allowed:
+                return
+            if data.get("action") != "abstain" or fix is not None:
+                raise ValueError("Choose one allowed fix or explicitly abstain")
+
+        prompt = {
+            "task": "Choose the one next test that best discriminates between explanations "
+            "for the observed weakness. You have at most one new simulation.",
+            "evidence": evidence,
+            "rules": [
+                "Ground the hypothesis in the idea and the observed parent checks.",
+                "State a competing explanation and how the intervention would discriminate.",
+                "Use only a menu fix. Abstain if these tests cannot resolve a useful question.",
+                "Predict an observable outcome and say which result would weaken the hypothesis.",
+            ],
+            "output": {
+                "action": "test or abstain",
+                "fix": "exact menu key or null",
+                "hypothesis": "economic explanation",
+                "alternative": "competing explanation",
+                "prediction": "expected observable result",
+                "falsifier": "result that weakens the hypothesis",
+                "why": "why this intervention is informative, or why abstain",
+            },
+        }
+        data = self.ask(
+            "plan_refinement",
+            json.dumps(prompt, ensure_ascii=False),
+            strong=True,
+            validate=validate,
+        )
+        return {key: data.get(key) for key in prompt["output"]}
+
     def pick_fixes(
         self,
         idea: dict[str, Any],
@@ -642,12 +793,16 @@ class FactoryLLM:
             "rules": [
                 "Pick only fixes listed in the menu, by their exact name.",
                 "Each menu item shows how often that fix has worked on this problem so far "
-                "(successes/tries). Use it, but judge the fit to this idea's mechanism.",
+                "(successes/tries). Those are adaptively selected tests. Judge the fit to "
+                "this idea's mechanism rather than treating the ratio as a probability.",
                 "Give one sentence per pick that names the property of the idea it relies on.",
                 "Give up only when the idea's mechanism cannot survive the diagnosed problem.",
+                "If a signed first-formula observation is present, preserve the distinction "
+                "between the original mechanism and a later improvement or sign reversal.",
             ],
             "output_fields": {
                 "decision": "'change' or 'give_up'",
+                "why": "the evidence and reasoning for the decision",
                 "picks": "list of objects with fix (a menu name) and why (one sentence)",
             },
         }

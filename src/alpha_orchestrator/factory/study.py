@@ -74,21 +74,8 @@ def choose_dataset(
             return cell.cell_id
         return None
     if config.design == "v7":
-        # v7: a uniformly random dataset not yet dug under this design. No ranking, so no
-        # assumption (e.g. "the scanner found nothing, so nothing is there"). A dataset
-        # without signal is closed after its scouting ideas, so a bad draw is cheap.
-        pool = [
-            c.cell_id
-            for c in s.scalars(
-                select(CellORM).where(CellORM.state == CellState.NEW).order_by(CellORM.cell_id)
-            )
-            if c.active
-            and c.cell_id not in excluded
-            and (not config.policy.regions or c.region in config.policy.regions)
-            and c.delay in config.policy.delays
-            and (c.plan or {}).get("design") != DESIGN
-        ]
-        return (rng or random.Random()).choice(pool) if pool else None
+        pool = v7_dataset_pool(s, config, excluded)
+        return (rng or random.Random()).choice(pool).cell_id if pool else None
     if config.scanner_runs:
         for w in scanner_worth(config.scanner_runs):
             cell = s.get(CellORM, f"{w['region']}|1|{w['universe']}|{w['dataset']}")
@@ -116,6 +103,20 @@ def choose_dataset(
             best_judged = (score, r.cell_id)
     pick = best_judged or best
     return pick[1] if pick else None
+
+
+def v7_dataset_pool(s: Session, config: FactoryConfig, excluded: set[str]) -> list[CellORM]:
+    return [
+        c
+        for c in s.scalars(
+            select(CellORM).where(CellORM.state == CellState.NEW).order_by(CellORM.cell_id)
+        )
+        if c.active
+        and c.cell_id not in excluded
+        and (not config.policy.regions or c.region in config.policy.regions)
+        and c.delay in config.policy.delays
+        and (c.plan or {}).get("design") != DESIGN
+    ]
 
 
 WORTH_RATE = 0.02  # 第 3 问: the scanner's "worth digging" line (its SPRT keeps >= 2%)
@@ -261,8 +262,9 @@ def scanner_signal_fields(folder: str, region: str, dataset: str) -> set[str] | 
         return None
     seen = False
     hits: set[str] = set()
-    for f in root.iterdir():
-        m = ORDER_FILE.match(f.name)
+    logs = sorted(root.glob("*.csv")) + sorted((root / "机器记录").glob("*.csv"))
+    for f in logs:
+        m = ORDER_FILE.fullmatch(f.name)
         if not m or (m.group(1), m.group(2)) != (region, dataset):
             continue
         seen = True
@@ -322,9 +324,14 @@ def load_fields(api: BrainAPI, ledger: Ledger, cell_id: str, config: FactoryConf
         cell.state = CellState.RESEARCH if usable else CellState.EXHAUSTED
         cell.plan = {**(cell.plan or {}), "design": DESIGN, "usable_fields": usable}
         if not usable:
+            if (cell.plan or {}).get("direction_trial"):
+                cell.plan = {
+                    **cell.plan,
+                    "direction_result": {"settled": 0, "regular_candidates": 0},
+                }
             cell.stop_reason = (
                 "the scanner found no field with signal in this dataset"
-                if signal is not None
+                if signal is not None and config.design != "v7"
                 else f"no numeric field covers {floor:.0%} of the universe"
             )
         ledger.log(

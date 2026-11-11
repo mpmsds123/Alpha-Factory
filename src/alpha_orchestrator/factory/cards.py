@@ -33,6 +33,28 @@ CHANGE_CARDS: dict[str, str] = {
     "concentration, sub-universe.",
 }
 
+# Published findings serve as priors for a mechanism, with a boundary on extrapolation.
+DIRECTION_REFERENCES: dict[str, dict[str, str]] = {
+    "earnings_underreaction": {
+        "source": "Chan, Jegadeesh and Lakonishok, Momentum Strategies",
+        "url": "https://www.nber.org/papers/w5375",
+        "finding": "Earnings news and past returns predicted subsequent drift in the study.",
+        "boundary": "An estimate level alone does not measure new information.",
+    },
+    "slow_information_diffusion": {
+        "source": "Hong, Lim and Stein, Bad News Travels Slowly",
+        "url": "https://www.nber.org/papers/w6553",
+        "finding": "Momentum was stronger at low analyst coverage after controlling for size.",
+        "boundary": "Coverage can condition the reaction to news. It is not a standalone sign.",
+    },
+    "liquidity_premium": {
+        "source": "Amihud, Illiquidity and Stock Returns",
+        "url": "https://www.sciencedirect.com/science/article/pii/S1386418101000246",
+        "finding": "The study documents a positive association of illiquidity and returns.",
+        "boundary": "A gross premium can reflect trading costs and may disappear after costs.",
+    },
+}
+
 
 def is_card(card_id: str, cards: dict[str, str]) -> bool:
     return card_id.strip().upper() in cards

@@ -15,6 +15,7 @@ import random
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 _DECILES = "densify(bucket(rank({x}), range='0.1, 1, 0.1'))"
 
@@ -191,15 +192,20 @@ def success(child_fails: str | None, parent_fails: str | None) -> bool:
     return len(fail_set(child_fails)) < len(fail_set(parent_fails))
 
 
+def target_checks(fails: str, problem: str) -> list[str]:
+    matched = sorted(check for check in fail_set(fails) if diagnose(check) == problem)
+    return matched or sorted(fail_set(fails))
+
+
 def _norm(e: str) -> str:
     return re.sub(r"\s+", "", e)
 
 
 def recognize(
     child_expr: str,
-    child_settings: dict[str, object],
+    child_settings: dict[str, Any],
     parent_expr: str,
-    parent_settings: dict[str, object],
+    parent_settings: dict[str, Any],
 ) -> str | None:
     """Which fix turned the parent into the child; None when it is not a menu fix. This lets
     the v6 enhancement rows (same wrappers) count as prior evidence."""
