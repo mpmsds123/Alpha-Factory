@@ -213,10 +213,10 @@ def recover_batch(
     """Re-attach a verified progress URL to an UNKNOWN batch; starts no simulation."""
     from urllib.parse import urlsplit
 
-    from alpha_orchestrator.brain.session import API_URL
+    from alpha_orchestrator.brain.session import platform_url
 
     parts = urlsplit(location)
-    if (parts.netloc and f"{parts.scheme}://{parts.netloc}" != API_URL) or not (
+    if (parts.netloc and f"{parts.scheme}://{parts.netloc}" != platform_url()) or not (
         parts.path.startswith("/simulations/") and not parts.query and not parts.fragment
     ):
         raise typer.BadParameter("must be a /simulations/... progress URL of the platform")

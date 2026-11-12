@@ -1,4 +1,4 @@
-"""BRAIN authentication: password login, biometric hand-off, cookie cache.
+"""Platform authentication: password login, biometric hand-off, cookie cache.
 
 The platform asks for a face check (Persona) every few hours. Software cannot and must
 not complete it, so an unattended run that hits one stops with `NeedBiometric`, carrying
@@ -19,12 +19,30 @@ from urllib.parse import urljoin
 
 import httpx
 
-API_URL = "https://api.worldquantbrain.com"
+URL_ENV = "PLATFORM_API_URL"
+PRIVATE_DIR_ENV = "ALPHA_FACTORY_PRIVATE_DIR"
+DEFAULT_PRIVATE_DIR = Path("~/.alpha_factory/private")
 DEFAULT_CREDENTIALS = Path("~/secrets/platform-brain.json")
 USERNAME_ENV = "ALPHA_LAB_BRAIN_USERNAME"
 PASSWORD_ENV = "ALPHA_LAB_BRAIN_PASSWORD"
 DEFAULT_STATE_DIR = Path("~/.alpha_factory")
 RELOGIN_COOLDOWN_SECONDS = 1800.0
+
+
+def platform_url() -> str:
+    """The platform's API address: PLATFORM_API_URL, else `api_url` in the private
+    platform.yaml. It is not written into the repository."""
+    url = os.getenv(URL_ENV, "")
+    if not url:
+        folder = Path(os.getenv(PRIVATE_DIR_ENV, str(DEFAULT_PRIVATE_DIR))).expanduser()
+        path = folder / "platform.yaml"
+        if path.is_file():
+            import yaml
+
+            url = str((yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("api_url") or "")
+    if not url:
+        raise AuthenticationFailed(f"Set {URL_ENV} or api_url in the private platform.yaml")
+    return url.rstrip("/")
 
 
 class NeedBiometric(Exception):
@@ -153,12 +171,13 @@ class BrainSession:
         credentials: Credentials | None = None,
         store: SessionStore | None = None,
         *,
-        base_url: str = API_URL,
+        base_url: str | None = None,
         transport: httpx.BaseTransport | None = None,
         clock: Any = time.time,
     ) -> None:
         self._credentials = credentials
         self.store = store or SessionStore()
+        base_url = base_url or platform_url()
         self.base_url = base_url
         self._clock = clock
         self.http = httpx.Client(

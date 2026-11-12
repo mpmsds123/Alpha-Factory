@@ -1,6 +1,6 @@
-"""One request path for every BRAIN call: waits, back-off, quota bookkeeping.
+"""One request path for every platform call: waits, back-off, quota bookkeeping.
 
-BRAIN answers "still computing" with 200 + `Retry-After`; it throttles with 429; and it
+The platform answers "still computing" with 200 + `Retry-After`; it throttles with 429; and it
 sometimes drops connections outright. Each is handled here once, so callers only ever see
 a finished response, `RateLimited` after patience runs out, or a session problem.
 """

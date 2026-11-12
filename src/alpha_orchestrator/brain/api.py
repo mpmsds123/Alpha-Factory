@@ -1,4 +1,4 @@
-"""Typed wrappers for the BRAIN endpoints the factory uses.
+"""Typed wrappers for the platform endpoints the factory uses.
 
 Endpoint shapes follow the official ACE library (`ace_lib.py`) and were checked against
 the platform's own responses in earlier runs. Every method returns plain dicts/lists so
@@ -20,7 +20,6 @@ def simulation_payload(expression: str, settings: Mapping[str, Any]) -> dict[str
     """Build the platform's simulation request body from an expression and settings."""
     full = {
         "instrumentType": "EQUITY",
-        "language": "FASTEXPR",
         "pasteurization": "ON",
         "unitHandling": "VERIFY",
         "nanHandling": "OFF",
@@ -108,7 +107,7 @@ class BrainAPI:
 
     # ---------- simulation ----------
     def start_multi_simulation(self, payloads: list[dict[str, Any]]) -> str:
-        """Returns the progress URL. Raises ValueError when BRAIN refuses the batch."""
+        """Returns the progress URL. Raises ValueError when the platform refuses the batch."""
         if not 1 <= len(payloads) <= MULTI_SIM_MAX_CHILDREN:
             raise ValueError("A multi-simulation holds 1-10 alphas")
         body: Any = payloads if len(payloads) > 1 else payloads[0]
@@ -257,7 +256,7 @@ def _records(payload: Any) -> list[dict[str, Any]]:
 
 
 def _table(payload: Any) -> list[dict[str, Any]]:
-    """BRAIN record sets: {schema: {properties: [{name}]}, records: [[...]]}."""
+    """Platform record sets: {schema: {properties: [{name}]}, records: [[...]]}."""
     if not isinstance(payload, dict) or not payload.get("records"):
         return []
     names = [p["name"] for p in payload.get("schema", {}).get("properties", [])]

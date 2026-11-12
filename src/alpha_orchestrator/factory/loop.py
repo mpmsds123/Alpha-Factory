@@ -299,6 +299,8 @@ class Factory:
         }
         if neutralization or default:
             out["neutralization"] = neutralization or default
+        if self.vocab.expression_language:
+            out["language"] = self.vocab.expression_language
         return out
 
     def _hypothesis_view(self, h: HypothesisORM) -> dict[str, Any]:

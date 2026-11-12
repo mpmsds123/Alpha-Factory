@@ -50,7 +50,7 @@ def test_failed_meta_replace_retains_pending_stop_across_restart(
     from alpha_orchestrator.brain import session as module
 
     store = SessionStore(tmp_path)
-    url = "https://api.worldquantbrain.com/authentication/persona?inquiry=retained"
+    url = "https://api.example.test/authentication/persona?inquiry=retained"
     store.update_meta(pending_biometric=url, last_password_login=123)
     before = store.meta_path.read_bytes()
 
@@ -85,8 +85,8 @@ def test_failed_cookie_sync_preserves_previous_domain_aware_cache(
 
     store = SessionStore(tmp_path)
     previous = httpx.Cookies()
-    previous.set("t", "old-api", domain="api.worldquantbrain.com")
-    previous.set("t", "old-web", domain=".worldquantbrain.com")
+    previous.set("t", "old-api", domain="api.example.test")
+    previous.set("t", "old-web", domain=".example.test")
     store.save_cookies(previous)
     before = store.cookies_path.read_bytes()
 
@@ -126,8 +126,8 @@ def test_same_cookie_name_on_two_domains_round_trips(tmp_path: Path) -> None:
 
     store = SessionStore(tmp_path)
     jar = httpx.Cookies()
-    jar.set("t", "api", domain="api.worldquantbrain.com", path="/")
-    jar.set("t", "web", domain=".worldquantbrain.com", path="/")
+    jar.set("t", "api", domain="api.example.test", path="/")
+    jar.set("t", "web", domain=".example.test", path="/")
     store.save_cookies(jar)
     again = store.load_cookies()
     assert sorted(c.value for c in again.jar) == ["api", "web"]
@@ -139,7 +139,7 @@ def test_same_cookie_name_on_two_domains_round_trips(tmp_path: Path) -> None:
         json.dumps(
             [
                 {"name": "t", "value": "stale", "domain": "", "path": "/"},
-                {"name": "t", "value": "fresh", "domain": ".api.worldquantbrain.com", "path": "/"},
+                {"name": "t", "value": "fresh", "domain": ".api.example.test", "path": "/"},
             ]
         )
     )
@@ -147,7 +147,7 @@ def test_same_cookie_name_on_two_domains_round_trips(tmp_path: Path) -> None:
     assert [c.value for c in loaded.jar] == ["fresh"]
     mixed = httpx.Cookies()
     mixed.set("t", "stale")
-    mixed.set("t", "fresh", domain=".api.worldquantbrain.com")
+    mixed.set("t", "fresh", domain=".api.example.test")
     store.save_cookies(mixed)
     assert [c["value"] for c in json.loads(store.cookies_path.read_text())] == ["fresh"]
 
@@ -238,7 +238,7 @@ def test_paged_datafields(tmp_path: Path) -> None:
         return httpx.Response(200, json={"count": 60, "results": rows})
 
     _, client = make(handler, tmp_path)
-    fields = BrainAPI(client).datafields("USA", 1, "TOP3000", "fundamental6")
+    fields = BrainAPI(client).datafields("USA", 1, "TOP3000", "dataset_x")
     assert len(fields) == 60 and fields[-1]["id"] == "f59"
 
 
@@ -308,7 +308,7 @@ def test_pending_face_check_blocks_unattended_requests_across_restarts(
 
 
 def test_explicit_persona_completion_releases_the_authentication_pause(tmp_path: Path) -> None:
-    url = "https://api.worldquantbrain.com/authentication/persona?inquiry=pending"
+    url = "https://api.example.test/authentication/persona?inquiry=pending"
     session, _ = make(
         lambda request: (
             httpx.Response(201)
@@ -334,7 +334,7 @@ def test_pending_persona_prevents_relogin_after_an_authenticated_request_expires
 
     session, client = make(handler, tmp_path, clock=lambda: 100_000.0)
     session.store.update_meta(
-        pending_biometric="https://api.worldquantbrain.com/authentication/persona?inquiry=pending"
+        pending_biometric="https://api.example.test/authentication/persona?inquiry=pending"
     )
     with pytest.raises(NeedBiometric):
         client.request("GET", "/simulations/existing")
