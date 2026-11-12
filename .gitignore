@@ -33,7 +33,6 @@ reports/
 
 # Private research corpus and personal notes
 method_cards/*
-!method_cards/README.md
 CLAUDE.md
 workflow_learning.canvas
 templates/
