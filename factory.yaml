@@ -1,55 +1,21 @@
-# Alpha Factory configuration. Defaults and the reason for each number are documented in
+# Factory configuration. Every default and the reason for it is in
 # src/alpha_orchestrator/factory/config.py; values here override them.
-db_path: ~/.alpha_factory/factory.db     # ledger, kept outside the repository
-reports_dir: reports                     # dashboard (contains real expressions; git-ignored)
-scanner_progress: ~/Desktop/因子挖掘/scanner/runs/数据集进度.csv   # legacy; no longer used
-scanner_runs: ~/Desktop/因子挖掘/scanner/runs   # 11/12: only datasets and fields with scanner signal are mined; its formulas are not repeated
-only_datasets: []                       # empty = v7 samples at random among datasets with scanner signal
-design: v7                              # v7 (11/03): random datasets, idea memory, menu fixes + Thompson sampling, 6 ideas at once
-direction_trial: false                  # trial switch: LLM-directed vs random dataset choice; applies to the next automatic pick
-refinement_trial: false                 # trial switch: paired LLM vs fixed-rule refinement of the same parent
-
-budget:
-  v1_daily_cap: 1000         # Factory allocation: at most 1,000 launched children / allocation day
-  daily_sim_cap: 1000        # Same hard cap for the legacy entrypoint
-  quota_timezone: America/Los_Angeles
-  quota_reset_hour: 21      # Existing scanner allocation resets at 21:00 Pacific
-  quota_reserve: 0          # This factory has its own 1,000-simulation allocation
-  active_datasets: 1         # owner's decision: one dataset at a time
-  dataset_sim_cap: 1000      # Per-dataset lifetime allowance; daily hard cap still applies
-  health_sample: 40          # field families sampled for the health check
-  survey_per_stratum: 2      # families sampled per stratum (all of them when there are <= 40)
-  survey_max_families: 100
-  round_size: 50             # simulations allocated per round once signal is found
-  refine_structures: 3       # structures tried per refinement round
-  combo_count: 6             # combinations per arm (LLM and random)
-  slots: 6                   # upper bound; lowered to what the platform accepts, and remembered
-  children_per_slot: 10
-  min_batch_interval_s: 20   # avoids 429 rate-limit storms
-
-thresholds:
-  noise_sigma: 0.316         # measured 0.25-0.33 on scanner datasets without signal
-  screen_line: 0.8           # survey queueing line (not the pass line)
-  min_filled_coverage: 0.50  # default, pending review: coverage floor after filling one update period
-  suspicious_sharpe: 3.0     # owner's decision: above this is suspicious and not mined
-  suspicious_turnover: 0.70
-  refine_min_gain: 0.35      # gains below 0.35 are mostly noise
-  submit_sharpe: 1.58
-  submit_sharpe_chn: 2.08
-  submit_fitness: 1.0
-  robust_keep_ratio: 0.5
-  pnl_corr_max: 0.7
-  dataset_cap: 8             # at most 8 submissions per dataset
-  margin_bps: {USA: 5.0, CHN: 20.0, IND: 20.0, MEA: 20.0, default: 15.0}
-
-llm:
-  base_url: https://api.deepseek.com
-  model: deepseek-flash                  # field grouping, submission descriptions
-  strong_model: deepseek-v4-pro          # field combinations
-  key_file: ~/secrets/deepseek.json      # {"api_key": "..."}, read only at call time; ALPHA_FACTORY_LLM_API_KEY overrides
+# Submission gates are not configurable: they come from the official docs.
+db_path: ~/.alpha_factory/factory_v8.db   # the factory's one database, outside the repo
+reports_dir: reports                      # progress CSVs (git-ignored)
+private_dir: ~/.alpha_factory/private     # platform vocabulary, never committed
+scanner_runs: ""                          # template scanner runs folder (originality check)
+v7_db: ~/.alpha_factory/factory.db        # read once by `alpha-factory memory import-v7`
 
 policy:
-  max_submissions_per_day: 4
-  auto_submit: false                     # every submission is confirmed by you
-  regions: [USA, GLB, EUR, ASI, AMR, JPN, GBR, DEU]   # v7: CHN and IND excluded (no results historically); ALL rejected by the platform (11/04)
-  delays: [1]
+  regions: []      # empty = every region the account offers
+  delay: 1
+
+budget:
+  daily_sim_cap: 1000
+  quota_timezone: America/Los_Angeles
+  quota_reset_hour: 21
+
+cost:
+  daily_usd_cap: 5.0
+  usd_per_pass_max: 1.6
