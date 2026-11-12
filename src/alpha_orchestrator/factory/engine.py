@@ -718,7 +718,18 @@ class Engine:
             info = [{"id": f.field_id, "description": f.description[:200]} for f in pool]
             types = {f.field_id: f.type for f in pool}
             preps = {f.field_id: f.prep for f in pool}
+            scanner_shapes = (
+                {
+                    _formula_shape(e)
+                    for e in study.scanner_formulas(
+                        self.config.scanner_runs, cell.region, cell.dataset_id
+                    )
+                }
+                if self.config.scanner_runs
+                else set()
+            )
         ops = self._operator_lines()
+        unoriginal = 0
         exprs: list[tuple[str, str, str | None]] = []
         rejected = ""
         for _ in range(2):
@@ -733,6 +744,13 @@ class Engine:
             exprs, problems = _first_formulas(
                 proposed, types, preps, self.meta.operators, self.meta.signatures
             )
+            # Originality (after AlphaAgent): a formula with the same structure as one the
+            # scanner already ran, windows and numbers aside, is a rewrite, not a new alpha.
+            copies = [e for e in exprs if _formula_shape(e[0]) in scanner_shapes]
+            if copies:
+                unoriginal += len(copies)
+                exprs = [e for e in exprs if e not in copies]
+                problems += [f"{e}: same structure as a formula already run" for e, _, _ in copies]
             exprs = exprs[:FIRST_FORMULAS]
             if len(exprs) >= FIRST_FORMULAS or (exprs and not problems):
                 break
@@ -743,6 +761,8 @@ class Engine:
             assert idea is not None
             cell = s.get(CellORM, idea.cell_id)
             assert cell is not None
+            if unoriginal:
+                idea.extra = {**idea.extra, "unoriginal": unoriginal}
             if not exprs:
                 idea.status = IdeaStatus.DEAD
                 idea.extra = {**idea.extra, "why_dead": "no valid formula after 2 tries"}

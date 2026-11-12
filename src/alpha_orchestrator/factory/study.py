@@ -7,6 +7,7 @@ document does not contain does not belong in this file.
 import csv
 import random
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -288,6 +289,27 @@ def scanner_master_rows(folder: str, region: str, dataset: str) -> list[dict[str
             if (r.get(MASTER_REGION), r.get(MASTER_DATASET)) == (region, dataset)
         ]
     return rows or None
+
+
+def scanner_formulas(folder: str, region: str, dataset: str) -> frozenset[str]:
+    """Every formula the scanner already ran on this dataset (signal or not), so the factory
+    can tell a new alpha from a rewrite of a scanner template. Cached per file version."""
+    path = Path(folder).expanduser() / MASTER_FILE
+    if not path.is_file():
+        return frozenset()
+    return _formulas_by_dataset(str(path), path.stat().st_mtime).get((region, dataset), frozenset())
+
+
+@lru_cache(maxsize=1)
+def _formulas_by_dataset(path: str, _mtime: float) -> dict[tuple[str, str], frozenset[str]]:
+    out: dict[tuple[str, str], set[str]] = {}
+    with open(path, encoding="utf-8-sig", newline="") as fh:
+        for r in csv.DictReader(fh):
+            formula = r.get(MASTER_FORMULA) or ""
+            if formula:
+                key = (r.get(MASTER_REGION) or "", r.get(MASTER_DATASET) or "")
+                out.setdefault(key, set()).add(formula)
+    return {k: frozenset(v) for k, v in out.items()}
 
 
 def scanner_signal_datasets(folder: str) -> set[tuple[str, str]]:
