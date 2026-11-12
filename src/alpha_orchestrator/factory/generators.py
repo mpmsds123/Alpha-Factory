@@ -17,7 +17,7 @@ from alpha_orchestrator.gates.sign_flip import negate
 WINDOWS = (5, 21, 63, 126, 252)
 GROUP_OPERATORS = ("group_rank", "group_zscore", "group_neutralize")
 GROUPS = ("industry", "subindustry", "sector")
-NEUTRALIZATION_BY_CATEGORY = {  # 官方 Neutralization 文档按数据类别的推荐
+NEUTRALIZATION_BY_CATEGORY = {  # Official neutralization guidance by data category
     "fundamental": "INDUSTRY",
     "analyst": "INDUSTRY",
     "earnings": "INDUSTRY",
@@ -29,8 +29,8 @@ NEUTRALIZATION_BY_CATEGORY = {  # 官方 Neutralization 文档按数据类别的
     "institutions": "SECTOR",
     "macro": "SECTOR",
 }
-MAX_TRADE_REGIONS = frozenset({"ASI", "JPN", "HKG", "KOR", "TWN"})  # 规则: must be ON
-COUNTRY_FIRST = frozenset({"EUR", "ASI", "GLB"})  # 官方新人指南
+MAX_TRADE_REGIONS = frozenset({"ASI", "JPN", "HKG", "KOR", "TWN"})  # Platform rule: must be ON
+COUNTRY_FIRST = frozenset({"EUR", "ASI", "GLB"})  # Official newcomer guide
 GROUP_WRAP = re.compile(r"\bgroup_(?:rank|zscore|neutralize)\(")
 HORIZON = re.compile(r"^(?:\d+|\d+[dwmqy]|fy\d+|fq\d+|[qhy]\d|ltm|ntm|ttm)$")  # horizons only
 
@@ -72,7 +72,7 @@ def base_settings(
 
 
 def decay_for_turnover(turnover: float | None) -> int:
-    """官方 machine_lib: pair higher-turnover signals with a larger decay."""
+    """Official helper library: pair higher-turnover signals with a larger decay."""
     if turnover is None:
         return 0
     for limit, decay in ((0.6, 16), (0.4, 8), (0.25, 4)):
@@ -115,9 +115,9 @@ def expand_template(
     rng: Any,
 ) -> list[Proposal]:
     """`{A}`, `{B}` ... take field ids from `slots` (each entering through its `prep`),
-    `{w}` takes each window. Every combination is built, shuffled (官方: random sampling
-    beats the first N in field order), and capped at `limit`. A combination that puts the
-    same field in two slots is skipped."""
+    `{w}` takes each window. Every combination is built, shuffled (official guidance:
+    random sampling beats the first N in field order), and capped at `limit`. A combination
+    that puts the same field in two slots is skipped."""
     names = [n for n in dict.fromkeys(PLACEHOLDER.findall(template)) if n != "w"]
     combos: list[dict[str, str]] = [{}]
     for name in names:
@@ -200,7 +200,7 @@ def repair_proposals(
     neutralizations: Sequence[str],
     may_finetune: bool,
 ) -> list[Proposal]:
-    """One allowed fix per failing check, one variable at a time (设计 第 5 步)."""
+    """One allowed fix per failing check, one variable at a time (design step 5)."""
     out: list[Proposal] = []
     fails = set(fails)
     if "HIGH_TURNOVER" in fails or (turnover or 0) > 0.4:

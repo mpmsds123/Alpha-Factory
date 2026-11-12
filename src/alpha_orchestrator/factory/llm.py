@@ -75,15 +75,14 @@ class FactoryLLM:
         self.config = config
         self.ledger = ledger
         self._complete = complete or self._deepseek
-        self.idea_id: str | None = (
-            None  # 第 9 问: set by the engine so each call is billed to an idea
-        )
-        self.unbilled: list[str] = []  # calls made while no idea existed yet (想点子)
+        # Design Q9: set by the engine so each call is billed to an idea
+        self.idea_id: str | None = None
+        self.unbilled: list[str] = []  # calls made while no idea existed yet (idea generation)
 
     def cost(
         self, model: str, prompt_tokens: int, completion_tokens: int, now: datetime | None = None
     ) -> float:
-        """第 9 问: yuan, tokens x DeepSeek's official price at the hour of the call."""
+        """Design Q9: yuan, tokens x the provider's official price at the hour of the call."""
         table = self.config.llm.prices_cny.get(model)
         if not table:
             return 0.0
@@ -292,7 +291,7 @@ class FactoryLLM:
             if isinstance(c, dict) and isinstance(c.get("expression"), str)
         ]
 
-    # ---------- 设计文档 v1 ----------
+    # ---------- design document v1 ----------
     # No example expression appears in any prompt: the model copies examples (v2 wrote only
     # group_rank, v1 copied rank(ts_delta({X}, 21)) into 11 of 36 ideas).
     def idea(
@@ -306,7 +305,7 @@ class FactoryLLM:
         worked: Sequence[str] = (),
         rejected: str = "",
     ) -> dict[str, Any]:
-        """第 3 步 + 第 2 问: one research idea grounded in this dataset's fields, citing
+        """Step 3 + Design Q2: one research idea grounded in this dataset's fields, citing
         exactly one piece of evidence the program can check. No formula yet."""
         prompt: dict[str, Any] = {
             "task": "Propose ONE new research idea for an alpha on this dataset.",
@@ -340,7 +339,7 @@ class FactoryLLM:
         return self.ask("idea", json.dumps(prompt, ensure_ascii=False), strong=True)
 
     def supports(self, mechanism: str, quote: str) -> tuple[bool, str]:
-        """第 2 问 决定 B: does the quoted passage support the stated mechanism?"""
+        """Design Q2, decision B: does the quoted passage support the stated mechanism?"""
         prompt = {
             "task": "Judge whether the quoted passage supports the claim. A passage about a "
             "different outcome (for example risk instead of returns) does not support it.",
@@ -354,7 +353,7 @@ class FactoryLLM:
     def score_fields(
         self, idea: dict[str, Any], fields: Sequence[dict[str, str]]
     ) -> dict[str, tuple[int, str, str]]:
-        """第 4 步: relevance 0-10, a one-line reason, and what the field measures (so
+        """Step 4: relevance 0-10, a one-line reason, and what the field measures (so
         versions of the same quantity can be told apart)."""
         prompt = {
             "task": "Rate how well each field can carry this idea, 0 (unrelated) to 10 "
@@ -422,7 +421,7 @@ class FactoryLLM:
     def improve(
         self, idea: dict[str, Any], parents: Sequence[dict[str, Any]], steps: dict[str, str]
     ) -> list[dict[str, str]]:
-        """第 7 步 + 第 5 问: up to 3 one-change variants per parent, each naming the step of
+        """Step 7 + Design Q5: up to 3 one-change variants per parent, each naming the step of
         the logic chain it applies (the change's evidence)."""
         prompt = {
             "task": "For each parent expression propose up to 3 variants. Each variant "
@@ -462,7 +461,7 @@ class FactoryLLM:
             out.append(item)
         return out
 
-    # ---------- v4 (现行设计, 10/14 晚) + cnhkmcp guides (10/15) ----------
+    # ---------- v4 (current design, 10/14) + public guidance documents (10/15) ----------
     @staticmethod
     def guide(name: str) -> str:
         """Return a packaged guidance document from default_prompts/guides/ ("" if absent)."""
@@ -561,7 +560,7 @@ class FactoryLLM:
         tried: Sequence[str] = (),
         past: Sequence[dict[str, Any]] = (),
     ) -> list[dict[str, Any]]:
-        """第 2 步: read every field description; return up to n groups, each one economic
+        """Step 2: read every field description; return up to n groups, each one economic
         meaning a researcher would test, with its expected direction and up to 3 fields.
         v7: `past` carries finished ideas from every dataset (R&D-Agent(Q) knowledge forest)."""
         prompt = {
@@ -630,7 +629,7 @@ class FactoryLLM:
         n: int,
         rejected: str = "",
     ) -> list[dict[str, str]]:
-        """第 3 步: n formulas stating one group's idea from n different angles."""
+        """Step 3: n formulas stating one group's idea from n different angles."""
         prompt = {
             "task": f"Write {n} formulas that test this idea, each from a different angle "
             "(for example: the level, the change over time, relative to the industry).",
@@ -680,7 +679,7 @@ class FactoryLLM:
         *,
         requirements: dict[str, float] | None = None,
     ) -> dict[str, Any]:
-        """第 5+6 步: diagnose the best formula from the WHOLE history of this idea, then
+        """Steps 5+6: diagnose the best formula from the WHOLE history of this idea, then
         give up or propose n one-change variants of the best one."""
         prompt = {
             "task": "Diagnose why the best formula of this idea does not pass the "
@@ -781,7 +780,7 @@ class FactoryLLM:
         menu: Sequence[dict[str, Any]],
         n: int,
     ) -> dict[str, Any]:
-        """v7 第 6 步: the program has diagnosed the problem; the LLM picks up to n fixes from
+        """v7 step 6: the program has diagnosed the problem; the LLM picks up to n fixes from
         the menu that suit this idea's economics, or gives up. It writes no formula."""
         prompt = {
             "task": "Choose fixes for the best formula of this idea. The program has "

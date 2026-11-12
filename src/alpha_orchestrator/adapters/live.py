@@ -58,7 +58,7 @@ FIELDS_PAGE_SIZE = 50
 # a dataset with 600+ fields is 13+ consecutive GETs. BRAIN answers 429 for that burst.
 # The official API session states the pause between pages explicitly -- five seconds --
 # so it is recorded here as a default rather than tuned by trial.
-# [source: WQ官方课程字幕全文.md:125] (锚点: 避免咱们平台报429的错误)
+# Source: official course transcript (section on avoiding HTTP 429 errors).
 FIELDS_PAGE_PAUSE_SECONDS = 5.0
 
 # A 429 is a pacing signal, not a research result, so one paced retry is attempted before

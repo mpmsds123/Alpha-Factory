@@ -61,9 +61,10 @@ class Stage:
     REPAIR = "REPAIR"  # one-variable fix routed by the failing check
     FLIP = "FLIP"  # multiply(-1, parent)
     ROBUST = "ROBUST"  # stress variant of a candidate (rank, sign, perturbation, ...)
-    FIELD = "FIELD"  # 设计文档 第 5 步: one field in an idea's simplest form
-    ENHANCE = "ENHANCE"  # 加强: liquidity/size-bucket grouping, then trade_when, around a near miss
-    IMPROVE = "IMPROVE"  # 设计文档 第 7 步: one-change variant of a parent
+    FIELD = "FIELD"  # Design step 5: one field in an idea's simplest form
+    # Enhance: liquidity/size-bucket grouping, then a trade condition, around a near miss
+    ENHANCE = "ENHANCE"
+    IMPROVE = "IMPROVE"  # Design step 7: one-change variant of a parent
 
 
 class HypothesisStatus:
@@ -234,10 +235,12 @@ class LLMCallORM(FactoryBase):
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)  # unused since 10/14
-    cost_cny: Mapped[float] = mapped_column(Float, default=0.0)  # 第 9 问: what DeepSeek bills
+    cost_cny: Mapped[float] = mapped_column(
+        Float, default=0.0
+    )  # Design Q9: what the LLM provider bills
     ok: Mapped[bool] = mapped_column(Boolean, default=True)
     error: Mapped[str | None] = mapped_column(Text)
-    idea_id: Mapped[str | None] = mapped_column(String(36))  # 第 9 问: which idea paid for it
+    idea_id: Mapped[str | None] = mapped_column(String(36))  # Design Q9: which idea paid for it
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -261,7 +264,7 @@ class IdeaStatus:
 
 
 class ResearchIdeaORM(FactoryBase):
-    """One research idea on one dataset (设计文档 第 3 步)."""
+    """One research idea on one dataset (design step 3)."""
 
     __tablename__ = "research_ideas"
 
@@ -281,7 +284,7 @@ class ResearchIdeaORM(FactoryBase):
 
 
 class IdeaFieldORM(FactoryBase):
-    """One field ranked for one idea (设计文档 第 4 步) and its first test (第 5 步)."""
+    """One field ranked for one idea (design step 4) and its first test (step 5)."""
 
     __tablename__ = "idea_fields"
     __table_args__ = (UniqueConstraint("idea_id", "field_id"),)

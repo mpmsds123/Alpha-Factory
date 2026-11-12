@@ -1,4 +1,4 @@
-"""Local pre-checks. One bad expression fails a whole multi-simulation (官方 API 课),
+"""Local pre-checks. One bad expression fails a whole multi-simulation (official API course),
 so nothing reaches the platform before passing here."""
 
 import re
@@ -9,7 +9,7 @@ from alpha_orchestrator.domain.identity import tokenize_expression
 from alpha_orchestrator.gates.structural import GROUP_CLASSIFICATION_IDENTIFIERS
 
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-FREE_OPERATORS = frozenset({"ts_backfill", "group_backfill"})  # 规则: not counted
+FREE_OPERATORS = frozenset({"ts_backfill", "group_backfill"})  # Platform rule: not counted
 MAX_OPERATORS = 8
 KEYWORDS = frozenset({"true", "false", "nan", "inf"})
 # Price-volume fields exist in every region (dataset pv1). Using them breaks ATOM purity.

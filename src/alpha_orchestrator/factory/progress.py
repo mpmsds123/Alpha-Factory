@@ -1,6 +1,8 @@
-"""工厂_进度.csv: one row per allocation day, so the factory's state is visible from the
-folder the same way the scanner's runs/*.csv are. Numbers come from the ledger; the 状态
-column is what the latest invocation reported (kept from the previous file for past days)."""
+"""The factory progress CSV: one row per allocation day, so the factory's state is visible
+from the folder the same way the scanner's runs/*.csv are. Numbers come from the ledger;
+the status column is what the latest invocation reported (kept from the previous file for
+past days).
+"""
 
 import csv
 import json

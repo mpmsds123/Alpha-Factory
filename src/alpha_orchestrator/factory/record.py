@@ -1,4 +1,4 @@
-"""中间产物页: what every step of 设计文档 v1 actually used and produced, straight from the
+"""Intermediate-results page: what every step of design document v1 actually used and produced, straight from the
 ledger. Nothing here is a summary written by the program; every row is stored data."""
 
 # ruff: noqa: E501  (HTML table rows read better on one line)

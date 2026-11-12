@@ -2,7 +2,7 @@
 
 A cell is (region, delay, universe, dataset). The universe per region is the broadest one
 your account offers, because sub-universe tests are easier to pass from a wide pool
-(规则手册) and the IQC runs used the same choice.
+(rules handbook) and the IQC runs used the same choice.
 """
 
 from collections import Counter

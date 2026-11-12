@@ -1,7 +1,7 @@
-"""设计文档 v1, steps 3-9, and one day of running them (第 5 节).
+"""Design document v1, steps 3-9, and one day of running them (section 5).
 
-Every rule below names its step in the design document. Numbers marked 提议 there are the
-module constants here; nothing else decides.
+Every rule below names its step in the design document. Numbers marked as proposals there
+are the module constants here; nothing else decides.
 """
 
 import copy
@@ -45,33 +45,33 @@ from alpha_orchestrator.factory.scheduler import Simulator
 from alpha_orchestrator.factory.select import store_passing
 from alpha_orchestrator.factory.validate import MAX_OPERATORS, check
 
-# 第 3 步
+# Step 3
 FIELD_LINES = 200  # field families shown to the LLM
-MAX_FORM_OPERATORS = 4  # 第 4 问: 4 + one per round x 4 rounds = 8, the Power Pool limit
-IDEA_FAILS_TO_STOP = 2  # 第 6 问: 2 failed ideas in a row (cost cap) -> the dataset is done
-# 第 4 步
+MAX_FORM_OPERATORS = 4  # Design Q4: 4 + one per round x 4 rounds = 8, the Power Pool limit
+IDEA_FAILS_TO_STOP = 2  # Design Q6: 2 failed ideas in a row (cost cap) -> the dataset is done
+# Step 4: coarse keyword filter, then LLM scoring in batches; keep fields scoring >= 6/10
 COARSE = 300
 SCORE_BATCH = 100
 KEEP_SCORE = 6
-# 第 5 步 (2026-10-05 修改)
+# Step 5 (revised 2026-10-05)
 FORMULAS = 5  # per idea; a batch of 10 holds two ideas (scheduler mixes ideas in a batch)
 FORMULA_FIELDS = 8  # distinct quantities the LLM may combine in its formulas
-# 第 3 问 (10/14): no control arm; the template scanner is the control
-# 第 4 问 (10/14): an idea whose best first formula is under the luck line of its tries
+# Design Q3 (10/14): no control arm; the template scanner is the control
+# Design Q4 (10/14): an idea whose best first formula is under the luck line of its tries
 # (0.81 for 5 tries at noise 0.316) cannot be told from noise and stops there
 GATE_CONFIDENCE = 0.95
-# 第 1 问: an idea "hits" when one of its formulas passes the regular line (_passes_floor)
-# 第 5 问 (10/14)
-PARENTS = 1  # 现行设计 第 5+6 步: every change starts from the current best formula
+# Design Q1: an idea "hits" when one of its formulas passes the regular line (_passes_floor)
+# Design Q5 (10/14)
+PARENTS = 1  # Current design steps 5+6: every change starts from the current best formula
 VARIANTS = 3
-DRY_ROUNDS = 1  # 现行设计 第 7 步: a round that does not add refine_min_gain (0.1) stops it
-MAX_ROUNDS = 3  # 现行设计 第 7 步: at most 3 + 3x3 = 12 simulations per idea
-# 现行设计 (10/14 晚)
-GROUPS = 8  # 第 2 步: 100 simulations / 12 per idea
-FIRST_FORMULAS = 3  # 第 3 步
-FIRST_OPERATORS = 5  # 第 3 步: 5 + one change per round x 3 rounds = 8, the Power Pool limit
+DRY_ROUNDS = 1  # Current design step 7: a round that does not add refine_min_gain stops it
+MAX_ROUNDS = 3  # Current design step 7: at most 3 + 3x3 = 12 simulations per idea
+# Current design (10/14 evening)
+GROUPS = 8  # Step 2: 100 simulations / 12 per idea
+FIRST_FORMULAS = 3  # Step 3
+FIRST_OPERATORS = 5  # Step 3: 5 + one change per round x 3 rounds = 8, the Power Pool limit
 FORMULA_MAX_FIELDS = 3  # Power Pool
-# 第 7 步. Was 0.8 (the 5% luck line of 3 noise formulas at sigma 0.316). Measured sigma is
+# Step 7. Was 0.8 (the 5% luck line of 3 noise formulas at sigma 0.316). Measured sigma is
 # 0.36-0.58 per dataset (pooled 0.49), so 0.8 is passed by noise 9%-77% of the time. At 1.0
 # the 23 ideas whose best first formula sat in 0.8-1.0 are no longer improved: they cost 49
 # backtests (6% of 817) and none later reached 1.2; all 17 ideas that reached 1.2, and all 8
@@ -80,23 +80,27 @@ FIRST_GATE = 1.0
 HORIZONS = (5, 21, 63, 126, 252)  # the windows the system prompt allows
 GROUP_FIELD_LINES = 400
 DIRECTION_SHORTLIST = 8
-# 10/15 第一次正式跑后的修改
-GROUP_REFILLS = 10  # 安全上限；真正的停止条件是数据集预算（100 次）用完
-# 10/15 定：先侦察 8 组；一个都没过 0.8 → 这个数据集没信号，换下一个；有过的 → 补新组
-# 直到预算用完。误扔一个有信号数据集的概率约 0.8^8 = 17%（每组过 0.8 的机会按 20% 估）
-NEAR_MISS = 1.2  # Sharpe 到这里离正式线只差一步：改进没涨够 0.35 也继续改，直到 3 轮
-# 加强（10/16）：改进完仍没过线、但 Sharpe ≥ NEAR_MISS 的公式，按扫描器二阶/三阶验证过的结构再试。
-# 第 1 步 4 次：按成交额或市值分 10 档，在档内比较。第二轮两条 1.58 都只卡在子股票池检查
-# （信号集中在小盘股）；扫描器期权数据集二阶里，成交额分档 15/31、市值分档 10/31 过三条线，
-# 其他分组 ≤ 4/16。
-_DECILES = "densify(bucket(rank({x}), range='0.1, 1, 0.1'))"  # 单引号：扫描器跑过上千次的写法
+# Revised after the first production run (10/15)
+GROUP_REFILLS = 10  # Safety cap; the real stop is the dataset budget (100 simulations) running out
+# Decided 10/15: scout 8 groups first; none above 0.8 -> no signal, move on; any above ->
+# add new groups until the budget is spent. The chance of wrongly dropping a dataset with
+# signal is about 0.8^8 = 17% (assuming a 20% chance per group of passing 0.8).
+# One step from the submission line: keep refining up to 3 rounds even if gains are < 0.35
+NEAR_MISS = 1.2
+# Enhance (10/16): formulas still below the line after refinement but with Sharpe >= NEAR_MISS get
+# structures validated by the scanner's 2nd/3rd-order runs. Stage 1, 4 tries: compare within 10
+# liquidity or size buckets. In round 2 both 1.58 formulas failed only the sub-universe check
+# (signal concentrated in small caps); in the scanner, these buckets passed most often.
+# Single quotes: the exact form the scanner has run thousands of times.
+_DECILES = "densify(bucket(rank({x}), range='0.1, 1, 0.1'))"
 ENHANCE_GROUPS = tuple(
     f"{op}({{f}}, {_DECILES.format(x=x)})"
     for x in ("close*volume", "cap")
     for op in ("group_zscore", "group_neutralize")
 )
-# 第 2 步 2 次：在第 1 步最好的那条外面加 trade_when（只在条件成立时换仓，-1 = 不强制平仓）。
-# 扫描器三阶里这两个条件各 13/25 过三条线，并列最高，一个看放量、一个看高波动。
+# Stage 2, 2 tries: wrap the best stage-1 formula in a trade condition (-1 = never force-close).
+# In the scanner's 3rd-order runs these two conditions passed most often
+# (volume surge, high volatility).
 ENHANCE_TIMING = (
     "trade_when(ts_mean(volume, 10) > ts_mean(volume, 60), {f}, -1)",
     "trade_when(group_rank(ts_std_dev(returns, 60), sector) > 0.7, {f}, -1)",
@@ -111,8 +115,8 @@ PROBLEMS = (
     "other (say what)",
 )
 SAME_FAIL_LIMIT = 3  # alpha-mining: 3 variants failing the same check -> change the formula
-# 第 5 节
-ACTIVE_IDEAS = 2  # 提议
+# Section 5: one day of running
+ACTIVE_IDEAS = 2  # proposed value in the design document
 # v7: 6 ideas in flight. In v6 two ideas used 17% of the daily quota (peak 321 of 1,000):
 # each idea waits for its own backtests, so more ideas in parallel keep the platform busy.
 V7_ACTIVE_IDEAS = 6
@@ -124,8 +128,8 @@ PAST_IDEAS = 40  # v7: finished ideas shown to idea generation
 # platform busy and builds no backlog. The ledger of 2026-10-31 shows up to 48 waiting at once.
 QUEUE_CAP = 20
 CHUNK = 20  # simulations between decisions
-NO_FLIP_REGIONS = frozenset({"CHN"})  # 第 6 步: short side is constrained in China
-ROBUST_ROLES = frozenset({"neutralization"})  # 第 7 问: the platform checks sub-universe
+NO_FLIP_REGIONS = frozenset({"CHN"})  # Step 6: short side is constrained in China
+ROBUST_ROLES = frozenset({"neutralization"})  # Design Q7: the platform checks sub-universe
 PENDING = (CandidateStatus.QUEUED, CandidateStatus.RUNNING)
 WORD = re.compile(r"[a-z0-9]+")
 
@@ -138,7 +142,7 @@ def luck_line(n: int, sigma: float) -> float:
 
 
 def first_gate(n: int, sigma: float) -> float:
-    """第 4 问: 0.81 for 5 first formulas at noise 0.316."""
+    """Design Q4: 0.81 for 5 first formulas at noise 0.316."""
     return luck_line(n, sigma)
 
 
@@ -240,7 +244,7 @@ class Engine:
         return None
 
     def _open_dataset(self) -> str | None:
-        """第 1-2 步, repeated until a dataset has usable fields."""
+        """Steps 1-2, repeated until a dataset has usable fields."""
         for _ in range(30):
             if self.config.design == "v7" and self.config.direction_trial:
                 cell_id = self._choose_direction()
@@ -253,7 +257,7 @@ class Engine:
                 with self.ledger.session() as s:
                     cell = s.get(CellORM, cell_id)
                     assert cell is not None
-                    # 第 6 问: the 1000-simulation budget counts from here
+                    # Design Q6: the 1000-simulation budget counts from here
                     cell.plan = {**(cell.plan or {}), "sims_at_open": cell.sims_used}
                     self.ledger.log(s, "dataset_opened", cell_id)
                 return cell_id
@@ -456,7 +460,7 @@ class Engine:
             )
 
     def _dataset_finished(self, cell_id: str) -> bool:
-        """第 6 问: the dataset's 1000 simulations are spent, or the LLM failed to give a
+        """Design Q6: the dataset's 1000 simulations are spent, or the LLM failed to give a
         valid new idea IDEA_FAILS_TO_STOP times in a row."""
         with self.ledger.session() as s:
             cell = s.get(CellORM, cell_id)
@@ -473,7 +477,7 @@ class Engine:
                     int(plan.get("refills", 0)) >= GROUP_REFILLS or not self._has_signal(s, cell_id)
                 )
             ):
-                return True  # 侦察完没信号，或补组到上限
+                return True  # no signal after scouting, or group refills hit the cap
             return int(plan.get("idea_fail_streak", 0)) >= IDEA_FAILS_TO_STOP
 
     def _close_dataset(self, cell_id: str) -> None:
@@ -526,7 +530,7 @@ class Engine:
             )
             self.ledger.log(s, "dataset_closed", cell_id, outcome=outcome, ideas=len(ideas))
 
-    # ======================= 现行设计 第 2-4 步 =======================
+    # ======================= Current design steps 2-4 =======================
     def _brief(self, cell: CellORM) -> dict[str, Any]:
         brief = {
             "id": cell.dataset_id,
@@ -542,7 +546,7 @@ class Engine:
         return brief
 
     def _groups(self, cell_id: str, refill: bool = False) -> list[dict[str, Any]] | None:
-        """第 2 步: one LLM call per dataset reads every field description and returns up
+        """Step 2: one LLM call per dataset reads every field description and returns up
         to GROUPS field groups; field ids that do not exist are dropped. refill=True asks
         for GROUPS more, different from those already tried (budget left over)."""
         with self.ledger.session() as s:
@@ -624,7 +628,7 @@ class Engine:
         return groups
 
     def _new_idea(self, cell_id: str) -> str | None:
-        """第 3 步: the next field group becomes an idea; its 3 first formulas are queued."""
+        """Step 3: the next field group becomes an idea; its 3 first formulas are queued."""
         groups = self._groups(cell_id)
         if groups is None:
             with self.ledger.session() as s:
@@ -674,7 +678,7 @@ class Engine:
         return idea_id
 
     def _queue_tests(self, idea_id: str) -> int:
-        """第 3-4 步: FIRST_FORMULAS formulas; invalid ones go back to the LLM once with the
+        """Steps 3-4: FIRST_FORMULAS formulas; invalid ones go back to the LLM once with the
         exact errors; still invalid -> dropped, never sent (one bad formula cancels a batch)."""
         self.llm.idea_id = idea_id
         with self.ledger.session() as s:
@@ -778,7 +782,7 @@ class Engine:
     def _operator_lines(self) -> list[str]:
         return sorted(f"{k}: {v}"[:160] for k, v in self.meta.definitions.items())
 
-    # ======================= 第 6-7 步 =======================
+    # ======================= Steps 6-7 =======================
     def _step_idea(self, idea_id: str) -> int:
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
@@ -804,9 +808,9 @@ class Engine:
         return 0
 
     def _judge(self, idea_id: str) -> None:
-        """第 4 问: the best first formula must clear the luck line of the tries (0.81 for
+        """Design Q4: the best first formula must clear the luck line of the tries (0.81 for
         5 at noise 0.316); then the best two go to step 7, a negative one mirrored first
-        (第 3 问: direct mirroring, never in CHN)."""
+        (Design Q3: direct mirroring, never in CHN)."""
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
             assert idea is not None
@@ -877,7 +881,7 @@ class Engine:
             )
 
     def _start_improving(self, idea_id: str) -> None:
-        """第 7 步: the best of step 6 become parents (their mirror when negative)."""
+        """Step 7: the best of step 6 become parents (their mirror when negative)."""
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
             assert idea is not None
@@ -899,7 +903,7 @@ class Engine:
         self._queue_round(idea_id)
 
     def _queue_round(self, idea_id: str) -> None:
-        """第 5+6 步: the LLM sees every formula this idea tried (worse ones included), the
+        """Steps 5+6: the LLM sees every formula this idea tried (worse ones included), the
         best one's yearly Sharpe and the field descriptions; it gives up or proposes
         VARIANTS one-change variants of the best. Repeats and invalid ones go back once."""
         if self.config.design == "v7":
@@ -1055,7 +1059,7 @@ class Engine:
                 self._finish_idea(s, idea)
 
     def _settle_round(self, idea_id: str) -> None:
-        """第 5 问: a variant replaces its parent only when it is 0.35 better."""
+        """Design Q5: a variant replaces its parent only when it is 0.35 better."""
         if self.config.design == "v7":
             self._settle_fix_round(idea_id)
             return
@@ -1088,7 +1092,7 @@ class Engine:
                 p["rounds"] += 1
                 p["pending"] = []
                 # the same first failing check on every variant, SAME_FAIL_LIMIT times: the
-                # structure is blocked, stop fixing this one (alpha-mining 停止条件)
+                # structure is blocked, stop fixing this one (alpha-mining stop condition)
                 first_fails = {(k.fails or "").split(",")[0] for k in kids if k.fails}
                 if len(first_fails) == 1:
                     fail = first_fails.pop()
@@ -1113,7 +1117,7 @@ class Engine:
             )
         self._queue_round(idea_id)
 
-    # ======================= v7 第 5-7 步: menu + Thompson sampling =======================
+    # ======================= v7 steps 5-7: menu + Thompson sampling =======================
     def _fix_stats(self, s: Session) -> fixes.Stats:
         """Every finished variant whose change is a menu fix, v6 enhancement rows included
         (same wrappers): (problem, fix) -> [successes, failures]. Success = fewer failed
@@ -1448,7 +1452,7 @@ class Engine:
             )
         self._queue_fix_round(idea_id)
 
-    # ======================= 第 8 步 排除运气 =======================
+    # ======================= Step 8: rule out luck =======================
     def evaluate(self) -> int:
         """Records new results; anything passing the platform floor is stress-tested."""
         ready = 0
@@ -1514,7 +1518,7 @@ class Engine:
             )
             if any(k.status in PENDING for k in kids):
                 continue
-            # 第 7 问: no luck line (the regular line is far above it); the other
+            # Design Q7: no luck line (the regular line is far above it); the other
             # neutralization must keep robust_keep_ratio of the Sharpe
             base = parent.sharpe or 0.0
             ratios = {k.role: round((k.sharpe or 0.0) / base, 3) if base else 0.0 for k in kids}
@@ -1641,7 +1645,7 @@ class Engine:
         return abs(c.sharpe or 0) > self.config.thresholds.suspicious_sharpe
 
     def _finish_idea(self, s: Session, idea: ResearchIdeaORM) -> None:
-        """第 1 问: an idea hits when one of its formulas passes the regular line."""
+        """Design Q1: an idea hits when one of its formulas passes the regular line."""
         cell = s.get(CellORM, idea.cell_id)
         rows = [
             c
@@ -1672,7 +1676,7 @@ class Engine:
             }
             self.ledger.log(s, "idea_dead", idea.cell_id, idea=idea.id, best=idea.best_sharpe)
 
-    # ======================= 加强 =======================
+    # ======================= Enhance =======================
     def _start_enhance(
         self, s: Session, idea: ResearchIdeaORM, cell: CellORM, rows: list[CandidateORM]
     ) -> bool:
@@ -1771,8 +1775,8 @@ class Engine:
             ]
 
     def revive_near_misses(self) -> int:
-        """Ideas closed before 加强 existed whose best Sharpe reached NEAR_MISS get it now
-        (the datasets in only_datasets, current design)."""
+        """Ideas closed before the enhance stage existed whose best Sharpe reached NEAR_MISS
+        get it now (the datasets in only_datasets, current design)."""
         n = 0
         with self.ledger.session() as s:
             _, excluded = exception_scope(s, self.config)
@@ -1907,7 +1911,7 @@ def _first_formulas(
     operators: set[str],
     signatures: dict[str, tuple[int, int]],
 ) -> tuple[list[tuple[str, str, str | None]], list[str]]:
-    """第 3-4 步: valid formulas (fields replaced by their prep) and the reasons the others
+    """Steps 3-4: valid formulas (fields replaced by their prep) and the reasons the others
     were rejected, to send back to the LLM."""
     plain = {fid: "GROUP" if t == "GROUP" else "MATRIX" for fid, t in types.items()}
     out: list[tuple[str, str, str | None]] = []
@@ -1995,7 +1999,7 @@ def _formula_shape(expression: str) -> str:
 
 
 def _knowledge(s: Session) -> tuple[list[str], list[str]]:
-    """第 9 步 fed back to 第 3 步: recent dead ends and what reached Sharpe 1."""
+    """Step 9 fed back to step 3: recent dead ends and what reached Sharpe 1."""
     dead: list[str] = []
     worked: list[str] = []
     for i in s.scalars(
@@ -2012,7 +2016,7 @@ def _knowledge(s: Session) -> tuple[list[str], list[str]]:
 
 
 def _past_ideas(s: Session, limit: int) -> list[dict[str, Any]]:
-    """v7 第 2 步 memory (R&D-Agent(Q) knowledge forest): the latest finished ideas from
+    """v7 step 2 memory (R&D-Agent(Q) knowledge forest): the latest finished ideas from
     every dataset and design, with what happened to them. No formula text."""
     out: list[dict[str, Any]] = []
     for i in s.scalars(
@@ -2056,7 +2060,7 @@ def _family_lines(fields: list[FieldORM]) -> list[dict[str, str]]:
 
 
 def _bm25(query: str, fields: list[FieldORM], k1: float = 1.4, b: float = 0.75) -> list[FieldORM]:
-    """第 4 步 coarse filter: keyword relevance of name + description to the idea."""
+    """Step 4 coarse filter: keyword relevance of name + description to the idea."""
     docs = [tokens(f"{f.field_id.replace('_', ' ')} {f.description}") for f in fields]
     if not docs:
         return []
@@ -2082,7 +2086,7 @@ def _bm25(query: str, fields: list[FieldORM], k1: float = 1.4, b: float = 0.75) 
     return [fields[i] for _, i in scored]
 
 
-# ======================= 第 5 节 one day =======================
+# ======================= Section 5: one day =======================
 @dataclass
 class DayReport:
     simulations: int = 0
@@ -2217,7 +2221,7 @@ def run_day(
     else:
         report.stopped_because = report.stopped_because or "daily budget spent"
     engine.evaluate()
-    report.reviews = store_passing(api, ledger, config)  # 第 10 问: all of them, you pick
+    report.reviews = store_passing(api, ledger, config)  # Design Q10: all of them, you pick
     with ledger.session() as s:
         ledger.log(
             s,
