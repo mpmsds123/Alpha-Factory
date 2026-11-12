@@ -1,43 +1,41 @@
-"""Ledger access: one place that opens sessions and enforces de-duplication."""
+"""Database access: sessions, the single-writer lock, de-duplication, the event log.
+
+Events (batch started, concurrency learned, ...) are an operational audit trail, not
+research data, so they go to a JSON-lines file next to the database.
+"""
 
 import fcntl
+import json
 import re
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import datetime
 from functools import wraps
 from inspect import signature
 from pathlib import Path
 from typing import Any, ParamSpec, TypeVar
 
-from sqlalchemy import Engine, create_engine, event, func, inspect, select, text
+from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from alpha_orchestrator.factory.models import (
-    BatchORM,
-    CandidateORM,
-    CandidateStatus,
-    EventORM,
-    FactoryBase,
-)
-from alpha_orchestrator.factory.util import canonical_json, sha256_text
+from alpha_orchestrator.factory.models import Base, BatchORM, SimStatus, SimulationORM
+from alpha_orchestrator.factory.util import canonical_json, sha256_text, utc_now
 
 P = ParamSpec("P")
 R = TypeVar("R")
 
 
 class WorkerAlreadyRunning(RuntimeError):
-    """A second worker must not plan or spend from the same ledger."""
+    """A second worker must not plan or spend from the same database."""
 
 
 def ledger_locked(function: Callable[P, R]) -> Callable[P, R]:
-    """Decorate a function so it runs holding the ledger's writer lock."""
+    """Run the decorated function holding the ledger's writer lock."""
 
     @wraps(function)
     def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
-        """Call the wrapped function while holding the writer lock."""
         ledger = signature(function).bind(*args, **kwargs).arguments["ledger"]
         with ledger.writer_lock():
             return function(*args, **kwargs)
@@ -50,49 +48,8 @@ def fingerprint(expression: str, settings: dict[str, Any]) -> str:
     return sha256_text(re.sub(r"\s+", "", expression) + "\x1f" + canonical_json(settings))
 
 
-def _upgrade_empty_tables(engine: Engine) -> None:
-    """Brings an older ledger up to the current layout without losing rows: every column
-    the models have and the file lacks is added with its default."""
-    existing = inspect(engine)
-    statements = []
-    for table in FactoryBase.metadata.sorted_tables:
-        if not existing.has_table(table.name):
-            continue
-        have = {c["name"] for c in existing.get_columns(table.name)}
-        for column in table.columns:
-            if column.name in have:
-                continue
-            sql_type = column.type.compile(dialect=engine.dialect)
-            default = getattr(column.default, "arg", None)
-            if callable(default):
-                default = default(None) if default.__name__ != "utc_now" else None
-            if isinstance(default, bool):
-                literal = "1" if default else "0"
-            elif isinstance(default, (int, float)):
-                literal = str(default)
-            elif isinstance(default, (dict, list)):
-                literal = "'" + ("{}" if isinstance(default, dict) else "[]") + "'"
-            elif isinstance(default, str):
-                literal = "'" + default.replace("'", "''") + "'"
-            else:
-                literal = "NULL"
-            statements.append(
-                f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {sql_type} '
-                f"DEFAULT {literal}"
-            )
-    if statements:
-        with engine.begin() as conn:
-            for stmt in statements:
-                conn.execute(text(stmt))
-
-
-def today_utc() -> str:
-    """Return today's UTC date as YYYY-MM-DD."""
-    return datetime.now(UTC).date().isoformat()
-
-
 class Ledger:
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, events_path: Path | None = None) -> None:
         kwargs: dict[str, Any] = {"connect_args": {"check_same_thread": False}}
         if url in {"sqlite://", "sqlite:///:memory:"}:
             kwargs["poolclass"] = StaticPool
@@ -100,19 +57,29 @@ class Ledger:
         event.listen(self.engine, "connect", _sqlite_pragmas)
         self._worker_mutex = threading.Lock()
         self._worker_owner: int | None = None
-        with self.writer_lock():
-            _upgrade_empty_tables(self.engine)
-            FactoryBase.metadata.create_all(self.engine)
+        database = self.engine.url.database
+        self.events_path = events_path or (
+            Path(database + ".events.jsonl") if database and database != ":memory:" else None
+        )
+        self._memory_events: list[dict[str, Any]] = []
+        Base.metadata.create_all(self.engine)
         self._sessions = sessionmaker(bind=self.engine, expire_on_commit=False)
+
+    @classmethod
+    def at(cls, path: Path) -> "Ledger":
+        """Open (creating if needed) a SQLite database at path."""
+        path = path.expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return cls(f"sqlite:///{path.resolve()}")
 
     @contextmanager
     def writer_lock(self) -> Iterator[None]:
-        """Single host, single ledger writer; released by the OS even after a crash."""
+        """Single host, single writer; released by the OS even after a crash."""
         if self._worker_owner == threading.get_ident():
             yield
             return
         if not self._worker_mutex.acquire(blocking=False):
-            raise WorkerAlreadyRunning("Another worker owns this ledger")
+            raise WorkerAlreadyRunning("Another worker owns this database")
         try:
             database = self.engine.url.database
             if not database or database == ":memory:":
@@ -126,7 +93,7 @@ class Ledger:
                 try:
                     fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError as exc:
-                    raise WorkerAlreadyRunning("Another worker owns this ledger") from exc
+                    raise WorkerAlreadyRunning("Another worker owns this database") from exc
                 self._worker_owner = threading.get_ident()
                 try:
                     yield
@@ -136,95 +103,57 @@ class Ledger:
         finally:
             self._worker_mutex.release()
 
-    @classmethod
-    def at(cls, path: Path) -> "Ledger":
-        """Open (creating if needed) a SQLite ledger at path."""
-        path = path.expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        return cls(f"sqlite:///{path.resolve()}")
-
     @contextmanager
     def session(self) -> Iterator[Session]:
-        """Yield a database session inside a transaction."""
+        """Yield a session inside a transaction."""
         with self._sessions.begin() as s:
             yield s
 
-    # ---------- candidates ----------
-    def add_candidate(self, s: Session, **values: Any) -> CandidateORM | None:
-        """Insert unless the same expression+settings exists anywhere in the ledger."""
-        row, created = self.get_or_add(s, **values)
-        return row if created else None
-
-    def get_or_add(self, s: Session, **values: Any) -> tuple[CandidateORM, bool]:
-        """The existing row for this expression+settings (its result is reused, never
-        simulated twice), or a new queued one."""
-        fp = fingerprint(values["expression"], values["settings"])
-        found = s.scalar(select(CandidateORM).where(CandidateORM.fingerprint == fp))
-        if found is not None:
-            return found, False
-        candidate = CandidateORM(fingerprint=fp, **values)
-        s.add(candidate)
-        s.flush()
-        return candidate, True
+    # ---------- simulation queue ----------
+    def queue_groups(self, s: Session, excluded: set[int] | None = None) -> list[tuple[str, int]]:
+        """(region, delay) of every non-empty queue, highest priority first."""
+        stmt = (
+            select(SimulationORM.region, SimulationORM.delay, func.max(SimulationORM.priority))
+            .where(
+                SimulationORM.status == SimStatus.QUEUED,
+                SimulationORM.hypothesis_id.not_in(excluded or set()),
+            )
+            .group_by(SimulationORM.region, SimulationORM.delay)
+            .order_by(func.max(SimulationORM.priority).desc())
+        )
+        return [(r, int(d)) for r, d, _ in s.execute(stmt)]
 
     def queued(
-        self,
-        s: Session,
-        region: str,
-        delay: int,
-        limit: int,
-        excluded_cells: set[str] | None = None,
-    ) -> list[CandidateORM]:
-        """Return queued candidates in scheduling order."""
-        from alpha_orchestrator.factory.models import CellORM
-
+        self, s: Session, region: str, delay: int, limit: int, excluded: set[int] | None = None
+    ) -> list[SimulationORM]:
+        """Queued simulations of one (region, delay), in scheduling order."""
         stmt = (
-            select(CandidateORM)
-            .join(CellORM, CellORM.cell_id == CandidateORM.cell_id)
+            select(SimulationORM)
             .where(
-                CandidateORM.status == CandidateStatus.QUEUED,
-                CandidateORM.cell_id.not_in(excluded_cells or set()),
-                CellORM.region == region,
-                CellORM.delay == delay,
+                SimulationORM.status == SimStatus.QUEUED,
+                SimulationORM.region == region,
+                SimulationORM.delay == delay,
+                SimulationORM.hypothesis_id.not_in(excluded or set()),
             )
-            .order_by(CandidateORM.priority.desc(), CandidateORM.created_at)
+            .order_by(SimulationORM.priority.desc(), SimulationORM.id)
             .limit(limit)
         )
         return list(s.scalars(stmt))
 
-    def queue_groups(
-        self, s: Session, excluded_cells: set[str] | None = None
-    ) -> list[tuple[str, int, int, float]]:
-        """(region, delay, queued count, best priority) for every non-empty queue."""
-        from alpha_orchestrator.factory.models import CellORM
-
-        stmt = (
-            select(CellORM.region, CellORM.delay, func.count(), func.max(CandidateORM.priority))
-            .join(CellORM, CellORM.cell_id == CandidateORM.cell_id)
-            .where(
-                CandidateORM.status == CandidateStatus.QUEUED,
-                CandidateORM.cell_id.not_in(excluded_cells or set()),
+    def pending(self, s: Session) -> int:
+        """Simulations waiting or running."""
+        return int(
+            s.scalar(
+                select(func.count())
+                .select_from(SimulationORM)
+                .where(SimulationORM.status.in_([SimStatus.QUEUED, SimStatus.RUNNING]))
             )
-            .group_by(CellORM.region, CellORM.delay)
+            or 0
         )
-        return [(r, d, int(n), float(p or 0)) for r, d, n, p in s.execute(stmt)]
 
-    def sims_used_today(self, s: Session) -> int:
-        """Simulations that came back today (successful or failed both cost quota)."""
-        start = datetime.combine(datetime.now(UTC).date(), datetime.min.time(), tzinfo=UTC)
-        stmt = select(func.count()).where(
-            CandidateORM.status.in_([CandidateStatus.DONE, CandidateStatus.FAILED]),
-            CandidateORM.completed_at >= start,
-        )
-        return int(s.scalar(stmt) or 0)
-
-    def sims_reserved_today(self, s: Session, start: datetime | None = None) -> int:
-        """Count children at creation, including in-flight and uncertain requests.
-
-        The caller supplies its allocation window. Only a confirmed refusal releases
-        it. Completion dates never decide which day's allocation paid for a request.
-        """
-        start = start or datetime.combine(datetime.now(UTC).date(), datetime.min.time(), tzinfo=UTC)
+    def sims_reserved(self, s: Session, start: datetime) -> int:
+        """Children counted at creation (in flight and uncertain included); only a
+        confirmed refusal releases them."""
         return int(
             s.scalar(
                 select(func.coalesce(func.sum(BatchORM.size), 0)).where(
@@ -236,9 +165,25 @@ class Ledger:
         )
 
     # ---------- events ----------
-    def log(self, s: Session, kind: str, cell_id: str | None = None, **payload: Any) -> None:
-        """Append an event row to the ledger."""
-        s.add(EventORM(kind=kind, cell_id=cell_id, payload=payload))
+    def log(self, kind: str, **payload: Any) -> None:
+        """Append one event to the JSON-lines audit file."""
+        row = {"at": utc_now().isoformat(), "kind": kind, **payload}
+        if self.events_path is None:
+            self._memory_events.append(row)
+            return
+        with self.events_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+
+    def events(self, kind: str | None = None) -> list[dict[str, Any]]:
+        """Every logged event (optionally of one kind), oldest first."""
+        if self.events_path is None:
+            rows = list(self._memory_events)
+        elif self.events_path.exists():
+            with self.events_path.open(encoding="utf-8") as f:
+                rows = [json.loads(line) for line in f if line.strip()]
+        else:
+            rows = []
+        return [r for r in rows if kind is None or r.get("kind") == kind]
 
 
 def _sqlite_pragmas(dbapi_connection: Any, _: Any) -> None:
