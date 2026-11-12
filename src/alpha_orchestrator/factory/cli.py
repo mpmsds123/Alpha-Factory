@@ -21,7 +21,7 @@ from alpha_orchestrator.brain.client import (
 )
 from alpha_orchestrator.brain.notify import notify
 from alpha_orchestrator.brain.session import AuthenticationFailed, BrainSession, NeedBiometric
-from alpha_orchestrator.factory.config import DEFAULT_CONFIG, FactoryConfig
+from alpha_orchestrator.factory.config import DEFAULT_CONFIG, FactoryConfig, llm_key_available
 from alpha_orchestrator.factory.dashboard import render
 from alpha_orchestrator.factory.ideas import import_ideas
 from alpha_orchestrator.factory.ledger import Ledger, WorkerAlreadyRunning
@@ -63,7 +63,7 @@ def _api() -> BrainAPI:
 
 
 def _llm(config: FactoryConfig, ledger: Ledger) -> FactoryLLM | None:
-    if not Path(config.llm.key_file).expanduser().exists():
+    if not llm_key_available(config.llm.key_file):
         typer.echo(
             f"未找到 {config.llm.key_file}：今天不用 DeepSeek（字段分组按名字分，不做组合对照）。"
         )

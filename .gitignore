@@ -1,37 +1,48 @@
+# Secrets: real values live only in the environment or a local .env file.
 .env
-.DS_Store
-.venv/
-*.db
-*.sqlite
-*.sqlite3
+.env.*
+!.env.example
+scripts/brain_credentials.txt
+brain-session.json
+platform-brain.json
+
+# Python build, cache and tooling output
 __pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
 .coverage
+htmlcov/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
-htmlcov/
-dist/
-build/
-*.egg-info/
-诊断日志.txt
-_to_delete/
 
-# private research corpus / personal notes / credential-adjacent tooling — never public
+# Local databases and runtime state
+*.db
+*.sqlite
+*.sqlite3
+factory.db*
+.alpha_factory/
+.runtime/
+*.worker.lock
+
+# Research output: real expressions, results and the ledger never leave this machine
+reports/
+
+# Private research corpus and personal notes
 method_cards/*
 !method_cards/README.md
 CLAUDE.md
 workflow_learning.canvas
-*.command
 templates/
-scripts/brain_credentials.txt
-brain-session.json
-platform-brain.json
-.runtime/
+*.command
+诊断日志.txt
+_to_delete/
 
-# alpha factory: real expressions, results and the ledger never leave this machine
-reports/
-factory.db*
-.alpha_factory/
-
-# OS worker locks have no research content and must stay local.
-*.worker.lock
+# OS / editor
+.DS_Store
+.claude/
+.idea/
+.vscode/

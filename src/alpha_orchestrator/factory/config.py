@@ -6,6 +6,7 @@ training 2026-04-29; AI课 = official "零基础上手BRAIN-AI篇"; 论坛 = Chi
 """
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -178,8 +179,23 @@ class FactoryConfig:
         return t.submit_sharpe_chn if region == "CHN" else t.submit_sharpe
 
 
+# Environment variable that, when set, supplies the factory's LLM key instead of key_file.
+LLM_KEY_ENV = "ALPHA_FACTORY_LLM_API_KEY"
+
+
+def llm_key_available(path: str) -> bool:
+    """Return True when an LLM key is set in the environment or the key file exists."""
+    return bool(os.environ.get(LLM_KEY_ENV)) or Path(path).expanduser().exists()
+
+
 def load_llm_key(path: str) -> str:
-    """Reads the key at call time; it is never copied into the repo or the ledger."""
+    """Read the LLM key at call time (environment first, then the key file).
+
+    The key is never copied into the repository or the ledger.
+    """
+    from_env = os.environ.get(LLM_KEY_ENV)
+    if from_env:
+        return from_env
     data = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
     key = data.get("api_key") if isinstance(data, dict) else None
     if not key:
