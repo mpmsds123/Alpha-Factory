@@ -263,8 +263,10 @@ def seed_priors(
 
 # ---------- importing the v7 ledger into Memory B ----------
 def _v7_verdict(status: str, why: str) -> str:
+    # v7 "DONE" meant the regular Sharpe line was reached; none of those cleared the
+    # platform's submission check, so they count as supported, not passed.
     if status == "DONE":
-        return Verdict.PASSED
+        return Verdict.SUPPORTED
     if "cannot be told from noise" in why:
         return Verdict.IDEA_FAILED
     if "no formula passed" in why:

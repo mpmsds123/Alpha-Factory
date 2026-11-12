@@ -167,7 +167,7 @@ def test_import_v7_maps_verdicts(tmp_path: Path) -> None:
     with ledger.session() as s:
         assert memory.import_v7(s, str(db)) == 0  # once only
         rows = s.query(HypothesisORM).order_by(HypothesisORM.id).all()
-        assert [r.verdict for r in rows] == ["passed", "idea_failed", "supported"]
+        assert [r.verdict for r in rows] == ["supported", "idea_failed", "supported"]
         assert (rows[0].field_type, rows[0].sims_used, rows[0].category) == ("MATRIX", 2, "cat")
     assert memory.import_v7(ledger.session().__enter__(), str(tmp_path / "none.db")) == 0
     docs = memory.read_documents(str(db), ["official"])
