@@ -44,6 +44,8 @@ class Vocabulary:
     negate_template: str = "-({x})"
     # free text shown to the LLM about the expression language
     language_notes: str = ""
+    # document sources (in the earlier ledger) that count as official, for prior seeding
+    official_doc_sources: tuple[str, ...] = ()
 
     @classmethod
     def load(cls, private_dir: str | Path) -> "Vocabulary":
@@ -78,4 +80,5 @@ class Vocabulary:
             cosmetic_wrappers=low("cosmetic_wrappers"),
             negate_template=str(raw.get("negate_template") or "-({x})"),
             language_notes=notes.strip(),
+            official_doc_sources=tuple(str(x) for x in raw.get("official_doc_sources") or []),
         )
