@@ -8,12 +8,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from alpha_orchestrator.factory.config import FactoryConfig
-from alpha_orchestrator.factory.models import BatchORM, CandidateORM
+from alpha_orchestrator.factory.models import BatchORM, SimulationORM
 
 
 def batch_digest(s: Session, batch: BatchORM) -> str:
     """Return the fingerprint of a batch and its members."""
-    members = list(s.scalars(select(CandidateORM).where(CandidateORM.batch_id == batch.id)))
+    members = list(s.scalars(select(SimulationORM).where(SimulationORM.batch_id == batch.id)))
     created = batch.created_at
     if created.tzinfo is not None:
         created = created.astimezone(UTC)
@@ -26,7 +26,8 @@ def batch_digest(s: Session, batch: BatchORM) -> str:
             created.replace(tzinfo=None).isoformat(timespec="microseconds"),
         ],
         "members": sorted(
-            [c.id, c.cell_id, c.fingerprint, c.status, c.expression, c.settings] for c in members
+            [c.id, c.hypothesis_id, c.fingerprint, c.status, c.expression, c.settings]
+            for c in members
         ),
     }
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
@@ -34,8 +35,9 @@ def batch_digest(s: Session, batch: BatchORM) -> str:
 
 def exception_scope(
     s: Session, config: FactoryConfig, now: datetime | None = None
-) -> tuple[set[str], set[str]]:
-    """No default exceptions. Never modifies outcomes, reservations, or candidate state."""
+) -> tuple[set[str], set[int]]:
+    """(permitted batch ids, hypothesis ids held back). No default exceptions; never
+    modifies outcomes, reservations or simulation state."""
     spec = config.quarantine_exception
     if not spec:
         return set(), set()
@@ -52,9 +54,9 @@ def exception_scope(
             return set(), set()
         if batch_digest(s, batch) != spec["digest"]:
             return set(), set()
-        members = list(s.scalars(select(CandidateORM).where(CandidateORM.batch_id == batch.id)))
+        members = list(s.scalars(select(SimulationORM).where(SimulationORM.batch_id == batch.id)))
         if len(members) != batch.size or any(c.status != "RUNNING" for c in members):
             return set(), set()
-        return {batch.id}, {c.cell_id for c in members}
+        return {batch.id}, {c.hypothesis_id for c in members}
     except (KeyError, TypeError, ValueError):
         return set(), set()
