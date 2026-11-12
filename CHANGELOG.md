@@ -2,16 +2,37 @@
 
 Newest first. Every entry before 2026-10-31 is taken from the git history; the short hash
 points to the commit. Real expressions and results are not published (see README).
+Operational detail that used to live in `docs/` is summarized in the entries below.
 
 Entry format for new days: **Ran** (what was run, in counts), **Found** (aggregate results
 only), **Changed** (code or design), **Open** (unresolved).
+
+## 2026-11-11
+
+- Changed: repository cleanup to professional standards, with no change in behaviour.
+  Stale notes, specs and duplicate policy/prompt copies removed; `tools/` became `scripts/`;
+  secrets can come from environment variables (`.env.example`); dependencies pinned in
+  `requirements.txt`; black adopted as formatter; English comments, docstrings and named
+  constants throughout the factory; tests for secret loading; one README replaces the
+  `docs/` folder.
 
 ## 2026-11-10
 
 - Changed. Documented the research and release contracts. Added a versioned paired
   refinement protocol with durable assignment, settlement and a fixed-rule comparison.
 - Changed. Added `review recheck` for existing candidates and their deferred platform checks.
-- Open. BRAIN authentication must be restored for live recovery and canary acceptance.
+- Ran. Offline: 388 passed, 5 skipped, 87.16% branch coverage. A restart test interrupts
+  polling after the fake platform accepts a batch and confirms zero additional creates.
+- Ran. Live recovery with both daily caps at zero: an expired progress URL recorded its nine
+  children as lost and created nothing new. Ten saved candidates were re-checked; none
+  reached the review list.
+- Ran. First live canary (10 children): the worker was stopped before its first poll; a new
+  worker reconciled ten distinct results to the ten original candidates with no duplicates.
+- Ran. Expanded canary (cumulative cap 100, paired refinement trial on): 40 distinct results
+  matched 40 candidates across six batches; no duplicates or unresolved batches.
+- Found. Three paired-refinement trials settled; the model and the fixed rule chose the same
+  fix each time, so comparative benefit is still unmeasured. No new review candidates.
+- Open. Full-volume and scheduled acceptance need observation across a real quota reset.
 
 ## 2026-10-31
 
@@ -50,7 +71,7 @@ only), **Changed** (code or design), **Open** (unresolved).
 
 - Changed: enhancement stage. A formula with Sharpe >= 1.2 that missed the pass line is first
   compared under 10-bucket volume or market-cap grouping (4 tries), then the best one gets a
-  `trade_when` wrapper (2 tries) (`0842777`).
+  conditional-trading wrapper (2 tries) (`0842777`).
 
 ## 2026-10-15
 

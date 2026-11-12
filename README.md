@@ -1,297 +1,152 @@
-# Alpha Research Orchestrator
+# Alpha Factory
 
-This repository has two entrypoints:
+An LLM-assisted research pipeline that searches for quantitative trading signals ("alphas")
+on a cloud backtesting platform, under a fixed daily simulation budget, and stops every
+result at human review.
 
-- **`alpha-factory`** (current): the private research runtime for WorldQuant BRAIN, described next.
-- **`alpha-lab`** (older): an offline-first replay engine, described under
-  [alpha-lab](#alpha-lab-older-entrypoint).
+## The problem
 
-Project history is in [CHANGELOG.md](CHANGELOG.md).
+Mining alphas by brute force (expanding templates over every data field) burns simulation
+quota on ideas with no economic reason behind them, and the few that pass are often noise
+that happened to clear a threshold. Doing it by hand does not scale. This project lets a
+language model propose *reasoned* research ideas while deterministic code owns everything
+that has to be trustworthy: budgets, validation, statistics, identity, crash recovery and
+the audit trail. Nothing is ever submitted automatically.
 
-## Alpha Factory
+## How it works
 
-An LLM proposes field groups and formulas; deterministic code validates, budgets and gates
-them. Nothing is submitted automatically.
+One run is one allocation day. The loop repeats until the daily budget, the time limit or
+the available ideas run out:
 
-**Dataset selection.** v7 samples eligible dataset, region, delay and universe combinations
-uniformly. Scanner results can annotate fields during hypothesis generation. The optional
-[research direction trial](#research-direction-trial) gives the model a decision at this step.
-
-**Gates** (values from `factory.yaml` and `src/alpha_orchestrator/factory/`):
-
-- The first batch's best eligible |Sharpe| must reach 1.0 to enter refinement, unless a
-  formula already clears the regular gate.
-- v7 proposes changes from a menu tied to the failed check. Thompson sampling chooses variants
-  from that menu using prior repairs. These histories guide search and are subject to selection bias.
-- Pass line for the shortlist: Sharpe >= 1.58 (2.08 for CHN) and Fitness >= 1, with a
-  correlation bound of 0.7 and all platform checks passing.
-
-**Budget and recovery.** At most 1,000 child simulations per allocation day; the day resets at
-21:00 America/Los_Angeles. Reservations are counted when a request is created, including pending
-and unknown outcomes. One worker owns one ledger. An ambiguous creation response blocks further
-runs until the batch is reconciled by hand.
-
-**Human control.** `auto_submit` is false. A surviving formula goes to a review list; submission
-happens only through `alpha-factory review approve`, which re-checks the formula first.
-
-**Status and limits.** The factory is a production candidate: live acceptance is not complete,
-and nothing here establishes an economic edge. Offline tests show engineering controls, not
-alpha quality. Operating procedure, recovery steps and acceptance criteria are in the
-[production runbook](docs/PRODUCTION_RUNBOOK.md).
-
-**Not published.** Real expressions, results, reports and the ledger stay on the author's
-machine (see `.gitignore`).
-
-### Research direction trial
-
-Set `direction_trial: true` with `design: v7` in a pilot config. Automatic selection draws
-up to eight eligible combinations. The model nominates one and records its metadata basis,
-economic mechanism, competing explanation and falsifier. It can cite a verified reference ID
-from the built-in evidence set or flag that the mechanism is outside that set. A fair coin
-assigns the next research episode to that nomination with its research brief or to a uniform
-draw from the same shortlist.
-The control still uses v7 to generate and refine alphas. Explicit `only_datasets` and a pool
-with one remaining choice bypass assignment. Existing research continues under its prior plan.
-
-The shortlist, proposal and arm are saved before loading the chosen fields. The first queued
-formula is recorded before the simulator runs. If its direction agrees with the idea and it
-has a new, usable result, the record shows its signed in-sample Sharpe before any mirroring or
-refinement. This is a screening observation. It does not execute the economic falsifier or
-establish that the effect holds over the stated return horizon.
-
-`record.html` shows assignments, closed combinations, combinations with a regular-gate hit,
-distinct regular-gate candidates generated in the episode, and settled simulation records
-at closure.
-Compare the arms at the same settings and inspect unresolved assignments separately. Treat the
-combination as the observation. Related formulas share fields, stocks and dates. The trial
-compares **dataset choice plus the research brief**, and later assignments use a pool and
-history changed by previous episodes. The report is descriptive and makes no significance
-claim. A full comparison should predefine a stopping rule and a prospective evaluation period.
-The existing `experiment-freeze` and `experiment-replay` commands are separate from live search.
-
-Design references include [randomized policy evaluation](https://arxiv.org/abs/1003.5956)
-and [multiple testing in expected-return research](https://www.nber.org/papers/w20592).
-
-### Paired refinement trial
-
-Set `refinement_trial: true` with `design: v7` to compare the model's proposed intervention
-with a fixed-rule choice on the same parent. The model records a hypothesis, alternative,
-prediction and falsifier. The factory commits both planned choices and candidate IDs before
-dispatch and scores the recorded target checks when the pair settles. See the
-[research specification](docs/FACTORY_RESEARCH_SPEC.md) for the protocol and release gates.
-
-Use `alpha-factory review recheck` to refresh existing candidates after authentication
-using the platform checks.
-
-## alpha-lab (older entrypoint)
-
-An offline-first, evidence-gated research engine for bounded and reconstructable Alpha
-experiments. SQLite is the source of truth: candidate identities, state transitions, gate
-decisions, simulation attempts, retries, lineage, policy snapshots, and stop reasons are
-persisted.
-
-## Start here
-
-Use the project virtual environment; the system Python is not the supported runtime for this
-checkout.
-
-```bash
-source .venv/bin/activate
-alpha-lab doctor --db alpha_lab.db
+```
+ pick a dataset ─► LLM groups its fields into economic ideas ─► LLM writes first formulas
+        ▲                                                          │
+        │                                        local validator rejects invalid ones
+        │                                                          ▼
+ next idea / dataset ◄── idea dies (below the luck line) ◄── simulate on the platform
+                                                                   │ promising
+                                                                   ▼
+                      diagnose failed checks ─► pick fixes (menu + Thompson sampling)
+                                                                   │ passes the line
+                                                                   ▼
+                      robustness test ─► platform submission checks ─► review list
+                                                                   │
+                                                  you approve ─► submit (manual only)
 ```
 
-`doctor` is read-only and makes no external requests. It answers three practical questions in one
-small JSON response: whether offline replay is runnable, whether the local ledger exists, and what
-configuration is still missing for live research. A live-ready result confirms configuration only;
-it does not confirm that the BRAIN session is currently accepted.
+- **Ideas, not templates.** The LLM reads field descriptions and past outcomes and proposes
+  field groups with an economic rationale; every LLM call is budgeted and stored with hashes.
+- **Statistics before effort.** An idea whose best first formula does not clear the level
+  that noise alone would reach for that many tries is dropped instead of tuned.
+- **Bounded refinement.** Failed checks are mapped to a fixed menu of fixes; a Thompson-sampling
+  bandit chooses among them using the record of past repairs.
+- **Budget and recovery.** Simulations are reserved in a SQLite ledger *before* they are sent,
+  so a crash or restart never overspends or duplicates work; one worker owns one ledger, and an
+  ambiguous platform response blocks further runs until it is reconciled.
+- **Human control.** Survivors are re-checked by the platform and land on a review list.
+  `alpha-factory review approve` is the only code path that submits.
 
-Choose one workflow:
+The repository also contains **`alpha-lab`**, the earlier offline-first engine (replay
+adapter, method-card retrieval, narrow MCP server). It is kept working and is what the
+offline demo below exercises; `alpha-factory` is the current runtime.
 
-- **Prove the engine locally:** run the offline example below. It uses a sanitized fixture and
-  never contacts WorldQuant.
-- **Continue an existing run:** use `alpha-lab run status RUN_ID --db alpha_lab.db`, then
-  `alpha-lab run resume ...`; SQLite remains the source of truth.
-- **Run authorized daily research:** configure the LLM and BRAIN session, confirm `doctor`, then
-  run `tools/daily_run.sh`. This can simulate and check candidates, but it cannot submit them.
+## Quick start
 
-This repository is an independent clean-room implementation. CNHKMCP and BrainMachine were
-read-only architectural evidence; this project does not import, vendor, modify, or depend on
-either system. The frozen contracts and safety boundaries are user-authored design decisions,
-and all implementation code here is new.
-
-## Mining strategy
-
-Two generators feed the same gated engine:
-
-- **Deterministic (default, no LLM):** `seeds/first_order.txt` expands a one-degree-of-freedom
-  sweep, `group_rank(<ts_op>(ts_backfill(<field>, 66), 66), industry)` over six time-series
-  operators, across every MATRIX field of the frozen dataset snapshot.
-- **LLM-assisted (optional):** with `ALPHA_LAB_LLM_API_KEY`/`ALPHA_LAB_LLM_MODEL` set, the
-  generator and repair planner draw only on human-approved method cards.
-
-Strongly negative results are mirrored, not archived: when `-sharpe` and `-fitness` would clear
-the strong routing floor, the engine queues `multiply(-1, parent)` as a lineage-tracked child and
-simulates it (`gates/sign_flip.py`; CHN excluded because its short side is asymmetric). In the
-project's first live runs, the strongest completed results were sharpe −1.22/−1.21 and were
-archived; this rule exists to recover exactly those signals.
-
-`tools/daily_run.sh` selects the generator automatically from the environment.
-
-## Current package architecture
-
-A researcher starts the CLI or the narrow offline MCP interface. That interface borrows the
-deterministic orchestration services, which connect to a SQLite ledger and an explicitly selected
-adapter, and produces a reconstructable report that stops at human review. The LLM can propose;
-deterministic code owns identity, validation, limits, routing, lineage, and platform-state
-interpretation. The package contains no submission capability.
-
-See the detailed [architecture](docs/ARCHITECTURE.md), [sanitized replay case
-study](docs/case-studies/sanitized-replay.md), [test evidence](docs/TEST_EVIDENCE.md), [design
-tradeoffs](docs/DESIGN_TRADEOFFS.md), [known limits](docs/KNOWN_LIMITS.md), and [60-second technical
-explanation](docs/60_SECOND_EXPLANATION.md). The independently reimplemented public-reference
-patterns are recorded in [PUBLIC_REFERENCE_DESIGN.md](docs/PUBLIC_REFERENCE_DESIGN.md).
-
-## Implemented milestones
-
-Implemented:
-
-- installable Python 3.11+ package and English Typer CLI;
-- Pydantic v2 boundary contracts;
-- SQLAlchemy 2.x SQLite schema and Alembic migration;
-- conservative canonical identity and pre-simulation deduplication;
-- transactional state transitions, decisions, events, and parent-child lineage;
-- versioned routing, limit, and error-taxonomy policies;
-- deterministic structural validation, routing, backpressure, and stopping;
-- bounded retries with stable idempotency keys;
-- `FakeBrainAdapter` and sanitized `ReplayBrainAdapter`;
-- deterministic Markdown run reports and structured secret-redacting logs;
-- private Markdown inventory containing hashes and traceable section locators, not raw text;
-- explicit paraphrased `method-card` block extraction, human approval, and immutable approved
-  versions;
-- approved-card-only tag filtering with deterministic BM25-style lexical ranking;
-- versioned generator and repair prompts persisted with their content hashes;
-- proposal-only CandidateGenerator with explicit uncertainty and single-parent RepairPlanner
-  contracts;
-- OpenAI-compatible client configuration, strict Pydantic output validation, and an LLM request
-  ledger that stores hashes, frozen snapshot/MethodCard version manifests, and usage metadata
-  rather than raw inputs or outputs;
-- explicitly configured live BRAIN access using a protected external session-cookie file;
-- content-addressed field, operator, and setting snapshots frozen to one research cell;
-- idempotent simulation creation, one-step polling, normalized metrics and error classes, and
-  bounded `Retry-After` handling;
-- live platform-check recording that preserves `PASS`, `FAIL`, `WARNING`, `PENDING`, and `ERROR`
-  and promotes only a confirmed all-pass response to human review;
-- a local stdio MCP 2.x server exposing five narrow ledger and replay tools with typed structured
-  output and explicit read/write annotations;
-- a portfolio evidence set covering the current architecture, one executed sanitized replay,
-  verification evidence, tradeoffs, known limits, and a concise technical explanation.
-
-Explicitly deferred: a Web dashboard and automatic submission. A local routing result is never
-described as platform approval. LLM and BRAIN calls occur only when the user explicitly supplies
-their separate configurations; replay remains fully offline.
-
-## Install and verify
+Requires Python 3.11+ (verified on 3.12, macOS).
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python3 -m pip install -e '.[dev]'
-ruff format --check .
-ruff check .
-mypy src
-pytest
+make install          # pinned versions from requirements.txt, then the package itself
+make check            # black, ruff, mypy and the full offline test suite
+make demo             # offline end-to-end run against a sanitized replay fixture
 ```
 
-Automated tests use only in-memory fakes or local replay JSON. They never contact WorldQuant.
+Tests and the demo never contact the platform or an LLM.
 
-## Offline example
+### Configure secrets
+
+Secrets come only from environment variables or private files outside the repository.
+Copy `.env.example` to `.env` (git-ignored), fill in what you use, and load it:
 
 ```bash
-alpha-lab init --db alpha_lab.db
-RUN_ID=$(alpha-lab run create \
-  --dataset demo-dataset --region USA --universe TOP1000 --delay 1 \
-  --adapter replay --db alpha_lab.db)
-alpha-lab run execute "$RUN_ID" --adapter replay \
-  --fixture tests/fixtures/basic_replay.json --db alpha_lab.db
-alpha-lab run status "$RUN_ID" --db alpha_lab.db
-alpha-lab report "$RUN_ID" --db alpha_lab.db
+set -a; source .env; set +a
 ```
 
-`run stop` records an exact human stop reason. `run resume` reconstructs work from SQLite and
-does not repeat completed simulations. There is intentionally no `submit` command.
+| Purpose | Environment variable | Fallback |
+| --- | --- | --- |
+| LLM key for `alpha-factory` | `ALPHA_FACTORY_LLM_API_KEY` | `llm.key_file` in `factory.yaml` |
+| Platform login | `ALPHA_LAB_BRAIN_USERNAME`, `ALPHA_LAB_BRAIN_PASSWORD` | `BRAIN_CREDENTIALS_FILE` |
+| `alpha-lab` LLM and live session | `ALPHA_LAB_LLM_*`, `ALPHA_LAB_BRAIN_*` | none (offline) |
 
-## Private corpus and method cards
+Credential files must be readable only by you (`chmod 600`).
+
+### Run the factory
 
 ```bash
-alpha-lab corpus inventory /path/to/private/markdown \
-  --source-type training --db alpha_lab.db
-alpha-lab corpus extract SRC-... --db alpha_lab.db
-alpha-lab cards list --status draft --db alpha_lab.db
-alpha-lab cards approve MC-... --reviewer "Reviewer Name" --db alpha_lab.db
+alpha-factory doctor                  # read-only: budget, in-flight and blocked batches
+alpha-factory login --then-run        # complete the platform's verification, then run a day
+alpha-factory run                     # run one allocation day (resumes where it stopped)
+alpha-factory dashboard               # open the local dashboard
+alpha-factory review list             # candidates waiting for you
+alpha-factory review approve ID       # the only command that submits
+alpha-factory schedule install        # optional: daily run via macOS launchd
 ```
 
-Extraction recognizes only explicit `method-card` YAML fences whose content is already
-paraphrased. Drafts cannot influence retrieval until a human approval record exists. Forum
-experience can guide a proposal after approval, but deterministic gates never convert it into a
-platform rule.
+If a run stops on an ambiguous batch, inspect it on the platform and reconnect it with
+`alpha-factory recover-batch BATCH_ID --location /simulations/VERIFIED_ID`; never delete it.
 
-## Optional proposal LLM
+## Configuration
 
-The library exposes `CandidateGenerator` and `RepairPlanner`; both validate complete output before
-inserting any candidate. Configure the client only through the `ALPHA_LAB_LLM_*` environment
-variables shown in `.env.example`. API keys are represented as secret values in memory and are not
-persisted. Automated tests intercept the HTTP boundary and never contact an external endpoint.
+- **`factory.yaml`** overrides the defaults in `src/alpha_orchestrator/factory/config.py`,
+  where every tunable number carries a comment saying where it came from. Key settings:
+  daily simulation caps (`budget.v1_daily_cap`, `budget.daily_sim_cap`; the lower wins), the
+  quota reset time, pass thresholds, LLM models and the regions to search.
+- **Trial switches** (`direction_trial`, `refinement_trial`) turn on paired experiments that
+  compare an LLM choice with a random or fixed-rule control on the same inputs; both are off
+  by default and only descriptive until a stopping rule is frozen in advance.
+- **`alpha-lab` policies** (routing, limits, error taxonomy, correlation) are versioned YAML
+  files in `src/alpha_orchestrator/default_policies/`.
 
-## Authorized live boundary
+## Safety boundaries and known limits
 
-Live mode is disabled unless `ALPHA_LAB_BRAIN_SESSION_FILE` points to an external JSON cookie
-mapping or browser-exported cookie list. On Unix, the file must have no group or other-user access
-(for example, `chmod 600 /outside/repository/brain-session.json`). The adapter probes
-`/authentication` before any protected request and classifies an inquiry challenge as
-`HUMAN_VERIFICATION_REQUIRED`; browser login alone is not treated as proof that the HTTP client is
-authenticated.
+- No automatic submission exists in any CLI command, MCP tool or adapter.
+- Local thresholds allocate research effort; they are not evidence of tradability. Offline
+  tests prove engineering controls (budget, recovery, identity), not alpha quality.
+- Missing, pending or erroneous platform checks never promote a candidate.
+- Live acceptance is staged (10, then 100, then the full daily cap on one ledger) and is
+  recorded in `CHANGELOG.md`; no economic edge is claimed.
+- Single worker, single SQLite ledger, one machine. Not built for distributed workloads.
+- Real expressions, results, reports and the ledger stay on the owner's machine
+  (see `.gitignore`).
+
+## Project layout
+
+```
+src/alpha_orchestrator/
+  factory/        alpha-factory: engine, scheduler, LLM layer, selection, reports, CLI
+  brain/          platform HTTP client, session handling, notifications
+  adapters/       alpha-lab adapters: fake, replay, live
+  orchestration/  alpha-lab run engine and platform checks
+  storage/        alpha-lab SQLAlchemy models and repository (migrations/ for Alembic)
+  gates/ domain/ knowledge/ llm/ mcp/ reporting/   shared rules, models and services
+  default_policies/ default_prompts/              packaged policies and prompts
+tests/            pytest suite (offline: fakes and replay fixtures only)
+scripts/          refresh_session.py (session cookie helper), daily_run.sh (alpha-lab day)
+seeds/            template file for the deterministic alpha-lab generator
+factory.yaml      factory configuration
+```
+
+## Development
 
 ```bash
-alpha-lab run create \
-  --dataset DATASET_ID --region USA --universe TOP1000 --delay 1 \
-  --adapter live --db alpha_lab.db
-alpha-lab run execute RUN_ID --adapter live --db alpha_lab.db
-alpha-lab platform-check CANDIDATE_ID --db alpha_lab.db
+make check                 # black --check, ruff, mypy (strict), pytest with coverage >= 85%
+black . && ruff check .    # format and lint
 ```
 
-Each execution performs at most one poll of a pending simulation and persists the external ID, so
-`run resume` continues without creating the simulation again. `platform-check` requires a
-completed live simulation and never submits it. Before execution, proposals are inserted through
-the library's `CandidateGenerator`; the live adapter deliberately does not generate expressions.
-Endpoint paths can be overridden with the `ALPHA_LAB_BRAIN_*_PATH` variables in `.env.example`.
+Commits follow [Conventional Commits](https://www.conventionalcommits.org/). History and
+live-run evidence are in [CHANGELOG.md](CHANGELOG.md).
 
-Milestone 3 verification used intercepted HTTP responses only: no real WorldQuant login,
-simulation, or platform check was performed. The default endpoint contract therefore remains to
-be confirmed against an authorized account before first live use.
+## License
 
-## MCP interface
-
-`alpha-lab-mcp` runs the local server over stdio using the official MCP Python SDK 2.x. Configure
-the ledger and optional replay fixture in the host process; tool callers cannot replace either
-path:
-
-```bash
-export ALPHA_LAB_MCP_DATABASE_PATH=/absolute/path/alpha_lab.db
-export ALPHA_LAB_MCP_REPLAY_FIXTURE=/absolute/path/sanitized-replay.json
-alpha-lab-mcp
-```
-
-The exposed tools are `alpha_run_status`, `alpha_run_report`, `alpha_method_cards_list`,
-`alpha_replay_execute`, and `alpha_run_stop`. The first three are read-only. The two write tools
-can only advance/resume an existing replay run or record the fixed `MCP_REQUESTED_STOP` reason.
-There are no MCP tools for live BRAIN access, LLM invocation, corpus reads, card approval, arbitrary
-filesystem paths, or Alpha submission.
-
-## Trust boundary
-
-- Policy thresholds allocate research effort; they are not evidence of tradability.
-- `READY_FOR_PLATFORM_CHECK` means only that offline routing selected a candidate.
-- `PASS`, `FAIL`, `WARNING`, `PENDING`, and `ERROR` remain distinct platform-check values.
-- Credentials belong only in environment variables or user-owned session files. They are
-  redacted from persisted errors and logs and are never included in fixtures.
-- The package has no submit method or CLI command; every surviving Alpha stops at human review.
+MIT, see [LICENSE](LICENSE).
