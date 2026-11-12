@@ -3,8 +3,8 @@
 db_path: ~/.alpha_factory/factory.db     # ledger, kept outside the repository
 reports_dir: reports                     # dashboard (contains real expressions; git-ignored)
 scanner_progress: ~/Desktop/因子挖掘/scanner/runs/数据集进度.csv   # legacy; no longer used
-scanner_runs: ~/Desktop/因子挖掘/scanner/runs   # v7: only used to mark fields, not to pick datasets or filter fields
-only_datasets: []                       # empty = v7 samples from all datasets at random
+scanner_runs: ~/Desktop/因子挖掘/scanner/runs   # 11/12: only datasets and fields with scanner signal are mined; its formulas are not repeated
+only_datasets: []                       # empty = v7 samples at random among datasets with scanner signal
 design: v7                              # v7 (11/03): random datasets, idea memory, menu fixes + Thompson sampling, 6 ideas at once
 direction_trial: false                  # trial switch: LLM-directed vs random dataset choice; applies to the next automatic pick
 refinement_trial: false                 # trial switch: paired LLM vs fixed-rule refinement of the same parent

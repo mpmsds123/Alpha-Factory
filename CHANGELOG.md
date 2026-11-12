@@ -7,6 +7,23 @@ Operational detail that used to live in `docs/` is summarized in the entries bel
 Entry format for new days: **Ran** (what was run, in counts), **Found** (aggregate results
 only), **Changed** (code or design), **Open** (unresolved).
 
+## 2026-11-12
+
+- Found. Funnel of the v7 design (2026-11-03 to 11-11, about 2,930 simulations): 805 ideas,
+  2,406 first formulas, 156 ideas past the first gate (19%), 13 formulas past the regular
+  line and the robustness test, 0 past the platform's submission check. The first gate lost
+  the most: 648 ideas, about two thirds of all simulations. None of the 805 ideas used a
+  field the template scanner had found signal in: v7 skipped that filter, and the scanner's
+  output had moved to a single master table the factory did not read. In the scanner's
+  own results, 64% of simulations on fields with signal reach the first gate's Sharpe
+  level, against 10% elsewhere.
+- Changed. Per-stage funnel CSVs in the reports folder, refreshed during a run and by the
+  read-only `alpha-factory funnel` command. The scanner's master table is read; v7 mines only
+  datasets and fields with scanner signal; first formulas that repeat a scanner formula's
+  structure are rejected (originality check after AlphaAgent). Thresholds are unchanged.
+- Open. Whether the first-gate pass rate rises in a live run; signal fields are a limited
+  supply (about one day of simulations) that grows as the scanner runs.
+
 ## 2026-11-11
 
 - Changed: repository cleanup to professional standards, with no change in behaviour.
