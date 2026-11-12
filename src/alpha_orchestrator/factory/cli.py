@@ -1,111 +1,159 @@
-"""`alpha-factory`: the commands you actually type."""
+"""`alpha-factory`: the commands you type. Runs are started by hand; nothing schedules
+them. Nothing is submitted except by `review approve`."""
 
 import webbrowser
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from alpha_orchestrator.brain.api import BrainAPI
 from alpha_orchestrator.brain.client import (
+    AmbiguousRequest,
     BrainClient,
     RateLimited,
     SessionExpired,
 )
+from alpha_orchestrator.brain.notify import notify
 from alpha_orchestrator.brain.session import AuthenticationFailed, BrainSession, NeedBiometric
+from alpha_orchestrator.factory import gates, loop, memory, prompts, report
 from alpha_orchestrator.factory.config import DEFAULT_CONFIG, FactoryConfig, llm_key_available
 from alpha_orchestrator.factory.ledger import Ledger, WorkerAlreadyRunning
-from alpha_orchestrator.factory.llm import FactoryLLM
+from alpha_orchestrator.factory.llm import LLMClient
 from alpha_orchestrator.factory.models import (
-    CandidateORM,
-    ReviewORM,
-    ReviewStatus,
+    BatchORM,
+    HStatus,
+    HypothesisORM,
+    PriorORM,
+    Review,
+    SimulationORM,
 )
-from alpha_orchestrator.factory.select import approve, reject
+from alpha_orchestrator.factory.vocab import Vocabulary
 
-app = typer.Typer(help="Alpha 工厂：WorldQuant BRAIN 自动挖掘流水线", no_args_is_help=True)
-review_app = typer.Typer(help="待你确认的 alpha：查看、提交、放弃", no_args_is_help=True)
+app = typer.Typer(help="Hypothesis-driven alpha factory", no_args_is_help=True)
+review_app = typer.Typer(help="Alphas waiting for you: list, submit, reject", no_args_is_help=True)
+priors_app = typer.Typer(help="Memory A: claims from documents", no_args_is_help=True)
+memory_app = typer.Typer(help="Memory B: past hypotheses", no_args_is_help=True)
 app.add_typer(review_app, name="review")
+app.add_typer(priors_app, name="priors")
+app.add_typer(memory_app, name="memory")
 
 ConfigOpt = Annotated[Path, typer.Option("--config", help="factory.yaml")]
+SEED_DOC_CHARS = 6000  # characters of each document shown when extracting priors
+
+# The session that just passed the face check in `login --then-run`; the run reuses this
+# live object instead of rebuilding one from the cookie file (which forced a new login).
+_live_session: BrainSession | None = None
 
 
 def _ctx(config_path: Path) -> tuple[FactoryConfig, Ledger]:
-    config = FactoryConfig.load(config_path)
-    return config, Ledger.at(Path(config.db_path))
-
-
-# The session that just passed the face check in `login --then-run`. The run reuses this
-# live object (as the scanner does) instead of rebuilding one from the cookie file, which
-# came back unrecognised and forced a new password login, i.e. a new face check.
-_live_session: BrainSession | None = None
+    try:
+        config = FactoryConfig.load(config_path)
+        return config, Ledger.at(Path(config.db_path))
+    except WorkerAlreadyRunning as exc:
+        typer.echo(f"Safe stop: {exc}")
+        raise typer.Exit(4) from None
 
 
 def _api() -> BrainAPI:
     return BrainAPI(BrainClient(_live_session or BrainSession()))
 
 
-def _llm(config: FactoryConfig, ledger: Ledger) -> FactoryLLM | None:
+def _llm(config: FactoryConfig, ledger: Ledger) -> LLMClient:
     if not llm_key_available(config.llm.key_file):
-        typer.echo(
-            f"未找到 {config.llm.key_file}：今天不用 DeepSeek（字段分组按名字分，不做组合对照）。"
-        )
-        return None
-    return FactoryLLM(config, ledger)
+        typer.echo(f"No LLM key: set ALPHA_FACTORY_LLM_API_KEY or create {config.llm.key_file}")
+        raise typer.Exit(1)
+    return LLMClient(config, ledger)
 
 
-@app.command("recover-batch")
-def recover_batch(
-    batch_id: str,
-    location: Annotated[str, typer.Option(help="核对后的 /simulations/... URL")],
+def _vocab(config: FactoryConfig) -> Vocabulary:
+    vocab = Vocabulary.load(config.private_dir)
+    if not vocab.grouping_fields:
+        typer.echo(f"Warning: no platform vocabulary in {config.private_dir}/platform.yaml")
+    return vocab
+
+
+@app.command()
+def run(
+    minutes: Annotated[float, typer.Option(help="longest run, in minutes")] = 720,
     config: ConfigOpt = DEFAULT_CONFIG,
 ) -> None:
-    """把已在平台核对过的进度 URL 接回异常批次；不发起新回测。"""
-    from urllib.parse import urlsplit
+    """Run the factory: hypotheses -> expressions -> simulations -> gates -> review."""
+    cfg, ledger = _ctx(config)
+    llm = _llm(cfg, ledger)
+    vocab = _vocab(cfg)
 
-    from alpha_orchestrator.brain.session import API_URL
-    from alpha_orchestrator.factory.models import BatchORM
+    def progress(status: str) -> None:
+        try:
+            report.write_all(ledger, cfg, status)
+        except Exception as exc:  # the CSVs must never stop a run
+            typer.echo(f"Progress CSVs not written: {exc}")
 
-    parts = urlsplit(location)
-    if (parts.netloc and f"{parts.scheme}://{parts.netloc}" != API_URL) or not (
-        parts.path.startswith("/simulations/") and not parts.query and not parts.fragment
-    ):
-        raise typer.BadParameter("必须是 BRAIN 的 /simulations/... 进度 URL")
-    _, ledger = _ctx(config)
-    with ledger.writer_lock(), ledger.session() as s:
-        batch = s.get(BatchORM, batch_id)
-        if batch is None or batch.status != "UNKNOWN":
-            raise typer.BadParameter("只允许恢复 UNKNOWN 批次")
-        other = s.scalar(
-            select(BatchORM).where(BatchORM.location == parts.path, BatchORM.id != batch_id)
-        )
-        if other is not None:
-            raise typer.BadParameter("该进度 URL 已属于另一批次")
-        batch.location, batch.status = parts.path, "RUNNING"
-        ledger.log(s, "batch_reconciled", batch=batch_id, location=parts.path)
-    typer.echo("已接回原批次；下次 run 只查询原请求，返回结果必须匹配表达式及设置。")
+    api = _api()
+    progress("starting")
+    try:
+        with ledger.writer_lock():
+            api.client.session.ensure()
+            result = loop.run(
+                cfg,
+                api,
+                ledger,
+                llm,
+                vocab,
+                minutes=minutes,
+                may_open=lambda: report.guard(ledger, cfg),
+                on_progress=progress,
+            )
+    except (AmbiguousRequest, WorkerAlreadyRunning) as exc:
+        progress(f"safe stop: {str(exc)[:80]}")
+        typer.echo(f"Safe stop: {exc}")
+        raise typer.Exit(4) from None
+    except NeedBiometric:
+        progress("stopped: face check needed")
+        notify("Face check needed: run alpha-factory login --then-run (resumes where it stopped)")
+        raise typer.Exit(2) from None
+    except (AuthenticationFailed, SessionExpired, RateLimited) as exc:
+        progress(f"stopped: {type(exc).__name__}")
+        notify(f"Run paused: {exc}. Progress is saved; run again to continue.")
+        raise typer.Exit(3) from None
+    except Exception as exc:
+        progress(f"stopped: error {type(exc).__name__}: {str(exc)[:80]}")
+        raise
+    finally:
+        api.client.session.close()
+    progress(f"done: {result.stopped_because}")
+    msg = (
+        f"{result.simulations} simulations ({result.failed} failed), "
+        f"{result.opened} hypotheses opened, {len(result.stored)} stored for review; "
+        f"stopped: {result.stopped_because}"
+    )
+    typer.echo(msg)
+    typer.echo(f"Progress CSVs: {Path(cfg.reports_dir).resolve()}")
+    notify(msg)
 
 
 @app.command()
 def login(
     then_run: Annotated[bool, typer.Option("--then-run")] = False,
+    minutes: Annotated[float, typer.Option(help="longest run, in minutes")] = 720,
     config: ConfigOpt = DEFAULT_CONFIG,
 ) -> None:
-    """刷脸登录。完成后可直接开始当天的运行。"""
+    """Log in (with the face check when asked), then optionally start the run."""
     session = BrainSession()
     try:
         remaining = session.ensure(interactive=True)
-        typer.echo(f"已登录，会话剩余约 {remaining / 3600:.1f} 小时。")
+        typer.echo(f"Logged in; about {remaining / 3600:.1f} hours left on the session.")
     except NeedBiometric as need:
-        typer.echo(f"平台要求刷脸，正在打开浏览器：\n  {need.url}")
+        typer.echo(f"Face check required, opening the browser:\n  {need.url}")
         webbrowser.open(need.url)
         while True:
-            input("在浏览器里完成验证后按回车… ")
+            input("Press Enter after finishing the check in the browser... ")
             if session.complete_biometric(need.url):
-                typer.echo("验证通过，已登录。")
+                typer.echo("Verified, logged in.")
                 break
-            typer.echo("还没通过（或链接已过期）。完成后再按回车。")
+            typer.echo("Not verified yet (or the link expired). Press Enter when done.")
     except AuthenticationFailed as exc:
         typer.echo(str(exc))
         session.close()
@@ -113,90 +161,194 @@ def login(
     if not then_run:
         session.close()
         return
-    # The run reuses this open session; closing it first made every request fail with
-    # "Cannot send a request, as the client has been closed" (2026-11-03).
     global _live_session
     _live_session = session
     try:
-        typer.echo("run is being rebuilt; not available in this commit")
+        run(minutes=minutes, config=config)
     finally:
         _live_session = None
         session.close()
 
 
-def _match(ids: list[str], pool: list[str]) -> list[str]:
-    out = []
-    for prefix in ids:
-        hits = [p for p in pool if p.startswith(prefix)]
-        if len(hits) != 1:
-            typer.echo(f"ID 前缀 {prefix} 匹配到 {len(hits)} 条，已跳过")
-            continue
-        out.append(hits[0])
-    return out
+@app.command()
+def stats(config: ConfigOpt = DEFAULT_CONFIG) -> None:
+    """Rewrite the progress CSVs from the database (no login, no simulation)."""
+    cfg, ledger = _ctx(config)
+    typer.echo(f"CSVs: {report.write_all(ledger, cfg).resolve()}")
 
 
+@app.command()
+def status(config: ConfigOpt = DEFAULT_CONFIG) -> None:
+    """Counts at a glance, and whether the cost guard would let a new hypothesis open."""
+    cfg, ledger = _ctx(config)
+    with ledger.session() as s:
+        by = dict(
+            s.execute(
+                select(HypothesisORM.verdict, func.count()).group_by(HypothesisORM.verdict)
+            ).all()
+        )
+        open_n = s.scalar(
+            select(func.count())
+            .select_from(HypothesisORM)
+            .where(HypothesisORM.status == HStatus.OPEN)
+        )
+        pending = ledger.pending(s)
+        waiting = s.scalar(
+            select(func.count())
+            .select_from(SimulationORM)
+            .where(SimulationORM.review == Review.PENDING)
+        )
+        priors = s.scalar(select(func.count()).select_from(PriorORM))
+    typer.echo(f"hypotheses open {open_n}; closed by verdict {by}")
+    typer.echo(f"simulations waiting/running {pending}; alphas waiting for review {waiting}")
+    typer.echo(f"priors {priors}; LLM guard: {report.guard(ledger, cfg) or 'ok'}")
+
+
+@app.command("recover-batch")
+def recover_batch(
+    batch_id: str,
+    location: Annotated[str, typer.Option(help="the verified /simulations/... URL")],
+    config: ConfigOpt = DEFAULT_CONFIG,
+) -> None:
+    """Re-attach a verified progress URL to an UNKNOWN batch; starts no simulation."""
+    from urllib.parse import urlsplit
+
+    from alpha_orchestrator.brain.session import API_URL
+
+    parts = urlsplit(location)
+    if (parts.netloc and f"{parts.scheme}://{parts.netloc}" != API_URL) or not (
+        parts.path.startswith("/simulations/") and not parts.query and not parts.fragment
+    ):
+        raise typer.BadParameter("must be a /simulations/... progress URL of the platform")
+    _, ledger = _ctx(config)
+    with ledger.writer_lock(), ledger.session() as s:
+        batch = s.get(BatchORM, batch_id)
+        if batch is None or batch.status != "UNKNOWN":
+            raise typer.BadParameter("only an UNKNOWN batch can be recovered")
+        other = s.scalar(
+            select(BatchORM).where(BatchORM.location == parts.path, BatchORM.id != batch_id)
+        )
+        if other is not None:
+            raise typer.BadParameter("this URL belongs to another batch")
+        batch.location, batch.status = parts.path, "RUNNING"
+    ledger.log("batch_reconciled", batch=batch_id, location=parts.path)
+    typer.echo("Re-attached; the next run only polls it and matches results to requests.")
+
+
+# ---------- memory ----------
+@priors_app.command("seed")
+def priors_seed(
+    limit: Annotated[int, typer.Option(help="documents to read at most")] = 1000,
+    config: ConfigOpt = DEFAULT_CONFIG,
+) -> None:
+    """Extract priors from the official documents in the earlier ledger (LLM; capped)."""
+    cfg, ledger = _ctx(config)
+    vocab = _vocab(cfg)
+    llm = _llm(cfg, ledger)
+    docs = memory.read_documents(cfg.v7_db, list(vocab.official_doc_sources))[:limit]
+    if not docs:
+        typer.echo("No official documents found (check v7_db and official_doc_sources).")
+        raise typer.Exit(1)
+    started = datetime.now(UTC)
+
+    def extract(doc: dict[str, str]) -> list[dict[str, Any]]:
+        out, _ = llm.ask(
+            prompts.PRIOR_SEED,
+            prompts.PriorSeedOut,
+            {"document": {"title": doc["title"], "text": doc["body"][:SEED_DOC_CHARS]}},
+            hypothesis_id=None,
+            retrieved={},
+        )
+        return [c.model_dump() for c in out.claims]
+
+    with ledger.writer_lock():
+        counts = memory.seed_priors(
+            ledger.session, docs, extract, cfg.memory, lambda: llm.spent_since(started)
+        )
+    typer.echo(str(counts))
+
+
+@priors_app.command("add")
+def priors_add(
+    claim: Annotated[str, typer.Option()],
+    source: Annotated[str, typer.Option(help="title or reference of the source")],
+    source_type: Annotated[str, typer.Option(help="official / forum / own")] = "own",
+    quote: Annotated[str, typer.Option()] = "",
+    category: Annotated[list[str] | None, typer.Option(help="dataset category; repeat")] = None,
+    hypothesis_type: Annotated[
+        list[str] | None, typer.Option(help="hypothesis type; repeat")
+    ] = None,
+    config: ConfigOpt = DEFAULT_CONFIG,
+) -> None:
+    """Add one prior by hand (e.g. a forum claim)."""
+    if source_type not in ("official", "forum", "own"):
+        raise typer.BadParameter("source type must be official, forum or own")
+    bad = [t for t in hypothesis_type or [] if t not in prompts.HYPOTHESIS_TYPES]
+    if bad:
+        raise typer.BadParameter(f"unknown hypothesis types {bad}")
+    cfg, ledger = _ctx(config)
+    with ledger.session() as s:
+        p = memory.add_prior(
+            s,
+            claim=claim,
+            source_type=source_type,
+            source_ref=f"manual:{source}",
+            source_title=source,
+            quote=quote,
+            tags={
+                "categories": [c.lower() for c in category or []],
+                "hypothesis_types": list(hypothesis_type or []),
+            },
+            cfg=cfg.memory,
+        )
+        typer.echo(f"added P{p.id}" if p else "already there")
+
+
+@memory_app.command("import-v7")
+def memory_import_v7(config: ConfigOpt = DEFAULT_CONFIG) -> None:
+    """Import the earlier design's finished ideas as Memory B records (once)."""
+    cfg, ledger = _ctx(config)
+    with ledger.session() as s:
+        n = memory.import_v7(s, cfg.v7_db)
+    typer.echo(f"imported {n} records from {cfg.v7_db}")
+
+
+# ---------- review ----------
 @review_app.command("list")
 def review_list(config: ConfigOpt = DEFAULT_CONFIG) -> None:
+    """Alphas that passed every gate and wait for you."""
     _, ledger = _ctx(config)
     with ledger.session() as s:
-        for r in s.scalars(select(ReviewORM).where(ReviewORM.status == ReviewStatus.PENDING)):
-            c = s.get(CandidateORM, r.candidate_id)
-            assert c is not None
+        for x in s.scalars(select(SimulationORM).where(SimulationORM.review == Review.PENDING)):
+            h = s.get(HypothesisORM, x.hypothesis_id)
             typer.echo(
-                f"{r.id[:8]}  alpha {r.alpha_id}  [{c.cell_id}]\n    {c.expression}\n"
-                f"    sharpe {c.sharpe} fitness {c.fitness} turnover {c.turnover} "
-                f"score {r.score}\n    {r.description[:300]}\n"
+                f"[{x.id}] alpha {x.alpha_id}  H{x.hypothesis_id} {h.region if h else ''}\n"
+                f"    {x.expression}\n"
+                f"    train Sharpe {x.train_sharpe}  test Sharpe {x.test_sharpe}  "
+                f"IS Sharpe {x.is_sharpe} fitness {x.is_fitness} turnover {x.is_turnover}\n"
+                f"    {(h.claim if h else '')[:300]}\n"
             )
 
 
 @review_app.command("approve")
-def review_approve(review_id: str, config: ConfigOpt = DEFAULT_CONFIG) -> None:
-    """提交这一条 alpha 到平台（不可撤回）。"""
+def review_approve(simulation_id: int, config: ConfigOpt = DEFAULT_CONFIG) -> None:
+    """Submit this alpha to the platform (cannot be undone)."""
     cfg, ledger = _ctx(config)
-    with ledger.session() as s:
-        pool = list(s.scalars(select(ReviewORM.id)))
-    matched = _match([review_id], pool)
-    if len(matched) != 1:
-        raise typer.Exit(1)
-    rid = matched[0]
     api = _api()
     try:
         api.client.session.ensure()
-        typer.echo("已提交。" if approve(api, ledger, rid, cfg) else "提交失败，详情见面板事件。")
+        ok = gates.approve(api, ledger, simulation_id, cfg)
+        typer.echo("Submitted." if ok else "Not submitted (not pending, or checks no longer pass).")
     finally:
         api.client.session.close()
 
 
-@review_app.command("recheck")
-def review_recheck(config: ConfigOpt = DEFAULT_CONFIG) -> None:
-    """复查已有候选，更新待挑选表。无需调用 LLM 或发起仿真。"""
-    from alpha_orchestrator.factory.select import store_passing
-
-    try:
-        cfg, ledger = _ctx(config)
-        with ledger.writer_lock():
-            api = _api()
-            try:
-                api.client.session.ensure()
-                stored = store_passing(api, ledger, cfg)
-            finally:
-                api.client.session.close()
-    except WorkerAlreadyRunning as exc:
-        typer.echo(f"安全暂停：{exc}")
-        raise typer.Exit(4) from None
-    except NeedBiometric:
-        typer.echo("平台要求刷脸。完成 alpha-factory login 后重新执行复查。")
-        raise typer.Exit(2) from None
-    except (AuthenticationFailed, SessionExpired, RateLimited) as exc:
-        typer.echo(f"复查暂停：{type(exc).__name__}")
-        raise typer.Exit(3) from None
-    typer.echo(f"新增待挑选 {len(stored)} 条。")
-
-
 @review_app.command("reject")
-def review_reject(review_id: str, note: str = "", config: ConfigOpt = DEFAULT_CONFIG) -> None:
+def review_reject(simulation_id: int, note: str = "", config: ConfigOpt = DEFAULT_CONFIG) -> None:
+    """Drop this alpha from the review list."""
     _, ledger = _ctx(config)
-    with ledger.session() as s:
-        pool = list(s.scalars(select(ReviewORM.id)))
-    for rid in _match([review_id], pool):
-        typer.echo("已放弃。" if reject(ledger, rid, note) else "状态不是待确认。")
+    typer.echo("Rejected." if gates.reject(ledger, simulation_id, note) else "Not pending.")
+
+
+if __name__ == "__main__":
+    app()
