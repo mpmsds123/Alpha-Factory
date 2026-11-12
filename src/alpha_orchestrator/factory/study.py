@@ -106,7 +106,10 @@ def choose_dataset(
 
 
 def v7_dataset_pool(s: Session, config: FactoryConfig, excluded: set[str]) -> list[CellORM]:
-    """Return the not-yet-studied cells v7 may draw from."""
+    """Return the not-yet-studied cells v7 may draw from. With a scanner folder configured,
+    only datasets in which the scanner found at least one signal field (owner's decision:
+    the LLM writes new alphas only on fields the scanner found signal in)."""
+    allowed = scanner_signal_datasets(config.scanner_runs) if config.scanner_runs else None
     return [
         c
         for c in s.scalars(
@@ -117,6 +120,7 @@ def v7_dataset_pool(s: Session, config: FactoryConfig, excluded: set[str]) -> li
         and (not config.policy.regions or c.region in config.policy.regions)
         and c.delay in config.policy.delays
         and (c.plan or {}).get("design") != DESIGN
+        and (allowed is None or (c.region, c.dataset_id) in allowed)
     ]
 
 
@@ -286,6 +290,20 @@ def scanner_master_rows(folder: str, region: str, dataset: str) -> list[dict[str
     return rows or None
 
 
+def scanner_signal_datasets(folder: str) -> set[tuple[str, str]]:
+    """(region, dataset) pairs with at least one signal row in the scanner's master table;
+    empty when the table is missing, so nothing is mined without the scanner's evidence."""
+    path = Path(folder).expanduser() / MASTER_FILE
+    if not path.is_file():
+        return set()
+    with path.open(encoding="utf-8-sig", newline="") as fh:
+        return {
+            (r.get(MASTER_REGION) or "", r.get(MASTER_DATASET) or "")
+            for r in csv.DictReader(fh)
+            if _signal(r)
+        }
+
+
 def scanner_signal_fields(folder: str, region: str, dataset: str) -> set[str] | None:
     """Field ids the template scanner found signal in for this dataset, from its master
     table or, for older scanner runs, its per-order files. None when the scanner has no
@@ -354,16 +372,25 @@ def load_fields(api: BrainAPI, ledger: Ledger, cell_id: str, config: FactoryConf
             if config.scanner_runs
             else None
         )
-        if signal is not None and config.design != "v7":
+        scanner_fields: list[str] = []
+        if signal is not None:
             # Step 1 is the scanner: the LLM only works on fields where it found signal.
+            # (v7 skipped this from 11/03 to 11/12, so its ideas used random fields.)
             usable = 0
             for f in loaded:
                 if f.eligible:
                     f.eligible = f.field_id in signal
                     usable += f.eligible
+                    if f.eligible:
+                        scanner_fields.append(f.field_id)
         cell = _cell(s, cell_id)
         cell.state = CellState.RESEARCH if usable else CellState.EXHAUSTED
-        cell.plan = {**(cell.plan or {}), "design": DESIGN, "usable_fields": usable}
+        cell.plan = {
+            **(cell.plan or {}),
+            "design": DESIGN,
+            "usable_fields": usable,
+            "scanner_fields": sorted(scanner_fields),
+        }
         if not usable:
             if (cell.plan or {}).get("direction_trial"):
                 cell.plan = {
@@ -372,7 +399,7 @@ def load_fields(api: BrainAPI, ledger: Ledger, cell_id: str, config: FactoryConf
                 }
             cell.stop_reason = (
                 "the scanner found no field with signal in this dataset"
-                if signal is not None and config.design != "v7"
+                if signal is not None
                 else f"no numeric field covers {floor:.0%} of the universe"
             )
         ledger.log(

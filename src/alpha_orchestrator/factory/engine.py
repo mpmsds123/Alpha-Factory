@@ -686,7 +686,13 @@ class Engine:
                 # groups saved in a dataset's plan before this field existed ran on 21 days
                 horizon_days=int(g.get("horizon_days") or DEFAULT_HORIZON_DAYS),
                 query=" ".join(g["fields"]),
-                extra={"group": g, "n": k},
+                extra={
+                    "group": g,
+                    "n": k,
+                    "scanner_fields": [
+                        f for f in g["fields"] if f in set(plan.get("scanner_fields") or [])
+                    ],
+                },
             )
             s.add(idea)
             s.flush()

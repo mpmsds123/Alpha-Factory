@@ -2,7 +2,13 @@
 
 from pathlib import Path
 
+from alpha_orchestrator.factory import study
+from alpha_orchestrator.factory.config import FactoryConfig
+from alpha_orchestrator.factory.ledger import Ledger
+from alpha_orchestrator.factory.models import CellORM
 from alpha_orchestrator.factory.study import MASTER_FILE, scanner_signal_fields
+
+from .fakes import FakePlatform, is_metrics
 
 HEADER = "地区,数据集,阶,字段,sharpe,turnover,公式\n"
 
@@ -30,3 +36,48 @@ def test_master_table_signal_fields(tmp_path: Path) -> None:
 def test_master_table_dataset_without_signal(tmp_path: Path) -> None:
     _master(tmp_path, ["USA,ds1,1阶,f_weak,0.4,0.10,x"])
     assert scanner_signal_fields(str(tmp_path), "USA", "ds1") == set()
+
+
+def _cell(name: str) -> CellORM:
+    return CellORM(
+        cell_id=f"USA|1|TOP3000|{name}",
+        region="USA",
+        delay=1,
+        universe="TOP3000",
+        dataset_id=name,
+        category="analyst",
+        coverage=0.9,
+        multiplier=1.0,
+    )
+
+
+def test_v7_pool_has_only_datasets_with_scanner_signal(tmp_path: Path) -> None:
+    _master(tmp_path, ["USA,ds1,1阶,f_hit,1.9,0.10,x", "USA,ds2,1阶,f_weak,0.3,0.10,x"])
+    ledger = Ledger("sqlite://")
+    with ledger.session() as s:
+        s.add_all([_cell("ds1"), _cell("ds2"), _cell("ds3")])
+    config = FactoryConfig(design="v7", scanner_runs=str(tmp_path))
+    with ledger.session() as s:
+        assert [c.dataset_id for c in study.v7_dataset_pool(s, config, set())] == ["ds1"]
+        config.scanner_runs = str(tmp_path / "missing")  # no evidence -> nothing to mine
+        assert study.v7_dataset_pool(s, config, set()) == []
+
+
+def test_v7_keeps_only_scanner_signal_fields(tmp_path: Path) -> None:
+    _master(tmp_path, ["USA,ds1,1阶,reduce(f_hit),1.9,0.10,x", "USA,ds1,1阶,f_miss,0.2,0.1,x"])
+    ledger = Ledger("sqlite://")
+    with ledger.session() as s:
+        s.add(_cell("ds1"))
+    rows = {
+        "ds1": [
+            {"id": "f_hit", "type": "VECTOR", "coverage": 0.85},
+            {"id": "f_miss", "type": "MATRIX", "coverage": 0.85},
+        ]
+    }
+    api = FakePlatform(lambda e, st: is_metrics(0.0, 0.0), rows)
+    config = FactoryConfig(design="v7", scanner_runs=str(tmp_path))
+    assert study.load_fields(api, ledger, "USA|1|TOP3000|ds1", config) == 1
+    with ledger.session() as s:
+        assert [f.field_id for f in study.usable_fields(s, "USA|1|TOP3000|ds1")] == ["f_hit"]
+        cell = s.get(CellORM, "USA|1|TOP3000|ds1")
+        assert cell is not None and cell.plan["scanner_fields"] == ["f_hit"]
