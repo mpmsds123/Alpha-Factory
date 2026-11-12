@@ -20,6 +20,7 @@ the available ideas run out:
 
 ```
  pick a dataset ─► LLM groups its fields into economic ideas ─► LLM writes first formulas
+ (scanner signal only)
         ▲                                                          │
         │                                        local validator rejects invalid ones
         │                                                          ▼
@@ -34,6 +35,9 @@ the available ideas run out:
                                                   you approve ─► submit (manual only)
 ```
 
+- **Scanner evidence first.** Only datasets and fields in which the separate template scanner
+  found signal are mined, and a first formula that repeats the structure of a formula the
+  scanner already ran is sent back as a rewrite rather than a new alpha.
 - **Ideas, not templates.** The LLM reads field descriptions and past outcomes and proposes
   field groups with an economic rationale; every LLM call is budgeted and stored with hashes.
 - **Statistics before effort.** An idea whose best first formula does not clear the level
@@ -88,6 +92,7 @@ alpha-factory doctor                  # read-only: budget, in-flight and blocked
 alpha-factory login --then-run        # complete the platform's verification, then run a day
 alpha-factory run                     # run one allocation day (resumes where it stopped)
 alpha-factory dashboard               # open the local dashboard
+alpha-factory funnel                  # read-only: rewrite the per-stage funnel CSVs in reports/
 alpha-factory review list             # candidates waiting for you
 alpha-factory review approve ID       # the only command that submits
 alpha-factory schedule install        # optional: daily run via macOS launchd
