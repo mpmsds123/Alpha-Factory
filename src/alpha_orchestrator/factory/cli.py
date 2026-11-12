@@ -192,6 +192,7 @@ def run(
         raise typer.Exit(4) from None
 
     def progress(status: str) -> None:
+        """Write the progress CSV, never letting a failure stop the run."""
         try:
             write_progress(ledger, cfg, status)
         except Exception as exc:  # the progress file must never stop a run
@@ -205,6 +206,7 @@ def run(
     record_path = Path(cfg.reports_dir) / "record.html"
 
     def refresh_record() -> None:
+        """Re-render the research record page and mark the run in progress."""
         render_record(ledger, record_path)
         progress("运行中")
 

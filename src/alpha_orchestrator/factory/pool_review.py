@@ -20,6 +20,7 @@ ACTIONS = ("continue", "stop", "enhance")
 
 
 def band(first_best: float) -> int:
+    """Return the index of the band a first-formula Sharpe falls in."""
     for i, edge in enumerate(BAND_EDGES):
         if first_best < edge:
             return i

@@ -17,6 +17,7 @@ MULTI_SIM_MAX_CHILDREN = 10
 
 
 def simulation_payload(expression: str, settings: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the platform's simulation request body from an expression and settings."""
     full = {
         "instrumentType": "EQUITY",
         "language": "FASTEXPR",
@@ -56,6 +57,7 @@ class BrainAPI:
 
     # ---------- metadata ----------
     def datasets(self, region: str, delay: int, universe: str) -> list[dict[str, Any]]:
+        """List datasets for a region, delay and universe."""
         query = {
             "instrumentType": "EQUITY",
             "region": region,
@@ -68,6 +70,7 @@ class BrainAPI:
     def datafields(
         self, region: str, delay: int, universe: str, dataset_id: str
     ) -> list[dict[str, Any]]:
+        """List the data fields of one dataset."""
         query = {
             "instrumentType": "EQUITY",
             "region": region,
@@ -79,6 +82,7 @@ class BrainAPI:
         return self._paged("/data-fields", query)
 
     def operators(self) -> list[dict[str, Any]]:
+        """List the operators available to this account."""
         payload = self.client.wait_json("/operators")
         return list(payload or [])
 
@@ -89,14 +93,17 @@ class BrainAPI:
         return parse_simulation_options(settings)
 
     def pyramid_multipliers(self) -> list[dict[str, Any]]:
+        """Return the account's current pyramid multipliers."""
         payload = self.client.wait_json("/users/self/activities/pyramid-multipliers")
         return _records(payload)
 
     def pyramid_alphas(self) -> list[dict[str, Any]]:
+        """Return the account's alpha counts per pyramid."""
         payload = self.client.wait_json("/users/self/activities/pyramid-alphas")
         return _records(payload)
 
     def user(self) -> dict[str, Any]:
+        """Return the signed-in user's profile."""
         return dict(self.client.wait_json("/users/self") or {})
 
     # ---------- simulation ----------
@@ -133,6 +140,7 @@ class BrainAPI:
         )
 
     def child(self, child_id: str) -> ChildResult:
+        """Fetch one child simulation of a multi-simulation as a ChildResult."""
         data = self.client.wait_json(f"/simulations/{child_id}") or {}
         return ChildResult(
             child_id=child_id,
@@ -143,12 +151,15 @@ class BrainAPI:
 
     # ---------- results ----------
     def alpha(self, alpha_id: str) -> dict[str, Any]:
+        """Return one alpha's full record."""
         return dict(self.client.wait_json(f"/alphas/{alpha_id}") or {})
 
     def yearly_stats(self, alpha_id: str) -> list[dict[str, Any]]:
+        """Return an alpha's in-sample statistics by year."""
         return _table(self.client.wait_json(f"/alphas/{alpha_id}/recordsets/yearly-stats"))
 
     def daily_pnl(self, alpha_id: str) -> dict[str, float]:
+        """Return an alpha's daily PnL keyed by date."""
         rows = _table(self.client.wait_json(f"/alphas/{alpha_id}/recordsets/daily-pnl"))
         out: dict[str, float] = {}
         for row in rows:
@@ -163,11 +174,13 @@ class BrainAPI:
         return list((payload.get("is") or {}).get("checks") or [])
 
     def correlation_max(self, alpha_id: str, kind: str) -> float | None:
+        """Return an alpha's maximum correlation of the given kind, if reported."""
         payload = self.client.wait_json(f"/alphas/{alpha_id}/correlations/{kind}") or {}
         value = payload.get("max")
         return float(value) if isinstance(value, (int, float)) else None
 
     def performance_comparison(self, alpha_id: str) -> dict[str, Any]:
+        """Return the before/after performance comparison for an alpha."""
         path = f"/users/self/alphas/{alpha_id}/before-and-after-performance"
         return dict(self.client.wait_json(path) or {})
 
@@ -179,6 +192,7 @@ class BrainAPI:
         description: str | None = None,
         tags: Iterable[str] = (),
     ) -> None:
+        """Set an alpha's tags and, optionally, its name and description."""
         body: dict[str, Any] = {"tags": list(tags)}
         if name:
             body["name"] = name
@@ -215,6 +229,7 @@ def parse_simulation_options(children: Mapping[str, Any]) -> dict[str, Any]:
     """Flatten the OPTIONS tree into {region: {universes, delays, neutralizations}}."""
 
     def choices(name: str) -> Any:
+        """Return the allowed values of one equity simulation setting."""
         return children.get(name, {}).get("choices", {}).get("instrumentType", {}).get("EQUITY")
 
     regions = [c["value"] for c in choices("region") or []]

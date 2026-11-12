@@ -25,6 +25,7 @@ from alpha_orchestrator.domain.models import utc_now
 
 
 def new_id() -> str:
+    """Return a new random UUID string."""
     return str(uuid4())
 
 

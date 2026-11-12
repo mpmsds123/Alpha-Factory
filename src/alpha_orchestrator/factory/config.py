@@ -55,6 +55,7 @@ class Budget:
         ZoneInfo(self.quota_timezone)
 
     def window_start(self, now: datetime | None = None) -> datetime:
+        """Return the start of the quota window containing now."""
         instant = now or datetime.now(UTC)
         if instant.tzinfo is None:
             raise ValueError("Quota clock must include a timezone")
@@ -154,6 +155,7 @@ class FactoryConfig:
 
     @classmethod
     def load(cls, path: Path | None = None) -> "FactoryConfig":
+        """Load factory.yaml, falling back to defaults for missing keys."""
         source = (path or DEFAULT_CONFIG).expanduser()
         if not source.exists():
             return cls(reports_dir=str(REPO_ROOT / cls.reports_dir))
@@ -178,10 +180,12 @@ class FactoryConfig:
         )
 
     def margin_floor(self, region: str) -> float:
+        """Return the minimum margin (basis points) for a region."""
         table = self.thresholds.margin_bps
         return table.get(region, table["default"])
 
     def sharpe_floor(self, region: str) -> float:
+        """Return the submission Sharpe line for a region."""
         t = self.thresholds
         return t.submit_sharpe_chn if region == "CHN" else t.submit_sharpe
 

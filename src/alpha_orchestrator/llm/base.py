@@ -16,10 +16,12 @@ class LLMCompletion:
 
 class LLMClient(Protocol):
     @property
-    def model(self) -> str: ...
+    def model(self) -> str:
+        """Return the model name."""
 
     @property
-    def temperature(self) -> float: ...
+    def temperature(self) -> float:
+        """Return the sampling temperature."""
 
     def complete(
         self,
@@ -27,4 +29,5 @@ class LLMClient(Protocol):
         system_prompt: str,
         user_prompt: str,
         json_schema: dict[str, Any],
-    ) -> LLMCompletion: ...
+    ) -> LLMCompletion:
+        """Return a completion constrained to the given JSON schema."""

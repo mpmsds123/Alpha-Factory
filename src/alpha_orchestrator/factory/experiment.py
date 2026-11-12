@@ -29,12 +29,14 @@ class Proposal(BaseModel):
 
     @model_validator(mode="after")
     def distinct_series(self) -> Proposal:
+        """Require the candidate and benchmark series to differ."""
         if self.candidate == self.benchmark:
             raise ValueError("candidate and benchmark must be distinct")
         return self
 
 
 def proposal_digest(proposal: Proposal) -> str:
+    """Return the SHA-256 fingerprint of a proposal."""
     return sha256(proposal.model_dump_json().encode()).hexdigest()
 
 
@@ -50,12 +52,14 @@ class Protocol(BaseModel):
 
     @model_validator(mode="after")
     def ordered_dates(self) -> Protocol:
+        """Require approval to precede a non-empty evaluation window."""
         if not self.approved_on < self.start <= self.end:
             raise ValueError("protocol must be approved before its evaluation window")
         return self
 
 
 def propose(llm: FactoryLLM, evidence: Mapping[str, str], allowed_series: list[str]) -> Proposal:
+    """Ask the LLM for an experiment proposal and validate it against the inputs."""
     proposal = Proposal.model_validate(llm.experiment_proposal(dict(evidence), allowed_series))
     if set(proposal.evidence_ids) - evidence.keys():
         raise ValueError("proposal cited unknown evidence")

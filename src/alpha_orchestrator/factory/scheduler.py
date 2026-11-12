@@ -57,10 +57,12 @@ def rejected_children(message: str, size: int) -> set[int]:
 
 
 def metrics_from_alpha(alpha: dict[str, Any]) -> dict[str, Any]:
+    """Extract Sharpe, fitness, turnover and checks from an alpha record."""
     is_ = alpha.get("is") or {}
     checks = list(is_.get("checks") or [])
 
     def num(key: str) -> float | None:
+        """Return the named in-sample number, or None."""
         value = is_.get(key)
         return float(value) if isinstance(value, (int, float)) else None
 
@@ -120,6 +122,7 @@ class Simulator:
             return self._run(sim_budget, deadline)
 
     def assert_recoverable(self) -> None:
+        """Refuse to run while a batch is in an uncertain state."""
         with self.ledger.session() as s:
             uncertain = list(
                 s.scalars(
@@ -368,6 +371,7 @@ class Simulator:
         unmatched: list[str] = []
 
         def attach(alpha_id: str) -> None:
+            """Match a platform alpha back to the candidate that produced it."""
             alpha = self.api.alpha(alpha_id)
             code = (alpha.get("regular") or {}).get("code")
             actual = alpha.get("settings") or {}

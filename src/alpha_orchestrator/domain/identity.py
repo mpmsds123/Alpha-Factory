@@ -14,10 +14,12 @@ TOKEN_RE = re.compile(
 
 
 def sha256_text(value: str) -> str:
+    """Return the hex SHA-256 of a string."""
     return hashlib.sha256(value.encode()).hexdigest()
 
 
 def canonical_json(value: Any) -> str:
+    """Serialize value as compact, key-sorted ASCII JSON."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
@@ -30,6 +32,7 @@ def metadata_snapshot_identity(
     data_type: str,
     payload: Any,
 ) -> tuple[str, str]:
+    """Return the content hash identifying a metadata snapshot."""
     serialized = canonical_json(
         {
             "kind": kind,
@@ -46,6 +49,7 @@ def metadata_snapshot_identity(
 
 
 def tokenize_expression(expression: str) -> list[str]:
+    """Split an expression into tokens, rejecting unsupported characters."""
     tokens = TOKEN_RE.findall(expression)
     if re.sub(r"\s+", "", "".join(tokens)) != re.sub(r"\s+", "", expression):
         raise ValueError("Expression contains unsupported characters")
@@ -53,6 +57,7 @@ def tokenize_expression(expression: str) -> list[str]:
 
 
 def canonicalize_expression(expression: str, known_operators: Iterable[str]) -> str:
+    """Return the expression with whitespace removed and operators lower-cased."""
     operator_names = {operator.casefold(): operator.lower() for operator in known_operators}
     tokens = tokenize_expression(expression)
     normalized = [operator_names.get(token.casefold(), token) for token in tokens]
@@ -66,6 +71,7 @@ def candidate_fingerprint(
     universe: str,
     delay: int,
 ) -> str:
+    """Return the hash identifying a candidate's expression, settings and scope."""
     payload = "\x1f".join(
         (canonical_expression, canonical_json(settings), region, universe, str(delay))
     )
@@ -73,9 +79,11 @@ def candidate_fingerprint(
 
 
 def normalized_content_hash(canonical_expression: str, settings: Mapping[str, Any]) -> str:
+    """Return the hash of a candidate's expression and settings only."""
     payload = "\x1f".join((canonical_expression, canonical_json(settings)))
     return sha256_text(payload)
 
 
 def stable_idempotency_key(candidate_id: str, operation: str = "simulation-create") -> str:
+    """Return a deterministic idempotency key for an operation on a candidate."""
     return sha256_text(f"{operation}:{candidate_id}")

@@ -48,6 +48,7 @@ class PlatformCheckService:
         adapter: BrainAdapter,
         correlation_policy: CorrelationPolicy,
     ) -> PlatformCheckSummary:
+        """Run live platform checks for a candidate and record the decision."""
         candidate = self.repository.get_candidate(candidate_id)
         if CandidateStatus(candidate.status) is not CandidateStatus.READY_FOR_PLATFORM_CHECK:
             raise ValueError("Candidate is not ready for a live platform check")

@@ -64,13 +64,16 @@ class Sprt:
 
     @property
     def upper(self) -> float:
+        """Return the log-likelihood threshold for deciding 'signal'."""
         return math.log((1 - self.beta) / self.alpha)
 
     @property
     def lower(self) -> float:
+        """Return the log-likelihood threshold for deciding 'noise'."""
         return math.log(self.beta / (1 - self.alpha))
 
     def add(self, hit: bool) -> str:
+        """Add one observation and return the current verdict."""
         self.n += 1
         self.hits += hit
         self.llr += math.log(self.p1 / self.p0) if hit else math.log((1 - self.p1) / (1 - self.p0))
@@ -78,6 +81,7 @@ class Sprt:
 
     @property
     def verdict(self) -> str:
+        """Return 'signal', 'noise' or 'continue'."""
         if self.llr >= self.upper:
             return "signal"
         if self.llr <= self.lower:
@@ -112,4 +116,5 @@ def thompson_pick(arms: Mapping[str, Arm], rng: random.Random, k: int = 1) -> li
 
 
 def beta_draw(successes: float, failures: float, rng: random.Random) -> float:
+    """Draw from the Beta posterior of a success rate (uniform prior)."""
     return rng.betavariate(1 + successes, 1 + failures)

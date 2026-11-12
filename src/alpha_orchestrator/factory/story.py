@@ -41,6 +41,7 @@ def _e(x: Any) -> str:
 
 
 def now_line(s: Session) -> str:
+    """Describe what the factory is doing right now in one line."""
     pending = Counter(
         c.stage
         for c in s.scalars(
@@ -158,6 +159,7 @@ def _research(s: Session, cell: CellORM, sigma: float) -> str:
 
 
 def render_story(s: Session, cfg: FactoryConfig) -> str:
+    """Render the research log section of the dashboard."""
     cells = [c for c in s.scalars(select(CellORM)) if (c.plan or {}).get("phase")]
     cells.sort(key=lambda c: c.updated_at, reverse=True)
     parts = [

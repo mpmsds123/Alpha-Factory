@@ -30,6 +30,7 @@ class MethodCardRetriever:
         failure_codes: set[str] | None = None,
         limit: int = 5,
     ) -> list[RetrievedCard]:
+        """Return the approved method cards most relevant to a stage and failures."""
         if limit < 1:
             return []
         requested_failures = {code.casefold() for code in failure_codes or set()}

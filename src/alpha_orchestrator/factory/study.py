@@ -106,6 +106,7 @@ def choose_dataset(
 
 
 def v7_dataset_pool(s: Session, config: FactoryConfig, excluded: set[str]) -> list[CellORM]:
+    """Return the not-yet-studied cells v7 may draw from."""
     return [
         c
         for c in s.scalars(
@@ -346,6 +347,7 @@ def load_fields(api: BrainAPI, ledger: Ledger, cell_id: str, config: FactoryConf
 
 
 def usable_fields(s: Session, cell_id: str) -> list[FieldORM]:
+    """Return the eligible fields of a cell."""
     return list(
         s.scalars(select(FieldORM).where(FieldORM.cell_id == cell_id, FieldORM.eligible.is_(True)))
     )
@@ -359,6 +361,7 @@ def _cell(s: Session, cell_id: str) -> CellORM:
 
 
 def summary(ledger: Ledger, cell_id: str) -> dict[str, Any]:
+    """Summarize a cell and its usable fields."""
     with ledger.session() as s:
         cell = _cell(s, cell_id)
         fields = usable_fields(s, cell_id)

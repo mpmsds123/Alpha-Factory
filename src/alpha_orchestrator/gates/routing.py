@@ -14,6 +14,7 @@ def route_completed_result(
     # gate's job to act on it. High turnover is diagnosed and repaired downstream,
     # where this project has real, cited method cards for it, once a live
     # platform-check actually reports HIGH_TURNOVER.
+    """Decide whether a finished simulation is kept, repaired or discarded."""
     if metrics is None:
         return GateOutcome.DISCARD, ("NO_COMPLETED_RESULT",)
     sharpe = metrics.sharpe

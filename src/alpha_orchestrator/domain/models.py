@@ -15,6 +15,7 @@ from alpha_orchestrator.domain.enums import (
 
 
 def utc_now() -> datetime:
+    """Return the current time as an aware UTC datetime."""
     return datetime.now(UTC)
 
 
@@ -53,6 +54,7 @@ class CandidateProposal(StrictModel):
 
     @model_validator(mode="after")
     def validate_lineage(self) -> "CandidateProposal":
+        """Require lineage fields exactly when a parent is given."""
         lineage_fields = (self.changed_dimension, self.change_reason)
         if self.parent_candidate_id is None:
             if any(value is not None for value in lineage_fields) or self.generation_number != 0:

@@ -54,6 +54,7 @@ class LimitPolicy(PolicyModel):
 
     @model_validator(mode="after")
     def enforce_safety_boundary(self) -> "LimitPolicy":
+        """Reject policies that enable crossover or automatic submission."""
         if self.crossover_enabled:
             raise ValueError("Crossover is unavailable in the MVP")
         if self.automatic_submission_available:
@@ -82,16 +83,20 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def load_routing_policy(path: Path) -> RoutingPolicy:
+    """Load and validate a routing policy YAML file."""
     return RoutingPolicy.model_validate(_load_yaml(path))
 
 
 def load_limit_policy(path: Path) -> LimitPolicy:
+    """Load and validate a limit policy YAML file."""
     return LimitPolicy.model_validate(_load_yaml(path))
 
 
 def load_error_taxonomy(path: Path) -> ErrorTaxonomy:
+    """Load and validate an error taxonomy YAML file."""
     return ErrorTaxonomy.model_validate(_load_yaml(path))
 
 
 def load_correlation_policy(path: Path) -> CorrelationPolicy:
+    """Load and validate a correlation policy YAML file."""
     return CorrelationPolicy.model_validate(_load_yaml(path))

@@ -2172,6 +2172,7 @@ def run_day(
     sleep: Callable[[float], None] = time.sleep,
     on_progress: Callable[[], None] | None = None,
 ) -> DayReport:
+    """Run the factory for one allocation day and return what happened."""
     from alpha_orchestrator.factory.daily import catalog_is_stale
 
     report = DayReport()

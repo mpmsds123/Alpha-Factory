@@ -12,6 +12,7 @@ PROMPT_FILES: dict[LLMRole, tuple[str, str]] = {
 
 
 def default_prompt_directory() -> Path:
+    """Return ./prompts if present, else the packaged default prompts."""
     repository_prompts = Path.cwd() / "prompts"
     if repository_prompts.is_dir():
         return repository_prompts
@@ -21,6 +22,7 @@ def default_prompt_directory() -> Path:
 def register_default_prompts(
     repository: Repository, directory: Path | None = None
 ) -> dict[LLMRole, str]:
+    """Register the default prompt versions and return them by role."""
     prompt_directory = directory or default_prompt_directory()
     versions: dict[LLMRole, str] = {}
     for role, (version, filename) in PROMPT_FILES.items():

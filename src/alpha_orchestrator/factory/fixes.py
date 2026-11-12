@@ -143,6 +143,7 @@ MENU: dict[str, tuple[str, ...]] = {
 
 
 def fail_set(fails: str | None) -> set[str]:
+    """Parse a comma-separated list of failed checks into a set."""
     return {x for x in (fails or "").split(",") if x}
 
 
@@ -161,6 +162,7 @@ def _classify(check: str) -> str | None:
 
 
 def diagnose(fails: str | None) -> str:
+    """Name the first problem, in priority order, that the failed checks show."""
     got = fail_set(fails)
     for problem, checks in PROBLEM_ORDER:
         if got & checks:
@@ -189,10 +191,12 @@ def score(fails: str | None, sharpe: float | None) -> tuple[int, float]:
 
 
 def success(child_fails: str | None, parent_fails: str | None) -> bool:
+    """Return True if the child fails fewer checks than its parent."""
     return len(fail_set(child_fails)) < len(fail_set(parent_fails))
 
 
 def target_checks(fails: str, problem: str) -> list[str]:
+    """Return the failed checks a fix for this problem should address."""
     matched = sorted(check for check in fail_set(fails) if diagnose(check) == problem)
     return matched or sorted(fail_set(fails))
 
@@ -225,6 +229,7 @@ Stats = dict[tuple[str, str], list[int]]  # (problem, fix) -> [successes, failur
 
 
 def tally(rows: Iterable[tuple[str, str, bool]]) -> Stats:
+    """Count successes and failures per (problem, fix) pair."""
     out: Stats = {}
     for problem, fix, ok in rows:
         cell = out.setdefault((problem, fix), [0, 0])

@@ -44,6 +44,7 @@ class MCPServiceSettings(StrictModel):
 
     @classmethod
     def from_environment(cls) -> "MCPServiceSettings":
+        """Build settings from the ALPHA_LAB_MCP_* environment variables."""
         explicit_path = os.getenv("ALPHA_LAB_MCP_DATABASE_PATH")
         database_url = os.getenv("ALPHA_LAB_DATABASE_URL")
         if explicit_path:
@@ -120,6 +121,7 @@ class AlphaMCPService:
             database.dispose()
 
     def run_status(self, run_id: str) -> RunStatusView:
+        """Return a run's status and counts."""
         with self._repository() as repository:
             run = repository.get_run(run_id)
             return RunStatusView(
@@ -132,6 +134,7 @@ class AlphaMCPService:
             )
 
     def run_report(self, run_id: str) -> RunReportView:
+        """Return a run's Markdown report."""
         with self._repository() as repository:
             return RunReportView(
                 run_id=run_id,
@@ -139,6 +142,7 @@ class AlphaMCPService:
             )
 
     def list_method_cards(self, status: MethodCardStatus | None) -> MethodCardListView:
+        """List method cards, optionally filtered by status."""
         with self._repository() as repository:
             cards = repository.list_method_cards(status)
             return MethodCardListView(
@@ -154,6 +158,7 @@ class AlphaMCPService:
             )
 
     def execute_replay(self, run_id: str) -> ReplayExecutionView:
+        """Execute a run against the configured replay fixture."""
         fixture_path = self.settings.replay_fixture_path
         if fixture_path is None:
             raise ValueError("ALPHA_LAB_MCP_REPLAY_FIXTURE is required for replay execution")
@@ -182,6 +187,7 @@ class AlphaMCPService:
             )
 
     def stop_run(self, run_id: str) -> RunStopView:
+        """Mark a run as stopped."""
         with self._repository() as repository:
             repository.get_run(run_id)
             repository.update_run_status(
@@ -201,6 +207,7 @@ def _model_visible_call(operation: Callable[[], TResult]) -> TResult:
 
 
 def build_server(settings: MCPServiceSettings) -> MCPServer[None]:
+    """Build the stdio MCP server and register its tools."""
     service = AlphaMCPService(settings)
     server: MCPServer[None] = MCPServer(
         name="alpha-research-orchestrator",

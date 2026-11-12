@@ -55,10 +55,12 @@ def crowding_discount(alpha_count: int) -> float:
 
 
 def cost_factor(margin_floor_bps: float) -> float:
+    """Scale down datasets in regions with higher trading-cost floors."""
     return max(0.5, 1.0 - (margin_floor_bps - 5.0) / 75.0)
 
 
 def is_paper(idea: IdeaORM) -> bool:
+    """Return True if an idea comes from a research paper."""
     return idea.source in PAPER_SOURCES or bool(PAPER_TITLE.search(idea.title))
 
 
@@ -88,6 +90,7 @@ def outcome_of(cell: CellORM) -> str | None:
 
 
 def evidence(cells: list[CellORM], refs: dict[str, int]) -> dict[str, tuple[float, float]]:
+    """Summarize past outcomes by dataset and by category and region."""
     by_dataset: dict[str, Counter[str]] = defaultdict(Counter)
     by_cat_region: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
     for c in cells:
@@ -112,6 +115,7 @@ def evidence(cells: list[CellORM], refs: dict[str, int]) -> dict[str, tuple[floa
 def payoff(
     c: CellORM, config: FactoryConfig, pyramids: Counter[tuple[str, int, str]]
 ) -> dict[str, float]:
+    """Return the payoff components used to rank a dataset."""
     return {
         "multiplier": c.multiplier,
         "pyramid_gap": gap_bonus(pyramids.get((c.region, c.delay, c.category.lower()), 0)),

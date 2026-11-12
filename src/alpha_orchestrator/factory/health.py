@@ -9,6 +9,7 @@ from alpha_orchestrator.factory.ledger import today_utc
 
 
 def inspect_local(config: FactoryConfig) -> dict[str, Any]:
+    """Report budget, in-flight and anomalous batches without network access."""
     path = Path(config.db_path).expanduser().resolve()
     cap = min(config.budget.v1_daily_cap, config.budget.daily_sim_cap)
     start = config.budget.window_start()

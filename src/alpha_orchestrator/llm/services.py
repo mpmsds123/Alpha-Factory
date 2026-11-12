@@ -80,6 +80,7 @@ class LedgeredLLMInvoker:
         response_model: type[TModel],
         deterministic_validation: Callable[[TModel], None],
     ) -> tuple[str, TModel]:
+        """Call the LLM with a registered prompt, recording the request and reply."""
         prompt = self.repository.get_prompt_version(prompt_version)
         if prompt.role != role:
             raise ValueError("Prompt role does not match the requested LLM role")
@@ -172,6 +173,7 @@ class CandidateGenerator:
         query: str,
         retrieval_limit: int = 5,
     ) -> CandidateGenerationResult:
+        """Ask the LLM for root candidates and insert the valid ones."""
         run = self.repository.get_run(run_id)
         if metadata.dataset_id != run.dataset_id:
             raise ValueError("Metadata dataset does not match the frozen run")
@@ -199,6 +201,7 @@ class CandidateGenerator:
         allowed_cards = {card.card_id for card in cards}
 
         def validate(batch: CandidateProposalBatch) -> None:
+            """Reject generator output that breaks capacity or card rules."""
             assert_no_sensitive_data(batch.model_dump(mode="python"))
             if len(batch.proposals) > capacity:
                 raise ValueError("Generator exceeded the frozen candidate capacity")
@@ -272,6 +275,7 @@ class RepairPlanner:
         metadata: MetadataSnapshot,
         retrieval_limit: int = 5,
     ) -> RepairPlanningResult:
+        """Ask the LLM for single-parent repairs and insert the valid children."""
         parent = self.repository.get_candidate(candidate_id)
         run = self.repository.get_run(parent.run_id)
         if metadata.dataset_id != run.dataset_id:
@@ -327,6 +331,7 @@ class RepairPlanner:
         allowed_cards = {card.card_id for card in cards}
 
         def validate(plan: RepairPlan) -> None:
+            """Reject repair plans that break capacity or card rules."""
             assert_no_sensitive_data(plan.model_dump(mode="python"))
             if len(plan.proposals) > child_capacity:
                 raise ValueError("Repair planner exceeded the frozen child capacity")

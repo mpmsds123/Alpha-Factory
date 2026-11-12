@@ -12,6 +12,7 @@ from alpha_orchestrator.factory.models import BatchORM, CandidateORM
 
 
 def batch_digest(s: Session, batch: BatchORM) -> str:
+    """Return the fingerprint of a batch and its members."""
     members = list(s.scalars(select(CandidateORM).where(CandidateORM.batch_id == batch.id)))
     created = batch.created_at
     if created.tzinfo is not None:

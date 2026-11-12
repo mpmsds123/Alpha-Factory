@@ -35,6 +35,7 @@ class Quota:
     reset_seconds: int | None = None
 
     def update(self, headers: httpx.Headers) -> None:
+        """Update the rate-limit state from response headers."""
         for attr, name in (
             ("limit", "X-Ratelimit-Limit"),
             ("remaining", "X-Ratelimit-Remaining"),
@@ -59,6 +60,7 @@ class BrainClient:
         self.quota = Quota()
 
     def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """Send a request with retries, rate-limit waits and one re-login on expiry."""
         relogged = False
         read_only = method.upper() in {"GET", "HEAD", "OPTIONS"}
         for attempt in range(self.max_attempts):

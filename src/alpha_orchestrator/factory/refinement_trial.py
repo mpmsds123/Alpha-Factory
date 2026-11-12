@@ -14,6 +14,7 @@ VERSION = 1
 
 
 def outcome(trial: dict[str, Any]) -> str:
+    """Return which arm won a paired refinement trial, or 'pending'."""
     result = trial.get("result")
     if result is None:
         return "pending"
@@ -33,6 +34,7 @@ def rule_choice(names: list[str], problem: str, stats: fixes.Stats) -> str:
     """Smoothed historical success rate. Menu order breaks ties."""
 
     def score(name: str) -> Fraction:
+        """Return the Laplace-smoothed success rate of a fix for a problem."""
         wins, losses = stats.get((problem, name), [0, 0])
         return Fraction(wins + 1, wins + losses + 2)
 

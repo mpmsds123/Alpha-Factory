@@ -54,9 +54,11 @@ class _Parser:
         self.t, self.i = tokens, 0
 
     def peek(self) -> str | None:
+        """Return the next token without consuming it."""
         return self.t[self.i] if self.i < len(self.t) else None
 
     def take(self) -> str:
+        """Consume and return the next token."""
         tok = self.t[self.i]
         self.i += 1
         return tok
@@ -64,6 +66,7 @@ class _Parser:
     # Each parse method returns (signs, number) where number is the literal value when the
     # sub-expression is a plain number (so multiply(-1, x) can be read), else None.
     def expr(self) -> tuple[dict[str, Sign], float | None]:
+        """Parse a full expression, including the ternary operator."""
         left = self.additive()
         if self.peek() == "?":
             self.take()
@@ -79,6 +82,7 @@ class _Parser:
         return left
 
     def additive(self) -> tuple[dict[str, Sign], float | None]:
+        """Parse a sum or difference."""
         signs, num = self.term()
         while self.peek() in {"+", "-"}:
             op = self.take()
@@ -90,6 +94,7 @@ class _Parser:
         return signs, num
 
     def term(self) -> tuple[dict[str, Sign], float | None]:
+        """Parse a product, quotient, power or modulo."""
         signs, num = self.unary()
         while self.peek() in {"*", "/", "^", "%"}:
             op = self.take()
@@ -99,6 +104,7 @@ class _Parser:
         return signs, num
 
     def unary(self) -> tuple[dict[str, Sign], float | None]:
+        """Parse an optionally negated operand."""
         if self.peek() == "-":
             self.take()
             s, n = self.unary()
@@ -109,6 +115,7 @@ class _Parser:
         return self.atom()
 
     def atom(self) -> tuple[dict[str, Sign], float | None]:
+        """Parse a number, field, call or parenthesised expression."""
         tok = self.take()
         if tok == "(":
             inner = self.expr()
@@ -126,6 +133,7 @@ class _Parser:
         return {}, None
 
     def call(self, name: str) -> tuple[dict[str, Sign], float | None]:
+        """Parse an operator call's arguments."""
         self.take()  # "("
         args: list[tuple[dict[str, Sign], float | None]] = []
         while self.peek() not in {")", None}:

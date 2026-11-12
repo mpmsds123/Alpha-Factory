@@ -77,6 +77,7 @@ def _placeholder_in(template: str, placeholders: Sequence[str]) -> str | None:
 
 
 def time_series_operators(operators: Iterable[str]) -> list[str]:
+    """Return the two-argument time-series operators available, sorted."""
     return sorted(
         name for name in operators if name.casefold() in TWO_ARGUMENT_TIME_SERIES_OPERATORS
     )
@@ -149,6 +150,7 @@ def seed_from_file(
     settings: Mapping[str, Any],
     limit: int | None = None,
 ) -> list[CandidateProposal]:
+    """Expand a template file into seed candidates for a run."""
     return expand_templates(
         load_templates(path),
         metadata,

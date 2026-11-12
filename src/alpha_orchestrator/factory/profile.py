@@ -26,10 +26,12 @@ CADENCE_LIMITS = (("daily", 5), ("weekly", 12), ("monthly", 30), ("quarterly", 9
 
 
 def base(field_id: str, field_type: str) -> str:
+    """Return the expression that reads a field (vectors averaged)."""
     return f"vec_avg({field_id})" if field_type == "VECTOR" else field_id
 
 
 def health_probes(field_id: str, field_type: str) -> list[tuple[str, str]]:
+    """Return the probe expressions used to profile a field."""
     x = base(field_id, field_type)
     return [
         ("raw", x),
@@ -45,14 +47,17 @@ def coverage_probe(field_id: str, field_type: str) -> tuple[str, str]:
 
 
 def fill_window(period_days: float) -> int:
+    """Return the backfill window for a field's update period."""
     return int(min(252, max(5, round(1.5 * period_days))))
 
 
 def filled_probe(field_id: str, field_type: str, period_days: float) -> tuple[str, str]:
+    """Return the probe that measures coverage after backfilling."""
     return "filled", f"ts_backfill({base(field_id, field_type)}, {fill_window(period_days)})"
 
 
 def universe_size(universe: str) -> int | None:
+    """Return the stock count of a TOPn universe, or None."""
     digits = "".join(ch for ch in universe if ch.isdigit())
     return int(digits) if universe.startswith("TOP") and digits else None
 
@@ -65,6 +70,7 @@ def period_from(counts: dict[str, int | None]) -> float:
         return 999.0
 
     def share(name: str) -> float:
+        """Return the named count as a share of the raw count."""
         return (counts.get(name) or 0) / raw
 
     r5, r22, r66 = share("upd5"), share("upd22"), share("upd66")
@@ -78,10 +84,12 @@ def period_from(counts: dict[str, int | None]) -> float:
 
 
 def cadence(period_days: float) -> str:
+    """Name a field's update cadence from its period in days."""
     return next((name for name, limit in CADENCE_LIMITS if period_days <= limit), "slow")
 
 
 def snap(days: float) -> int:
+    """Return the allowed window closest to days."""
     return min(WINDOWS, key=lambda w: abs(w - days))
 
 
@@ -98,6 +106,7 @@ def prep_for(field_id: str, field_type: str, profile: dict[str, Any]) -> str:
 
 
 def survey_shapes(x: str, period_days: float) -> list[tuple[str, str]]:
+    """Return the survey expressions for a field, sized to its update period."""
     change = snap(max(5.0, period_days))
     history = min(252, snap(max(21.0, 4 * period_days)))
     return [
@@ -109,6 +118,7 @@ def survey_shapes(x: str, period_days: float) -> list[tuple[str, str]]:
 
 
 def describe(profile: dict[str, Any]) -> str:
+    """Describe a field's profile in one line."""
     if not profile:
         return "not checked"
     return (

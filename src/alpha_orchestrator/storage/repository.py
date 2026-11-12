@@ -82,6 +82,7 @@ class Repository:
         routing_policy: RoutingPolicy,
         limit_policy: LimitPolicy,
     ) -> RunORM:
+        """Create a run frozen to its policies and metadata snapshots."""
         if specification.routing_policy_version != routing_policy.version:
             raise ValueError("Run routing-policy version does not match the snapshot")
         if specification.limit_policy_version != limit_policy.version:
@@ -110,6 +111,7 @@ class Repository:
         return run
 
     def get_run(self, run_id: str | UUID) -> RunORM:
+        """Return a run, raising MissingRecord if absent."""
         with self._sessions() as session:
             run = session.get(RunORM, str(run_id))
             if run is None:
@@ -120,6 +122,7 @@ class Repository:
     def update_run_status(
         self, run_id: str | UUID, status: RunStatus, stop_reason: str | None = None
     ) -> None:
+        """Set a run's status and stop reason."""
         with self._sessions.begin() as session:
             run = session.get(RunORM, str(run_id))
             if run is None:
@@ -150,6 +153,7 @@ class Repository:
         known_operators: set[str],
         llm_request_id: str | None = None,
     ) -> CandidateInsertResult:
+        """Insert a candidate, or return the existing one with the same fingerprint."""
         assert_no_sensitive_data(proposal.model_dump(mode="python"))
         run = self.get_run(run_id)
         canonical_expression = canonicalize_expression(proposal.expression, known_operators)
@@ -247,6 +251,7 @@ class Repository:
             return CandidateInsertResult(candidate=candidate, created=True)
 
     def get_candidate(self, candidate_id: str | UUID) -> CandidateORM:
+        """Return a candidate, raising MissingRecord if absent."""
         with self._sessions() as session:
             candidate = session.get(CandidateORM, str(candidate_id))
             if candidate is None:
@@ -257,6 +262,7 @@ class Repository:
     def list_candidates(
         self, run_id: str | UUID, statuses: set[CandidateStatus] | None = None
     ) -> list[CandidateORM]:
+        """List a run's candidates, optionally filtered by status."""
         with self._sessions() as session:
             statement = select(CandidateORM).where(CandidateORM.run_id == str(run_id))
             if statuses:
@@ -276,6 +282,7 @@ class Repository:
         reason_codes: list[str],
         metric_snapshot: dict[str, Any] | None = None,
     ) -> CandidateORM:
+        """Move a candidate to a new status, enforcing the state machine."""
         with self._sessions.begin() as session:
             candidate = session.get(CandidateORM, str(candidate_id))
             if candidate is None:
@@ -307,6 +314,7 @@ class Repository:
     def start_attempt(
         self, candidate_id: str | UUID, idempotency_key: str, attempt_number: int
     ) -> SimulationAttemptORM:
+        """Record the start of a simulation attempt."""
         with self._sessions.begin() as session:
             candidate = session.get(CandidateORM, str(candidate_id))
             if candidate is None:
@@ -335,6 +343,7 @@ class Repository:
         external_simulation_id: str,
         external_alpha_id: str | None,
     ) -> None:
+        """Attach the platform's receipt to an attempt."""
         with self._sessions.begin() as session:
             attempt = session.get(SimulationAttemptORM, attempt_id)
             if attempt is None:
@@ -348,6 +357,7 @@ class Repository:
         status: AttemptStatus,
         result: NormalizedSimulationResult | None = None,
     ) -> None:
+        """Record an attempt's result or error."""
         with self._sessions.begin() as session:
             attempt = session.get(SimulationAttemptORM, attempt_id)
             if attempt is None:
@@ -364,6 +374,7 @@ class Repository:
                 attempt.raw_response_artifact_ref = redact_text(result.raw_artifact_ref)
 
     def latest_attempt(self, candidate_id: str | UUID) -> SimulationAttemptORM | None:
+        """Return a candidate's most recent attempt, if any."""
         with self._sessions() as session:
             attempt = session.scalar(
                 select(SimulationAttemptORM)
@@ -376,6 +387,7 @@ class Repository:
             return attempt
 
     def completed_metrics(self, candidate_id: str | UUID) -> SimulationMetrics | None:
+        """Return the metrics of a candidate's completed attempt, if any."""
         with self._sessions() as session:
             attempt = session.scalar(
                 select(SimulationAttemptORM)
@@ -398,6 +410,7 @@ class Repository:
     def record_platform_checks(
         self, candidate_id: str | UUID, checks: list[PlatformCheck], *, live: bool
     ) -> None:
+        """Store the platform checks returned for a candidate."""
         with self._sessions.begin() as session:
             candidate = session.get(CandidateORM, str(candidate_id))
             if candidate is None:
@@ -430,6 +443,7 @@ class Repository:
         reason_codes: list[str],
         metric_snapshot: dict[str, Any] | None = None,
     ) -> None:
+        """Record a gate decision for a candidate."""
         assert_no_sensitive_data(metric_snapshot or {})
         with self._sessions.begin() as session:
             candidate = session.get(CandidateORM, str(candidate_id))
@@ -458,6 +472,7 @@ class Repository:
             )
 
     def count_candidates(self, run_id: str | UUID) -> int:
+        """Count a run's candidates."""
         with self._sessions() as session:
             return int(
                 session.scalar(
@@ -469,6 +484,7 @@ class Repository:
             )
 
     def count_pending(self, run_id: str | UUID) -> int:
+        """Count a run's queued or simulating candidates."""
         statuses = {CandidateStatus.QUEUED, CandidateStatus.SIMULATING}
         with self._sessions() as session:
             return int(
@@ -481,6 +497,7 @@ class Repository:
             )
 
     def count_attempts(self, run_id: str | UUID) -> int:
+        """Count a run's simulation attempts."""
         with self._sessions() as session:
             return int(
                 session.scalar(
@@ -506,6 +523,7 @@ class Repository:
             return max(1, min(maximum, learned))
 
     def record_live_concurrency(self, run_id: str | UUID, value: int, reason: str) -> None:
+        """Record the concurrency limit observed on the live platform."""
         with self._sessions.begin() as session:
             session.add(
                 EventORM(
@@ -517,6 +535,7 @@ class Repository:
             )
 
     def count_duplicate_events(self, run_id: str | UUID) -> int:
+        """Count duplicate-candidate events in a run."""
         with self._sessions() as session:
             return int(
                 session.scalar(
@@ -531,6 +550,7 @@ class Repository:
             )
 
     def count_children(self, parent_candidate_id: str | UUID, generation_number: int) -> int:
+        """Count a candidate's children."""
         with self._sessions() as session:
             return int(
                 session.scalar(
@@ -545,6 +565,7 @@ class Repository:
             )
 
     def list_attempts(self, run_id: str | UUID) -> list[SimulationAttemptORM]:
+        """List a run's attempts in order."""
         with self._sessions() as session:
             attempts = list(
                 session.scalars(
@@ -559,6 +580,7 @@ class Repository:
             return attempts
 
     def list_decisions(self, run_id: str | UUID) -> list[DecisionORM]:
+        """List a run's decisions in order."""
         with self._sessions() as session:
             decisions = list(
                 session.scalars(
@@ -573,6 +595,7 @@ class Repository:
             return decisions
 
     def list_events(self, run_id: str | UUID) -> list[EventORM]:
+        """List a run's events in order."""
         with self._sessions() as session:
             events = list(
                 session.scalars(
@@ -586,6 +609,7 @@ class Repository:
             return events
 
     def list_platform_checks(self, run_id: str | UUID) -> list[PlatformCheckORM]:
+        """List the platform checks recorded for a run."""
         with self._sessions() as session:
             checks = list(
                 session.scalars(
@@ -600,6 +624,7 @@ class Repository:
             return checks
 
     def upsert_source_document(self, document: SourceDocument) -> None:
+        """Insert or update a source document and its sections."""
         with self._sessions.begin() as session:
             persisted = session.get(SourceDocumentORM, document.source_id)
             values = document.model_dump(mode="json", exclude={"sections"})
@@ -622,6 +647,7 @@ class Repository:
                 )
 
     def get_source_document(self, source_id: str) -> SourceDocument:
+        """Return a source document, raising MissingRecord if absent."""
         with self._sessions() as session:
             document = session.get(SourceDocumentORM, source_id)
             if document is None:
@@ -654,6 +680,7 @@ class Repository:
             )
 
     def list_source_documents(self) -> list[SourceDocument]:
+        """List every source document by location."""
         with self._sessions() as session:
             source_ids = list(
                 session.scalars(
@@ -663,6 +690,7 @@ class Repository:
         return [self.get_source_document(source_id) for source_id in source_ids]
 
     def upsert_method_card(self, card: MethodCard) -> MethodCard:
+        """Insert or update a method card version."""
         assert_no_sensitive_data(card.model_dump(mode="python"))
         with self._sessions.begin() as session:
             persisted = session.scalar(
@@ -691,6 +719,7 @@ class Repository:
             return card
 
     def approve_method_card(self, card_id: str, reviewer: str) -> MethodCard:
+        """Approve a method card version, superseding earlier approvals."""
         if not reviewer.strip():
             raise ValueError("Reviewer is required")
         with self._sessions.begin() as session:
@@ -739,6 +768,7 @@ class Repository:
             return self._method_card_from_orm(persisted)
 
     def list_method_cards(self, status: MethodCardStatus | None = None) -> list[MethodCard]:
+        """List method cards, optionally filtered by status."""
         with self._sessions() as session:
             statement = select(MethodCardORM)
             if status is not None:
@@ -749,6 +779,7 @@ class Repository:
             return [self._method_card_from_orm(card) for card in cards]
 
     def register_prompt_version(self, version: str, role: LLMRole, content: str) -> str:
+        """Register an immutable prompt version (re-registering must match)."""
         from alpha_orchestrator.domain.identity import sha256_text
 
         assert_no_sensitive_data(content)
@@ -770,6 +801,7 @@ class Repository:
         return content_hash
 
     def get_prompt_version(self, version: str) -> PromptVersionORM:
+        """Return a prompt version, raising MissingRecord if absent."""
         with self._sessions() as session:
             prompt = session.get(PromptVersionORM, version)
             if prompt is None:
@@ -789,6 +821,7 @@ class Repository:
         related_run_id: str | UUID,
         related_candidate_id: str | UUID | None = None,
     ) -> LLMRequestORM:
+        """Record an LLM request before it is sent."""
         assert_no_sensitive_data(context_manifest)
         request = LLMRequestORM(
             request_id=str(uuid4()),
@@ -830,6 +863,7 @@ class Repository:
         actual_model: str | None = None,
         error_message: str | None = None,
     ) -> None:
+        """Record an LLM request's outcome."""
         with self._sessions.begin() as session:
             request = session.get(LLMRequestORM, request_id)
             if request is None:
@@ -846,6 +880,7 @@ class Repository:
             request.completed_at = utc_now()
 
     def list_llm_requests(self, run_id: str | UUID) -> list[LLMRequestORM]:
+        """List a run's LLM requests in order."""
         with self._sessions() as session:
             requests = list(
                 session.scalars(
@@ -864,6 +899,7 @@ class Repository:
         role: LLMRole | None = None,
         candidate_id: str | UUID | None = None,
     ) -> int:
+        """Count a run's LLM requests, optionally by role."""
         with self._sessions() as session:
             statement = (
                 select(func.count())
@@ -877,6 +913,7 @@ class Repository:
             return int(session.scalar(statement) or 0)
 
     def save_metadata_capture(self, capture: CapturedMetadata) -> None:
+        """Store a metadata capture as content-addressed snapshots."""
         fields_payload = {
             name: data_type.value for name, data_type in sorted(capture.metadata.fields.items())
         }
@@ -938,6 +975,7 @@ class Repository:
                 )
 
     def load_run_metadata(self, run_id: str | UUID) -> MetadataSnapshot:
+        """Rebuild the metadata snapshot a run was frozen to."""
         run = self.get_run(run_id)
         requested = {
             MetadataSnapshotKind.FIELDS: run.field_snapshot_id,
@@ -1041,6 +1079,7 @@ class Repository:
         )
 
     def age_seconds(self, run_id: str | UUID, now: datetime | None = None) -> float:
+        """Return how long a run has been running (or ran)."""
         run = self.get_run(run_id)
         reference = now or run.completed_at or utc_now()
         created = run.started_at or run.created_at

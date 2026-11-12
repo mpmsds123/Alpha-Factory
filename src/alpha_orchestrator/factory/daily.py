@@ -40,6 +40,7 @@ class DayReport:
 
 
 def catalog_is_stale(ledger: Ledger, hours: float = 20.0) -> bool:
+    """Return True if the catalog was never refreshed or is older than the limit."""
     with ledger.session() as s:
         last = s.scalar(select(func.max(EventORM.at)).where(EventORM.kind == "catalog"))
     if last is None:
@@ -90,6 +91,7 @@ def run_day(
     sleep: Any = time.sleep,
     on_progress: Any = None,
 ) -> DayReport:
+    """Run the earlier survey/SPRT design for one day (kept for tests and comparison)."""
     report = DayReport()
     deadline = time.monotonic() + minutes * 60
     simulator = Simulator(api, ledger, config, sleep=sleep)

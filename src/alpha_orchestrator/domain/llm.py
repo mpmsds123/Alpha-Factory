@@ -17,6 +17,7 @@ class CandidateProposalBatch(StrictModel):
 
     @model_validator(mode="after")
     def generator_outputs_roots_only(self) -> "CandidateProposalBatch":
+        """Reject generator output that proposes child candidates."""
         if any(proposal.parent_candidate_id is not None for proposal in self.proposals):
             raise ValueError("CandidateGenerator may propose root candidates only")
         return self
@@ -39,6 +40,7 @@ class RepairPlan(StrictModel):
 
     @model_validator(mode="after")
     def action_matches_proposals(self) -> "RepairPlan":
+        """Require STOP to carry no proposals and REPAIR at least one."""
         if self.action is RepairAction.STOP and self.proposals:
             raise ValueError("STOP cannot include repair proposals")
         if self.action is RepairAction.REPAIR and not self.proposals:

@@ -38,5 +38,6 @@ ALLOWED_TRANSITIONS: dict[CandidateStatus, frozenset[CandidateStatus]] = {
 
 
 def validate_transition(source: CandidateStatus, target: CandidateStatus) -> None:
+    """Raise InvalidTransition unless source may move to target."""
     if target not in ALLOWED_TRANSITIONS[source]:
         raise InvalidTransition(f"Invalid candidate transition: {source} -> {target}")

@@ -57,6 +57,7 @@ def _four_lines(c: CandidateORM, cell: CellORM, cfg: FactoryConfig) -> bool:
 def weekly_rows(
     ledger: Ledger, cfg: FactoryConfig, days: int = 7, now: datetime | None = None
 ) -> list[tuple[str, str]]:
+    """Build the rows of the weekly report for the last `days` days."""
     end = now or datetime.now(UTC)
     start = end - timedelta(days=days)
     rows: list[tuple[str, str]] = [
@@ -209,6 +210,7 @@ def weekly_rows(
 
 
 def friday_cutoff(cfg: FactoryConfig, now: datetime, ending: date | None = None) -> datetime:
+    """Return the end of the most recent completed Friday report window."""
     tz = ZoneInfo(cfg.budget.quota_timezone)
     local = now.astimezone(tz)
     friday = ending or (local.date() - timedelta(days=(local.weekday() - 4) % 7))
@@ -225,6 +227,7 @@ def friday_cutoff(cfg: FactoryConfig, now: datetime, ending: date | None = None)
 def write_weekly(
     ledger: Ledger, cfg: FactoryConfig, days: int = 7, ending: datetime | None = None
 ) -> Path:
+    """Write the weekly report CSV and return its path."""
     filename = FILE_NAME if ending is None else f"工厂_周报_{ending:%Y-%m-%d}.csv"
     path = Path(cfg.reports_dir) / filename
     path.parent.mkdir(parents=True, exist_ok=True)
