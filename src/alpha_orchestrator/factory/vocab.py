@@ -48,6 +48,10 @@ class Vocabulary:
     official_doc_sources: tuple[str, ...] = ()
     # region -> universe to use when the account offers it
     preferred_universe: dict[str, str] = field(default_factory=dict)
+    # region -> neutralization to start from (the first offered one otherwise)
+    default_neutralization: dict[str, str] = field(default_factory=dict)
+    # regions whose investability test is passed by simulating with max-trade on
+    max_trade_on: frozenset[str] = frozenset()
 
     @classmethod
     def load(cls, private_dir: str | Path) -> "Vocabulary":
@@ -86,4 +90,8 @@ class Vocabulary:
             preferred_universe={
                 str(k): str(v) for k, v in (raw.get("preferred_universe") or {}).items()
             },
+            default_neutralization={
+                str(k): str(v) for k, v in (raw.get("default_neutralization") or {}).items()
+            },
+            max_trade_on=frozenset(str(x) for x in raw.get("max_trade_on") or []),
         )

@@ -162,6 +162,9 @@ class LLMConfig:
     temperature: float = 0.4
     timeout_s: float = 120.0
     thinking: bool = False  # keeps bounded JSON output from being consumed by reasoning
+    # The private language notes are ~33k characters (~15k tokens); sending them whole on
+    # every expression call would cost more than the rest of the prompt. First 6,000 only.
+    notes_chars: int = 6000
     # Provider's official price page (api-docs.deepseek.com/quick_start/pricing, read
     # 2026-11-12): USD per 1M tokens [input cache miss, output] at PEAK; off-peak is half.
     # Peak hours: 01-04 and 06-10 UTC, Monday-Friday.
