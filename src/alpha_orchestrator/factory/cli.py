@@ -1,10 +1,6 @@
 """`alpha-factory`: the commands you actually type."""
 
 import json
-import os
-import plistlib
-import subprocess
-import sys
 import webbrowser
 from pathlib import Path
 from typing import Annotated
@@ -39,13 +35,10 @@ from alpha_orchestrator.factory.select import approve, reject
 app = typer.Typer(help="Alpha 工厂：WorldQuant BRAIN 自动挖掘流水线", no_args_is_help=True)
 review_app = typer.Typer(help="待你确认的 alpha：查看、提交、放弃", no_args_is_help=True)
 ideas_app = typer.Typer(help="灵感库", no_args_is_help=True)
-schedule_app = typer.Typer(help="每日自动运行（macOS launchd）", no_args_is_help=True)
 app.add_typer(review_app, name="review")
 app.add_typer(ideas_app, name="ideas")
-app.add_typer(schedule_app, name="schedule")
 
 ConfigOpt = Annotated[Path, typer.Option("--config", help="factory.yaml")]
-PLIST = Path("~/Library/LaunchAgents/com.local.alphafactory.plist").expanduser()
 
 
 def _ctx(config_path: Path) -> tuple[FactoryConfig, Ledger]:
@@ -487,50 +480,3 @@ def review_reject(review_id: str, note: str = "", config: ConfigOpt = DEFAULT_CO
         pool = list(s.scalars(select(ReviewORM.id)))
     for rid in _match([review_id], pool):
         typer.echo("已放弃。" if reject(ledger, rid, note) else "状态不是待确认。")
-
-
-@schedule_app.command("install")
-def schedule_install(
-    hour: int = 0, minute: int = 37, workdir: Path | None = None, config: ConfigOpt = DEFAULT_CONFIG
-) -> None:
-    """每天定时运行；明确固定代码、配置和会话路径。"""
-    from alpha_orchestrator.factory.config import REPO_ROOT
-
-    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
-        raise typer.BadParameter("小时必须为 0-23，分钟必须为 0-59")
-    workdir = (workdir or REPO_ROOT).resolve()
-    cfg = FactoryConfig.load(config)
-    log_path = Path(cfg.db_path).expanduser().resolve().parent / "run.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    env = {"PYTHONPATH": str(REPO_ROOT / "src")}
-    if os.getenv("BRAIN_STATE_DIR"):
-        env["BRAIN_STATE_DIR"] = str(Path(os.environ["BRAIN_STATE_DIR"]).expanduser().resolve())
-    payload = {
-        "Label": "com.local.alphafactory",
-        "ProgramArguments": [
-            sys.executable,
-            "-c",
-            "from alpha_orchestrator.factory.cli import app; app()",
-            "run",
-            "--config",
-            str(config.expanduser().resolve()),
-        ],
-        "WorkingDirectory": str(workdir),
-        "EnvironmentVariables": env,
-        "StartCalendarInterval": {"Hour": hour, "Minute": minute},
-        "StandardOutPath": str(log_path),
-        "StandardErrorPath": str(log_path),
-    }
-    PLIST.parent.mkdir(parents=True, exist_ok=True)
-    with PLIST.open("wb") as out:
-        plistlib.dump(payload, out)
-    subprocess.run(["launchctl", "unload", str(PLIST)], check=False, capture_output=True)
-    subprocess.run(["launchctl", "load", str(PLIST)], check=True)
-    typer.echo(f"已安装：每天 {hour:02d}:{minute:02d} 运行。卸载：alpha-factory schedule uninstall")
-
-
-@schedule_app.command("uninstall")
-def schedule_uninstall() -> None:
-    subprocess.run(["launchctl", "unload", str(PLIST)], check=False, capture_output=True)
-    PLIST.unlink(missing_ok=True)
-    typer.echo("已卸载。")

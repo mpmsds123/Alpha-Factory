@@ -12,7 +12,6 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from alpha_orchestrator.gates.sign_flip import negate
 
 WINDOWS = (5, 21, 63, 126, 252)
 GROUP_OPERATORS = ("group_rank", "group_zscore", "group_neutralize")
@@ -383,3 +382,11 @@ def random_combos(
             continue
         out.append(Proposal(expr, settings, "COMBO", role="random", change=form))
     return out
+
+
+def negate(expression: str) -> str | None:
+    """Negated expression; None when it already is one."""
+    stripped = expression.strip()
+    if stripped.startswith("multiply(-1,"):
+        return None
+    return f"multiply(-1, {stripped})"

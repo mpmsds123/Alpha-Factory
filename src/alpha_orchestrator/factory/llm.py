@@ -22,7 +22,7 @@ from typing import Any
 
 from sqlalchemy import func, select
 
-from alpha_orchestrator.domain.identity import canonical_json, sha256_text
+from alpha_orchestrator.factory.util import canonical_json, sha256_text
 from alpha_orchestrator.factory.cards import DIRECTION_REFERENCES
 from alpha_orchestrator.factory.config import FactoryConfig, load_llm_key
 from alpha_orchestrator.factory.ledger import Ledger

@@ -21,7 +21,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from alpha_orchestrator.domain.models import utc_now
+from alpha_orchestrator.factory.util import utc_now
 
 
 def new_id() -> str:
