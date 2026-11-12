@@ -87,9 +87,11 @@ class RejectingAPI(FakeBrainAPI):
     def start_multi_simulation(self, payloads: list[dict[str, Any]]) -> str:
         if any(p["regular"] == "rank(f5)" for p in payloads):
             body = [
-                '{"settings":{"decay":["Ensure this value is less than or equal to 512."]}}'
-                if p["regular"] == "rank(f5)"
-                else "{}"
+                (
+                    '{"settings":{"decay":["Ensure this value is less than or equal to 512."]}}'
+                    if p["regular"] == "rank(f5)"
+                    else "{}"
+                )
                 for p in payloads
             ]
             raise ValueError("Simulation refused (400): [" + ",".join(body) + "]")

@@ -689,14 +689,16 @@ class FactoryLLM:
             "changing exactly ONE thing in the best formula to fix the diagnosed problem.",
             "idea": idea,
             "best": best,
-            "acceptance_requirements": requirements
-            if requirements is not None
-            else {
-                "sharpe_min": 1.58,
-                "fitness_min": 1.0,
-                "turnover_min": 0.01,
-                "turnover_max": 0.70,
-            },
+            "acceptance_requirements": (
+                requirements
+                if requirements is not None
+                else {
+                    "sharpe_min": 1.58,
+                    "fitness_min": 1.0,
+                    "turnover_min": 0.01,
+                    "turnover_max": 0.70,
+                }
+            ),
             "history_all_tries": list(history),
             "fields": list(fields),
             "operators": list(operators),
