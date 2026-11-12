@@ -1,12 +1,13 @@
-# Alpha 工厂配置。每个数字的出处见 src/alpha_orchestrator/factory/config.py。
-db_path: ~/.alpha_factory/factory.db     # 账本，放在仓库外
-reports_dir: reports                     # 面板（含真实表达式，已 gitignore）
-scanner_progress: ~/Desktop/因子挖掘/scanner/runs/数据集进度.csv   # 旧，已不用
-scanner_runs: ~/Desktop/因子挖掘/scanner/runs   # v7：只用来给字段做标记，不再用来挑数据集或筛字段
-only_datasets: []                       # 空 = v7 从全部数据集里随机抽
-design: v7                              # v7（11/03）：随机选数据集、点子记忆、菜单改法 + Thompson sampling、同时 6 个点子
-direction_trial: false                  # 试验开关：LLM 定向与随机对照；仅对下一次自动选数据集生效
-refinement_trial: false                 # 试验开关：同一母公式的 LLM 改法与固定规则配对比较
+# Alpha Factory configuration. Defaults and the reason for each number are documented in
+# src/alpha_orchestrator/factory/config.py; values here override them.
+db_path: ~/.alpha_factory/factory.db     # ledger, kept outside the repository
+reports_dir: reports                     # dashboard (contains real expressions; git-ignored)
+scanner_progress: ~/Desktop/因子挖掘/scanner/runs/数据集进度.csv   # legacy; no longer used
+scanner_runs: ~/Desktop/因子挖掘/scanner/runs   # v7: only used to mark fields, not to pick datasets or filter fields
+only_datasets: []                       # empty = v7 samples from all datasets at random
+design: v7                              # v7 (11/03): random datasets, idea memory, menu fixes + Thompson sampling, 6 ideas at once
+direction_trial: false                  # trial switch: LLM-directed vs random dataset choice; applies to the next automatic pick
+refinement_trial: false                 # trial switch: paired LLM vs fixed-rule refinement of the same parent
 
 budget:
   v1_daily_cap: 1000         # Factory allocation: at most 1,000 launched children / allocation day
@@ -14,41 +15,41 @@ budget:
   quota_timezone: America/Los_Angeles
   quota_reset_hour: 21      # Existing scanner allocation resets at 21:00 Pacific
   quota_reserve: 0          # This factory has its own 1,000-simulation allocation
-  active_datasets: 1         # 你定的：一次只做一个数据集
+  active_datasets: 1         # owner's decision: one dataset at a time
   dataset_sim_cap: 1000      # Per-dataset lifetime allowance; daily hard cap still applies
-  health_sample: 40          # 体检抽多少个家族
-  survey_per_stratum: 2      # 普查每层抽几个家族（家族总数 ≤40 时全部普查）
+  health_sample: 40          # field families sampled for the health check
+  survey_per_stratum: 2      # families sampled per stratum (all of them when there are <= 40)
   survey_max_families: 100
-  round_size: 50             # 找到信号后，每一轮分配多少次回测
-  refine_structures: 3       # 挖深时每轮试几种结构
-  combo_count: 6             # 挖组合时 DeepSeek 和随机各几条
-  slots: 6                   # 上限；平台拒绝时自动降到平台接受的数，并记住
+  round_size: 50             # simulations allocated per round once signal is found
+  refine_structures: 3       # structures tried per refinement round
+  combo_count: 6             # combinations per arm (LLM and random)
+  slots: 6                   # upper bound; lowered to what the platform accepts, and remembered
   children_per_slot: 10
-  min_batch_interval_s: 20   # 防 429 风暴
+  min_batch_interval_s: 20   # avoids 429 rate-limit storms
 
 thresholds:
-  noise_sigma: 0.316         # 第 5 问：扫描器无信号数据集实测 0.25-0.33
-  screen_line: 0.8           # 普查的排队线（不是过关线）
-  min_filled_coverage: 0.50  # 默认值，待你确认：按更新周期补齐后的覆盖率门槛
-  suspicious_sharpe: 3.0     # 你定的：超过就判可疑，不挖
+  noise_sigma: 0.316         # measured 0.25-0.33 on scanner datasets without signal
+  screen_line: 0.8           # survey queueing line (not the pass line)
+  min_filled_coverage: 0.50  # default, pending review: coverage floor after filling one update period
+  suspicious_sharpe: 3.0     # owner's decision: above this is suspicious and not mined
   suspicious_turnover: 0.70
-  refine_min_gain: 0.35      # 第 5 问：比 0.35 小的提升多半是噪音
+  refine_min_gain: 0.35      # gains below 0.35 are mostly noise
   submit_sharpe: 1.58
   submit_sharpe_chn: 2.08
   submit_fitness: 1.0
   robust_keep_ratio: 0.5
   pnl_corr_max: 0.7
-  dataset_cap: 8             # 每个数据集最多交 8 个
+  dataset_cap: 8             # at most 8 submissions per dataset
   margin_bps: {USA: 5.0, CHN: 20.0, IND: 20.0, MEA: 20.0, default: 15.0}
 
 llm:
   base_url: https://api.deepseek.com
-  model: deepseek-flash                  # 字段分组、写提交说明
-  strong_model: deepseek-v4-pro          # 挖组合
-  key_file: ~/secrets/deepseek.json      # {"api_key": "..."}，只在调用时读取
+  model: deepseek-flash                  # field grouping, submission descriptions
+  strong_model: deepseek-v4-pro          # field combinations
+  key_file: ~/secrets/deepseek.json      # {"api_key": "..."}, read only at call time; ALPHA_FACTORY_LLM_API_KEY overrides
 
 policy:
   max_submissions_per_day: 4
-  auto_submit: false                     # 提交永远由你确认
-  regions: [USA, GLB, EUR, ASI, AMR, JPN, GBR, DEU]   # v7：不抽 CHN、IND（你的经验：不出货）；ALL 平台不允许普通回测（11/04 被拒）
+  auto_submit: false                     # every submission is confirmed by you
+  regions: [USA, GLB, EUR, ASI, AMR, JPN, GBR, DEU]   # v7: CHN and IND excluded (no results historically); ALL rejected by the platform (11/04)
   delays: [1]
