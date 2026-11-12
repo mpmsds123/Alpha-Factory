@@ -8,6 +8,7 @@ from alpha_orchestrator.storage.repository import Repository
 
 
 def build_run_report(repository: Repository, run_id: str | UUID) -> str:
+    """Build a Markdown report of a run from the repository."""
     run = repository.get_run(run_id)
     candidates = repository.list_candidates(run_id)
     attempts = repository.list_attempts(run_id)

@@ -33,8 +33,11 @@ class WorkerAlreadyRunning(RuntimeError):
 
 
 def ledger_locked(function: Callable[P, R]) -> Callable[P, R]:
+    """Decorate a function so it runs holding the ledger's writer lock."""
+
     @wraps(function)
     def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+        """Call the wrapped function while holding the writer lock."""
         ledger = signature(function).bind(*args, **kwargs).arguments["ledger"]
         with ledger.writer_lock():
             return function(*args, **kwargs)
@@ -84,6 +87,7 @@ def _upgrade_empty_tables(engine: Engine) -> None:
 
 
 def today_utc() -> str:
+    """Return today's UTC date as YYYY-MM-DD."""
     return datetime.now(UTC).date().isoformat()
 
 
@@ -134,12 +138,14 @@ class Ledger:
 
     @classmethod
     def at(cls, path: Path) -> "Ledger":
+        """Open (creating if needed) a SQLite ledger at path."""
         path = path.expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
         return cls(f"sqlite:///{path.resolve()}")
 
     @contextmanager
     def session(self) -> Iterator[Session]:
+        """Yield a database session inside a transaction."""
         with self._sessions.begin() as s:
             yield s
 
@@ -169,6 +175,7 @@ class Ledger:
         limit: int,
         excluded_cells: set[str] | None = None,
     ) -> list[CandidateORM]:
+        """Return queued candidates in scheduling order."""
         from alpha_orchestrator.factory.models import CellORM
 
         stmt = (
@@ -230,6 +237,7 @@ class Ledger:
 
     # ---------- events ----------
     def log(self, s: Session, kind: str, cell_id: str | None = None, **payload: Any) -> None:
+        """Append an event row to the ledger."""
         s.add(EventORM(kind=kind, cell_id=cell_id, payload=payload))
 
 

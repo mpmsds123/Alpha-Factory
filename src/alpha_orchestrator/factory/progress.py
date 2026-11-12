@@ -49,6 +49,7 @@ def _day(t: datetime, cfg: FactoryConfig) -> str:
 
 
 def first_gate(c: CandidateORM, cfg: FactoryConfig) -> bool:
+    """Return True if a candidate passes the submission line."""
     th = cfg.thresholds
     if c.sharpe is None or c.fitness is None or c.turnover is None:
         return False
@@ -62,6 +63,7 @@ def first_gate(c: CandidateORM, cfg: FactoryConfig) -> bool:
 
 
 def no_platform_fail(c: CandidateORM) -> bool:
+    """Return True if no platform check failed."""
     checks = c.checks
     if isinstance(checks, str):
         try:
@@ -81,6 +83,7 @@ def _old_status(path: Path) -> dict[str, str]:
 
 
 def write_progress(ledger: Ledger, cfg: FactoryConfig, status: str) -> Path:
+    """Write the per-day progress CSV from the ledger."""
     path = Path(cfg.reports_dir) / FILE_NAME
     statuses = _old_status(path)
     done: dict[str, int] = defaultdict(int)

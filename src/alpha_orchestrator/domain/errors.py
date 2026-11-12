@@ -29,10 +29,12 @@ REDACTION_PATTERNS = (
 
 
 def is_retryable(error_class: ErrorClass) -> bool:
+    """Return True if errors of this class may be retried."""
     return error_class in RETRYABLE_ERRORS
 
 
 def redact_text(value: str | None) -> str | None:
+    """Return text with credential-like substrings replaced."""
     if value is None:
         return None
     redacted = value
@@ -42,6 +44,7 @@ def redact_text(value: str | None) -> str | None:
 
 
 def contains_sensitive_data(value: Any) -> bool:
+    """Return True if any string in value contains credential-like content."""
     if isinstance(value, str):
         return redact_text(value) != value
     if isinstance(value, Mapping):
@@ -55,5 +58,6 @@ def contains_sensitive_data(value: Any) -> bool:
 
 
 def assert_no_sensitive_data(value: Any) -> None:
+    """Raise ValueError if value contains credential-like content."""
     if contains_sensitive_data(value):
         raise ValueError("Credential-like content is forbidden in persisted research data")

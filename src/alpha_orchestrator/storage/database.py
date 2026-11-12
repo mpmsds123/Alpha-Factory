@@ -30,15 +30,19 @@ class Database:
         cursor.close()
 
     def create_schema(self) -> None:
+        """Create every table in this database."""
         Base.metadata.create_all(self.engine)
 
     def dispose(self) -> None:
+        """Release the engine's connections."""
         self.engine.dispose()
 
 
 def sqlite_url(path: Path) -> str:
+    """Return a SQLAlchemy URL for a SQLite file."""
     return f"sqlite:///{path.expanduser().resolve()}"
 
 
 def create_schema(engine: Engine) -> None:
+    """Create every table on an engine."""
     Base.metadata.create_all(engine)

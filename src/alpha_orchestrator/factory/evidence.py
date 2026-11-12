@@ -27,6 +27,7 @@ WORD = re.compile(r"[a-z0-9]+")
 
 
 def official_docs(s: Session) -> list[dict[str, str]]:
+    """Return the official documents an idea may quote as evidence."""
     rows = s.scalars(select(IdeaORM).where(IdeaORM.source.in_(OFFICIAL_SOURCES)))
     return [{"id": str(d.id), "title": d.title, "text": d.body or ""} for d in rows]
 
@@ -83,11 +84,13 @@ def check_idea(card: dict[str, Any], docs: dict[str, dict[str, str]]) -> tuple[b
 
 
 def evidence_key(card: dict[str, Any]) -> str:
+    """Return a normalized 'type:id' key for an idea's evidence."""
     ev = card.get("evidence") or {}
     return f"{str(ev.get('type', '')).lower()}:{str(ev.get('id', '')).strip().upper()}"
 
 
 def overlap(a: str, b: str) -> float:
+    """Return the Jaccard overlap of the words in two strings."""
     x, y = set(WORD.findall(a.lower())), set(WORD.findall(b.lower()))
     return len(x & y) / len(x | y) if x and y else 0.0
 

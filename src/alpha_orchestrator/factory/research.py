@@ -82,6 +82,7 @@ class Metadata:
 
     @classmethod
     def fetch(cls, api: BrainAPI) -> "Metadata":
+        """Fetch operators and simulation options from the platform."""
         ops = [o for o in api.operators() if "REGULAR" in (o.get("scope") or ["REGULAR"])]
         return cls(
             operators={str(o["name"]).lower() for o in ops},
@@ -99,9 +100,11 @@ class Metadata:
         )
 
     def neutralizations(self, region: str) -> list[str]:
+        """Return the neutralizations allowed in a region."""
         return list(self.options.get(region, {}).get("neutralizations", []))
 
     def universes(self, region: str) -> list[str]:
+        """Return the universes allowed in a region."""
         return list(self.options.get(region, {}).get("universes", []))
 
 
@@ -138,6 +141,7 @@ class Factory:
 
     # ======================= structure + health =======================
     def start(self, cell_id: str) -> int:
+        """Open a cell for research and record its starting state."""
         with self.ledger.session() as s:
             cell = _cell(s, cell_id)
             region, delay, universe, dataset = (
@@ -862,6 +866,7 @@ class Factory:
         return counts
 
     def tries(self, s: Session, cell_id: str) -> int:
+        """Return how many simulations a cell has used."""
         return int(
             s.scalar(
                 select(func.count())
@@ -876,6 +881,7 @@ class Factory:
         )
 
     def luck_bar(self, s: Session, cell_id: str) -> float:
+        """Return the Sharpe that noise alone would reach in this many tries."""
         return stats.luck_bar(self.sigma, self.tries(s, cell_id))
 
     def _passes_is(self, c: CandidateORM, cell: CellORM) -> bool:

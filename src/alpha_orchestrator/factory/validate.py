@@ -29,6 +29,7 @@ class Verdict:
 
 
 def operator_count(expression: str, operators: Set[str]) -> int:
+    """Count operator calls in an expression."""
     tokens = tokenize_expression(expression)
     count = 0
     for i, tok in enumerate(tokens):
@@ -153,6 +154,7 @@ GROUP_MAKERS = ("bucket(", "densify(", "group_cartesian_product(")
 
 
 def group_issues(expression: str, fields: Mapping[str, str]) -> list[str]:
+    """Return problems with the group arguments of group operators."""
     issues = []
     for m in re.finditer(r"([A-Za-z_]\w*)\s*\(", expression):
         at = GROUP_INPUT.get(m.group(1).lower())

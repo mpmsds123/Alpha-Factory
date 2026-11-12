@@ -50,6 +50,7 @@ MAX_BODY = 6000
 
 
 def tokens(text: str) -> list[str]:
+    """Split text into lower-case words and two-character CJK shingles."""
     low = text.lower()
     out = [w for w in WORD.findall(low) if w not in STOP]
     for run in CJK.findall(text):
@@ -66,6 +67,7 @@ class Doc:
 
 
 def parse_post_file(path: Path, source: str) -> Doc | None:
+    """Parse one saved post file into an idea document."""
     text = path.read_text(encoding="utf-8", errors="ignore")
     lines = text.splitlines()
     title = next((ln[2:].strip() for ln in lines if ln.startswith("# ")), path.stem)
@@ -111,6 +113,7 @@ def parse_homework(path: Path, source: str) -> Iterator[Doc]:
 
 
 def collect(paths: Iterable[Path]) -> Iterator[Doc]:
+    """Yield idea documents from files and folders."""
     for path in paths:
         path = path.expanduser()
         if path.is_file():
@@ -127,6 +130,7 @@ def collect(paths: Iterable[Path]) -> Iterator[Doc]:
 
 
 def import_ideas(s: Session, paths: Iterable[Path]) -> int:
+    """Import new idea documents into the ledger, skipping duplicates."""
     existing = {(src, t) for src, t in s.execute(select(IdeaORM.source, IdeaORM.title))}
     added = 0
     for doc in collect(paths):
@@ -155,9 +159,11 @@ class IdeaIndex:
 
     @classmethod
     def load(cls, s: Session) -> "IdeaIndex":
+        """Build the search index from every idea in the ledger."""
         return cls(list(s.scalars(select(IdeaORM))))
 
     def search(self, query: str, k: int = 6) -> list[IdeaORM]:
+        """Return the ideas that best match a query."""
         q = Counter(tokens(query))
         scores = []
         for i, tf in enumerate(self.tf):

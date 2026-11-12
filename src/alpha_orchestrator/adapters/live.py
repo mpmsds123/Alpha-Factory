@@ -101,6 +101,7 @@ class LiveBrainSettings(BaseModel):
     @field_validator("base_url")
     @classmethod
     def validate_base_url(cls, value: str) -> str:
+        """Reject a base URL that is not plain HTTPS without credentials."""
         parsed = urlsplit(value)
         if parsed.scheme != "https" or not parsed.netloc:
             raise ValueError("Live BRAIN base URL must use HTTPS")
@@ -122,12 +123,14 @@ class LiveBrainSettings(BaseModel):
     )
     @classmethod
     def validate_endpoint_path(cls, value: str) -> str:
+        """Require endpoint paths to be absolute paths on the configured host."""
         if not value.startswith("/") or "://" in value or ".." in value:
             raise ValueError("BRAIN endpoint paths must be absolute paths on the configured host")
         return value.rstrip("/") or "/"
 
     @classmethod
     def from_environment(cls) -> "LiveBrainSettings":
+        """Build settings from the ALPHA_LAB_BRAIN_* environment variables."""
         session_file = os.getenv("ALPHA_LAB_BRAIN_SESSION_FILE")
         if not session_file:
             raise ValueError("ALPHA_LAB_BRAIN_SESSION_FILE is required for live BRAIN access")
@@ -155,6 +158,7 @@ class LiveBrainSettings(BaseModel):
 
 
 def load_session_cookies(path: Path) -> dict[str, str]:
+    """Load session cookies from a private (mode 600) JSON file."""
     resolved = path.expanduser().resolve()
     if not resolved.is_file():
         raise ValueError(f"BRAIN session file does not exist: {resolved}")
@@ -215,6 +219,7 @@ class LiveBrainClient:
         self._session_deadline_monotonic: float | None = None
 
     def close(self) -> None:
+        """Close the HTTP client if this object created it."""
         if self._owns_client:
             self._client.close()
 
@@ -228,6 +233,7 @@ class LiveBrainClient:
         # same call the reference client uses to read remaining token lifetime. A 401
         # here means the session file is genuinely stale: get a new one, it does not
         # mean a persona challenge is in progress (that only happens on a POST login).
+        """Verify the session is valid and long enough for a run."""
         response = self._request("GET", self.settings.authentication_path)
         if response.is_success:
             self._throttle_for_remaining_budget(response)
@@ -274,11 +280,13 @@ class LiveBrainClient:
         self._authenticated = True
 
     def session_seconds_remaining(self) -> float | None:
+        """Return seconds left in the session, or None when unknown."""
         if self._session_deadline_monotonic is None:
             return None
         return self._session_deadline_monotonic - time.monotonic()
 
     def list_datasets(self, *, region: str, universe: str, delay: int) -> list[dict[str, object]]:
+        """List the datasets offered for a region, universe and delay."""
         response = self._send(
             "GET",
             self.settings.datasets_path,
@@ -320,6 +328,7 @@ class LiveBrainClient:
         data_type: DataType,
         instrument_type: str = "EQUITY",
     ) -> CapturedMetadata:
+        """Fetch fields, operators and settings into a metadata capture."""
         params: dict[str, object] = {
             "instrumentType": instrument_type,
             "region": region,
@@ -393,6 +402,7 @@ class LiveBrainClient:
         )
 
     def create_simulation(self, request: CreateSimulationRequest) -> CreateSimulationReceipt:
+        """Submit one regular simulation and return its receipt."""
         payload = {
             "type": "REGULAR",
             "settings": {
@@ -418,6 +428,7 @@ class LiveBrainClient:
         )
 
     def poll_simulation(self, external_simulation_id: str) -> NormalizedSimulationResult:
+        """Fetch and normalize the state of a submitted simulation."""
         simulation_id = _validate_identifier(external_simulation_id, "simulation")
         response = self._send("GET", f"{self.settings.simulations_path}/{simulation_id}")
         body = _required_mapping(response)
@@ -464,6 +475,7 @@ class LiveBrainClient:
         )
 
     def request_platform_checks(self, external_alpha_id: str) -> list[PlatformCheck]:
+        """Fetch the submission checks for an alpha."""
         alpha_id = _validate_identifier(external_alpha_id, "alpha")
         response = self._send("GET", f"{self.settings.alphas_path}/{alpha_id}/check")
         payload = _required_json(response)
@@ -574,13 +586,16 @@ class LiveBrainAdapter:
 
     @property
     def mode(self) -> AdapterMode:
+        """Report live mode."""
         return AdapterMode.LIVE
 
     @property
     def metadata(self) -> MetadataSnapshot:
+        """Return the metadata captured when the run was created."""
         return self._metadata
 
     def initial_candidates(self) -> list[CandidateProposal]:
+        """Return the candidates seeded from the template file."""
         return list(self._seed_candidates)
 
     def fetch_correlations(self, external_alpha_id: str) -> dict[str, float | None]:
@@ -588,15 +603,19 @@ class LiveBrainAdapter:
         return self.client.fetch_correlations(external_alpha_id)
 
     def create_simulation(self, request: CreateSimulationRequest) -> CreateSimulationReceipt:
+        """Submit one simulation through the live client."""
         return self.client.create_simulation(request)
 
     def poll_simulation(self, external_simulation_id: str) -> NormalizedSimulationResult:
+        """Poll one simulation through the live client."""
         return self.client.poll_simulation(external_simulation_id)
 
     def request_platform_checks(self, external_alpha_id: str) -> list[PlatformCheck]:
+        """Fetch submission checks through the live client."""
         return self.client.request_platform_checks(external_alpha_id)
 
     def session_seconds_remaining(self) -> float | None:
+        """Return seconds left in the live session."""
         return self.client.session_seconds_remaining()
 
 
@@ -890,6 +909,7 @@ def _parse_metrics(payload: Mapping[str, Any]) -> SimulationMetrics:
         raw = {}
 
     def number(name: str) -> float | None:
+        """Return the named numeric field, or None when missing or not a number."""
         value = raw.get(name)
         return (
             float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None

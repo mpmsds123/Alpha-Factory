@@ -45,6 +45,7 @@ def pnl_corr(a: dict[str, float], b: dict[str, float]) -> float:
 
 
 def check_value(checks: list[dict[str, Any]], name: str) -> float | None:
+    """Return the numeric value of a named platform check, if present."""
     for c in checks:
         if c.get("name") == name and isinstance(c.get("value"), (int, float)):
             return float(c["value"])
@@ -63,6 +64,7 @@ def checks_passed(checks: list[dict[str, Any]], corr_max: float) -> bool:
 
 
 def robust_passed(extra: dict[str, Any], keep_ratio: float) -> bool:
+    """Return True if every robustness ratio meets keep_ratio."""
     robust = extra.get("robust") or {}
     ratios = robust.get("ratios") or {}
     return bool(robust.get("pass") and ratios) and all(
@@ -74,6 +76,7 @@ def robust_passed(extra: dict[str, Any], keep_ratio: float) -> bool:
 def select_today(
     api: BrainAPI, ledger: Ledger, config: FactoryConfig, llm: FactoryLLM | None
 ) -> list[str]:
+    """Choose today's review candidates within the daily submission limit."""
     start = datetime.combine(datetime.now(UTC).date(), datetime.min.time(), tzinfo=UTC)
     with ledger.session() as s:
         used_today = int(
@@ -116,6 +119,7 @@ def select_today(
         return []
 
     def prelim(item: tuple[Any, ...]) -> float:
+        """Return a preliminary ranking score for a candidate."""
         _, _, value, atom, ops, fitness = item
         return float(value * (1.15 if atom else 1.0) * (1 + 0.1 * (8 - ops) / 8) * fitness)
 
@@ -215,6 +219,7 @@ def approve(
 
 
 def reject(ledger: Ledger, review_id: str, note: str = "") -> bool:
+    """Mark a pending review as rejected; return False if not pending."""
     with ledger.session() as s:
         r = s.get(ReviewORM, review_id)
         if r is None or r.status != ReviewStatus.PENDING:

@@ -19,6 +19,7 @@ class LimitController:
         self.policy = policy
 
     def stop_reason(self, usage: UsageSnapshot) -> str | None:
+        """Return why the run must stop, or None to continue."""
         checks = (
             (
                 usage.distinct_candidates >= self.policy.maximum_distinct_candidates,
@@ -45,4 +46,5 @@ class LimitController:
         return next((reason for reached, reason in checks if reached), None)
 
     def can_enqueue(self, pending_candidates: int) -> bool:
+        """Return True if another candidate may be queued."""
         return pending_candidates < self.policy.maximum_pending_candidates

@@ -56,6 +56,7 @@ def _f(x: float | None, digits: int = 2) -> str:
 
 
 def render(ledger: Ledger, config: FactoryConfig, out: Path) -> Path:
+    """Render the local HTML dashboard from the ledger and session state."""
     start = datetime.combine(datetime.now(UTC).date(), datetime.min.time(), tzinfo=UTC)
     store = SessionStore()
     meta = store.meta()

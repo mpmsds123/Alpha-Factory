@@ -49,6 +49,7 @@ class CorpusInventory:
         self.repository = repository
 
     def inventory(self, root: Path, source_type: EvidenceLevel) -> InventoryResult:
+        """Index the Markdown documents under root as source documents."""
         resolved_root = root.expanduser().resolve()
         if resolved_root.is_file() and resolved_root.suffix.casefold() in {".md", ".markdown"}:
             files = [resolved_root]
@@ -99,6 +100,7 @@ class CorpusInventory:
         )
 
     def extract_draft_cards(self, source_id: str) -> list[MethodCard]:
+        """Extract draft method cards from one source document."""
         document = self.repository.get_source_document(source_id)
         if document.excluded:
             raise ValueError(f"Source is excluded: {document.exclusion_reason}")

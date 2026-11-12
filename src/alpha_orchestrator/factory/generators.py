@@ -50,6 +50,7 @@ class Proposal:
 def base_settings(
     region: str, universe: str, delay: int, category: str, neutralizations: Sequence[str] = ()
 ) -> dict[str, Any]:
+    """Return the default simulation settings for a region and data category."""
     neut = (
         "COUNTRY"
         if region in COUNTRY_FIRST
@@ -89,6 +90,7 @@ def family_key(field_id: str) -> str:
 
 
 def group_families(fields: Iterable[Mapping[str, Any]]) -> dict[str, list[Mapping[str, Any]]]:
+    """Group fields into families of versions of the same quantity."""
     families: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for f in fields:
         families[family_key(str(f["id"]))].append(f)
@@ -142,6 +144,7 @@ def expand_template(
 def second_order(
     expression: str, settings: dict[str, Any], extra_groups: Sequence[str] = ()
 ) -> list[Proposal]:
+    """Wrap an expression in each group operator and grouping."""
     out = []
     for op in GROUP_OPERATORS:
         for group in (*GROUPS, *extra_groups):
@@ -166,6 +169,7 @@ THIRD_ORDER_EVENTS = (
 
 
 def third_order(expression: str, settings: dict[str, Any]) -> list[Proposal]:
+    """Wrap an expression in each trade-condition template."""
     return [
         Proposal(
             f"trade_when({entry}, {expression}, {exit_})",
@@ -180,6 +184,7 @@ def third_order(expression: str, settings: dict[str, Any]) -> list[Proposal]:
 
 # ---------- flips and repairs ----------
 def flip(expression: str, settings: dict[str, Any], sharpe: float) -> Proposal | None:
+    """Return the sign-flipped proposal, or None if it cannot be negated."""
     negated = negate(expression)
     if negated is None:
         return None
@@ -287,6 +292,7 @@ def robustness_proposals(
     neutralizations: Sequence[str],
     universes: Sequence[str],
 ) -> list[Proposal]:
+    """Return the stress variants used to check an alpha's robustness."""
     out = [
         Proposal(f"rank({expression})", settings, "ROBUST", role="rank"),
         Proposal(f"sign({expression})", settings, "ROBUST", role="sign"),
@@ -345,6 +351,7 @@ STRUCTURES: dict[str, str] = {
 
 
 def structure(name: str, expression: str) -> str:
+    """Insert an expression into a named structure template."""
     return STRUCTURES[name].replace("{E}", expression)
 
 
@@ -362,6 +369,7 @@ COMBO_FORMS: tuple[str, ...] = (
 def random_combos(
     preps: Sequence[str], n: int, rng: Any, settings: dict[str, Any]
 ) -> list[Proposal]:
+    """Return up to n random two-field combinations as a control arm."""
     out: list[Proposal] = []
     if len(preps) < 2:
         return out

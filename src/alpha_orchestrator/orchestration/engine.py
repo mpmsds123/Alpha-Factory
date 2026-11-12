@@ -90,6 +90,7 @@ class ResearchOrchestrator:
             raise ValueError("research_query is required when CandidateGenerator is enabled")
 
     def execute(self, run_id: str | UUID, adapter: BrainAdapter) -> ExecutionSummary:
+        """Run or resume a research run until done, paused or out of budget."""
         run = self.repository.get_run(run_id)
         unfinished = self.repository.list_candidates(
             run_id,

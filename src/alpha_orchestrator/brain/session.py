@@ -102,6 +102,7 @@ class SessionStore:
         self.meta_path = self.dir / "brain_session.json"
 
     def load_cookies(self) -> httpx.Cookies:
+        """Return the saved cookies as a cookie jar (empty if none saved)."""
         jar = httpx.Cookies()
         if not self.cookies_path.exists():
             return jar
@@ -132,11 +133,13 @@ class SessionStore:
         _write_private_json(self.cookies_path, payload)
 
     def meta(self) -> dict[str, Any]:
+        """Return the saved session metadata (empty if none saved)."""
         if not self.meta_path.exists():
             return {}
         return dict(json.loads(self.meta_path.read_text()))
 
     def update_meta(self, **values: Any) -> None:
+        """Merge values into the saved session metadata."""
         self.dir.mkdir(parents=True, exist_ok=True)
         merged = {**self.meta(), **values}
         _write_private_json(self.meta_path, merged)
@@ -168,11 +171,13 @@ class BrainSession:
 
     @property
     def credentials(self) -> Credentials:
+        """Return the login credentials, loading them on first use."""
         if self._credentials is None:
             self._credentials = Credentials.load()
         return self._credentials
 
     def close(self) -> None:
+        """Close the underlying HTTP client."""
         self.http.close()
 
     def seconds_remaining(self) -> float:

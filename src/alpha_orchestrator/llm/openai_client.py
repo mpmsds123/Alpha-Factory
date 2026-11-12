@@ -23,6 +23,7 @@ class LLMSettings(BaseModel):
 
     @classmethod
     def from_environment(cls) -> "LLMSettings":
+        """Build settings from the ALPHA_LAB_LLM_* environment variables."""
         api_key = os.getenv("ALPHA_LAB_LLM_API_KEY")
         model = os.getenv("ALPHA_LAB_LLM_MODEL")
         if not api_key or not model:
@@ -54,10 +55,12 @@ class OpenAICompatibleLLMClient:
 
     @property
     def model(self) -> str:
+        """Return the configured model name."""
         return self.settings.model
 
     @property
     def temperature(self) -> float:
+        """Return the configured temperature."""
         return self.settings.temperature
 
     def complete(
@@ -67,6 +70,7 @@ class OpenAICompatibleLLMClient:
         user_prompt: str,
         json_schema: dict[str, Any],
     ) -> LLMCompletion:
+        """Request a JSON completion and return it with usage and latency."""
         schema_instruction = json.dumps(json_schema, sort_keys=True, separators=(",", ":"))
         started = monotonic()
         completions = cast(Any, self._client.chat.completions)

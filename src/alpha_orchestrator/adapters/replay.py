@@ -53,23 +53,28 @@ class ReplayBrainAdapter:
 
     @classmethod
     def from_path(cls, path: Path) -> "ReplayBrainAdapter":
+        """Load a replay adapter from a JSON fixture file."""
         with path.open(encoding="utf-8") as stream:
             payload = json.load(stream)
         return cls(ReplayFixture.model_validate(payload), path)
 
     @property
     def metadata(self) -> MetadataSnapshot:
+        """Return the fixture's metadata snapshot."""
         return self.fixture.metadata
 
     @property
     def mode(self) -> AdapterMode:
+        """Report replay mode."""
         return AdapterMode.REPLAY
 
     @property
     def create_call_count(self) -> int:
+        """Return how many simulations were created (for idempotency tests)."""
         return sum(self._create_calls.values())
 
     def initial_candidates(self) -> list[CandidateProposal]:
+        """Return the fixture's seed candidates."""
         return list(self.fixture.candidates)
 
     @staticmethod
@@ -78,6 +83,7 @@ class ReplayBrainAdapter:
         return f"replay-{digest}"
 
     def create_simulation(self, request: CreateSimulationRequest) -> CreateSimulationReceipt:
+        """Record a simulation request, reusing the receipt for a repeated key."""
         self._candidate_to_expression[str(request.candidate_id)] = request.expression
         existing = self._receipts.get(request.idempotency_key)
         if existing is not None:
@@ -97,20 +103,24 @@ class ReplayBrainAdapter:
         return receipt
 
     def poll_simulation(self, external_simulation_id: str) -> NormalizedSimulationResult:
+        """Return the recorded result for a replayed simulation."""
         expression = self._external_to_expression.get(external_simulation_id)
         if expression is None:
             raise AdapterFailure(ErrorClass.UNKNOWN, "Replay simulation ID is missing")
         return self._scenarios[expression].result
 
     def request_platform_checks(self, external_alpha_id: str) -> list[PlatformCheck]:
+        """Return the recorded platform checks for a candidate."""
         expression = self._candidate_to_expression.get(external_alpha_id, external_alpha_id)
         scenario = self._scenarios.get(expression)
         return list(scenario.platform_checks) if scenario else []
 
     def fetch_correlations(self, external_alpha_id: str) -> dict[str, float | None]:
+        """Return the recorded correlations for a candidate."""
         expression = self._candidate_to_expression.get(external_alpha_id, external_alpha_id)
         scenario = self._scenarios.get(expression)
         return dict(scenario.correlations) if scenario else {}
 
     def session_seconds_remaining(self) -> float | None:
+        """Return None: replay has no session expiry."""
         return None

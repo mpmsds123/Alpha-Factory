@@ -34,10 +34,12 @@ PREFERRED_UNIVERSE = {
 
 
 def cell_id(region: str, delay: int, universe: str, dataset_id: str) -> str:
+    """Return the ledger key of a (region, delay, universe, dataset) cell."""
     return f"{region}|{delay}|{universe}|{dataset_id}"
 
 
 def pick_universe(region: str, offered: list[str]) -> str | None:
+    """Choose the broadest universe the region offers."""
     preferred = PREFERRED_UNIVERSE.get(region)
     if preferred in offered:
         return preferred
@@ -50,6 +52,7 @@ def pick_universe(region: str, offered: list[str]) -> str | None:
 def upsert_cells(
     s: Session, rows: Iterable[Mapping[str, Any]], region: str, delay: int, universe: str
 ) -> int:
+    """Insert or update catalog cells from a dataset listing; return the count."""
     now = utc_now()
     count = 0
     for row in rows:
@@ -78,6 +81,7 @@ def upsert_cells(
 
 
 def refresh(api: BrainAPI, ledger: Ledger, config: FactoryConfig) -> dict[str, Any]:
+    """Refresh the dataset catalog for every allowed region and record a summary."""
     options = api.simulation_options()
     regions = config.policy.regions or sorted(options)
     summary: dict[str, Any] = {"regions": {}}
@@ -132,6 +136,7 @@ def pyramid_counts(records: Iterable[Mapping[str, Any]]) -> Counter[tuple[str, i
 
 
 def latest_pyramid_counts(s: Session) -> Counter[tuple[str, int, str]]:
+    """Return the most recently recorded alpha counts per pyramid."""
     from alpha_orchestrator.factory.models import EventORM
 
     event = s.scalar(

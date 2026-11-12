@@ -13,6 +13,7 @@ SECRET_KEYS = frozenset(
 
 
 def sanitize(value: Any) -> Any:
+    """Return a copy of value with secrets redacted, recursively."""
     if isinstance(value, str):
         return redact_text(value)
     if isinstance(value, Mapping):
@@ -30,5 +31,6 @@ class AuditLogger:
         self.logger = logger or logging.getLogger("alpha_orchestrator.audit")
 
     def event(self, event_type: str, **payload: Any) -> None:
+        """Log one audit event as a single line of redacted JSON."""
         record = {"event_type": event_type, **sanitize(payload)}
         self.logger.info(json.dumps(record, sort_keys=True, separators=(",", ":")))

@@ -56,4 +56,5 @@ DIRECTION_REFERENCES: dict[str, dict[str, str]] = {
 
 
 def is_card(card_id: str, cards: dict[str, str]) -> bool:
+    """Return True if card_id names a known method card."""
     return card_id.strip().upper() in cards

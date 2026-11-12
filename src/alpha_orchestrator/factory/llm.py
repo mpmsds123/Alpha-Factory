@@ -149,6 +149,7 @@ class FactoryLLM:
         strong: bool = False,
         validate: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
+        """Send one budgeted, ledgered JSON request to the LLM and return its reply."""
         model = self.config.llm.strong_model if strong else self.config.llm.model
         provenance = {
             "request_hash": sha256_text(
@@ -486,6 +487,7 @@ class FactoryLLM:
     def experiment_proposal(
         self, evidence: dict[str, str], allowed_series: list[str]
     ) -> dict[str, Any]:
+        """Ask the LLM to propose one falsifiable PnL comparison."""
         prompt = {
             "task": "Propose one falsifiable comparison of two existing daily PnL series.",
             "evidence": evidence,
@@ -548,6 +550,7 @@ class FactoryLLM:
         allowed = {choice["cell_id"] for choice in choices}
 
         def validate(data: dict[str, Any]) -> None:
+            """Reject a research-direction reply that is incomplete or outside the allowed cells."""
             if any(not isinstance(data.get(key), str) or not data[key].strip() for key in keys):
                 raise ValueError("Research direction is missing its choice or rationale")
             if data["cell_id"] not in allowed:
@@ -742,6 +745,7 @@ class FactoryLLM:
         allowed = {item["fix"] for item in evidence["menu"]}
 
         def validate(data: dict[str, Any]) -> None:
+            """Reject a refinement proposal with missing or over-long fields."""
             for key in ("hypothesis", "alternative", "prediction", "falsifier", "why"):
                 value = data.get(key)
                 if not isinstance(value, str) or not value.strip() or len(value) > 500:
@@ -845,6 +849,7 @@ class FactoryLLM:
         return self.ask("pool_review", json.dumps(prompt, ensure_ascii=False), strong=True)
 
     def describe(self, alpha: dict[str, Any]) -> str:
+        """Ask the LLM to write an alpha's submission description."""
         prompt = {
             "task": "Write the alpha description for submission: 'Idea:' then 'Rationale:', "
             "at least 100 words in English, plain and specific, no hype, no metrics.",

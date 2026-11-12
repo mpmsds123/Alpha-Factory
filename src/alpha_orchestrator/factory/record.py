@@ -51,6 +51,7 @@ def _num(x: float | None) -> str:
 
 
 def render_record(ledger: Ledger, path: Path) -> Path:
+    """Render the research record page from raw ledger rows."""
     out = [f"<!doctype html><meta charset=utf-8><title>研究记录</title><style>{CSS}</style><main>"]
     now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     out.append(

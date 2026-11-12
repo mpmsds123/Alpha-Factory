@@ -37,6 +37,7 @@ class MethodCard(StrictModel):
         # a superseded version is as much a reviewer action as approving its
         # replacement, and losing who-did-it-when there would be its own small
         # loss of auditability.
+        """Require approved cards, and only approved cards, to carry reviewer details."""
         has_reviewer_record = bool(self.reviewer and self.approval_timestamp)
         if self.status is MethodCardStatus.DRAFT and has_reviewer_record:
             raise ValueError("Draft cards must not carry a reviewer or approval timestamp")

@@ -54,6 +54,7 @@ class StructuralValidator:
         metadata: MetadataSnapshot,
         data_type: DataType,
     ) -> ValidationResult:
+        """Return structural problems in an expression before it is simulated."""
         issues: list[ValidationIssue] = []
         if PLACEHOLDER_RE.search(expression):
             issues.append(
