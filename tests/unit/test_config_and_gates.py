@@ -16,20 +16,21 @@ from alpha_orchestrator.gates.routing import route_completed_result
 from alpha_orchestrator.gates.structural import StructuralValidator
 
 ROOT = Path(__file__).parents[2]
+POLICIES = ROOT / "src" / "alpha_orchestrator" / "default_policies"
 
 
 def test_versioned_policies_load() -> None:
-    routing = load_routing_policy(ROOT / "policies" / "routing.v1.yaml")
-    limits = load_limit_policy(ROOT / "policies" / "limits.v1.yaml")
-    taxonomy = load_error_taxonomy(ROOT / "policies" / "error-taxonomy.v1.yaml")
+    routing = load_routing_policy(POLICIES / "routing.v1.yaml")
+    limits = load_limit_policy(POLICIES / "limits.v1.yaml")
+    taxonomy = load_error_taxonomy(POLICIES / "error-taxonomy.v1.yaml")
     assert routing.version == "routing.v1"
     assert limits.maximum_pending_candidates == 20
     assert "PENDING" in taxonomy.unresolved
 
 
 def test_routing_v2_drops_the_unsourced_turnover_discard() -> None:
-    v1 = load_routing_policy(ROOT / "policies" / "routing.v1.yaml")
-    v2 = load_routing_policy(ROOT / "policies" / "routing.v2.yaml")
+    v1 = load_routing_policy(POLICIES / "routing.v1.yaml")
+    v2 = load_routing_policy(POLICIES / "routing.v2.yaml")
     assert v1.discard is not None and v1.discard.maximum_turnover == 0.90
     assert v2.version == "routing.v2"
     assert v2.discard is None

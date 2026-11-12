@@ -16,6 +16,7 @@ from alpha_orchestrator.storage.database import Database, sqlite_url
 from alpha_orchestrator.storage.repository import Repository
 
 ROOT = Path(__file__).parents[2]
+POLICIES = ROOT / "src" / "alpha_orchestrator" / "default_policies"
 EXPECTED_TOOLS = {
     "alpha_method_cards_list",
     "alpha_replay_execute",
@@ -33,8 +34,8 @@ def create_run(
     database = Database(sqlite_url(database_path))
     database.create_schema()
     repository = Repository(database.session_factory)
-    routing = load_routing_policy(ROOT / "policies" / "routing.v2.yaml")
-    limits = load_limit_policy(ROOT / "policies" / "limits.v2.yaml")
+    routing = load_routing_policy(POLICIES / "routing.v2.yaml")
+    limits = load_limit_policy(POLICIES / "limits.v2.yaml")
     specification = RunSpecification(
         dataset_id="demo-dataset",
         region="USA",

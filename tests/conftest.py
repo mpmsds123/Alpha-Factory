@@ -17,21 +17,22 @@ from alpha_orchestrator.storage.database import Database
 from alpha_orchestrator.storage.repository import Repository
 
 ROOT = Path(__file__).parents[1]
+POLICIES = ROOT / "src" / "alpha_orchestrator" / "default_policies"
 
 
 @pytest.fixture
 def routing_policy() -> RoutingPolicy:
-    return load_routing_policy(ROOT / "policies" / "routing.v2.yaml")
+    return load_routing_policy(POLICIES / "routing.v2.yaml")
 
 
 @pytest.fixture
 def limit_policy() -> LimitPolicy:
-    return load_limit_policy(ROOT / "policies" / "limits.v2.yaml")
+    return load_limit_policy(POLICIES / "limits.v2.yaml")
 
 
 @pytest.fixture
 def correlation_policy() -> CorrelationPolicy:
-    return load_correlation_policy(ROOT / "policies" / "correlation.v1.yaml")
+    return load_correlation_policy(POLICIES / "correlation.v1.yaml")
 
 
 @pytest.fixture
