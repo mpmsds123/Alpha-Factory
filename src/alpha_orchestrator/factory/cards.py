@@ -1,9 +1,8 @@
-"""方法卡片: the fixed list an idea or a change may cite as its evidence (第 2、5 问).
+"""Method cards: the fixed list an idea or a change may cite as its evidence (Design Q2, Q5).
 
-Taken from cnhkmcp 4.3.6 (the tool a WorldQuant employee shared): the 8-question bank of
-brain-data-feature-engineering/SKILL.md (ideas) and the step 0-6 chain of
-template_final_enhance/单因子思考逻辑链.md (changes). The program checks that a cited
-card id is on this list; nothing else counts as a card.
+Adapted from a public research toolkit: an 8-question bank for feature engineering
+(ideas) and a step 0-6 reasoning chain for single-signal refinement (changes). The
+program checks that a cited card id is on this list; nothing else counts as a card.
 """
 
 IDEA_CARDS: dict[str, str] = {

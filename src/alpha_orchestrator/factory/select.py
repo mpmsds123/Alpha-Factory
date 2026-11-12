@@ -1,4 +1,4 @@
-"""第 10 问: every alpha that passes is stored for you to pick from, and exported to a CSV.
+"""Design Q10: every alpha that passes is stored for you to pick from, and exported to a CSV.
 
 store_passing() is what the factory runs (10/14). select_today() is the older daily-four
 selection, kept for the review commands. Nothing is submitted here: `review approve` is
@@ -314,7 +314,7 @@ def _eligible_check(s: Any, candidate: CandidateORM, config: FactoryConfig, wind
 def store_passing(
     api: BrainAPI, ledger: Ledger, config: FactoryConfig, *, now: datetime | None = None
 ) -> list[str]:
-    """第 7、10 问: every regular-line alpha that kept its Sharpe under the other
+    """Design Q7, Q10: every regular-line alpha that kept its Sharpe under the other
     neutralization gets the platform's submission check (IS ladder, sub-universe,
     correlation) and, if nothing FAILs, a row in the pick-list. No daily limit, no ranking:
     you pick. Then the whole pick-list is written to the CSV."""
@@ -384,7 +384,7 @@ def _lineage(s: Any, c: CandidateORM) -> tuple[int, list[str], bool]:
 
 
 def export_csv(ledger: Ledger, config: FactoryConfig) -> Path:
-    """第 10 问: the pick-list, one row per stored alpha, in the repo's reports folder."""
+    """Design Q10: the pick-list, one row per stored alpha, in the repo's reports folder."""
     from alpha_orchestrator.factory.models import LLMCallORM, ResearchIdeaORM
 
     out = Path(config.reports_dir) / EXPORT_NAME

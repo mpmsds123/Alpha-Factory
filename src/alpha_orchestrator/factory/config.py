@@ -1,8 +1,8 @@
 """Every tunable number in one place, each with where it came from.
 
-Sources: 规则手册 = your Obsidian rules handbook (official docs); API课 = official API
-training 2026-04-29; AI课 = official "零基础上手BRAIN-AI篇"; 论坛 = Chinese forum posts;
-历史 = your 21,368 IQC simulations.
+Sources: rules handbook = notes on the official documentation; API course = official API
+training 2026-04-29; AI course = the platform's official AI introduction; forum = community
+posts; history = 21,368 earlier simulations; Design Qn = question n of the design review.
 """
 
 import json
@@ -25,9 +25,11 @@ DEFAULT_CONFIG = REPO_ROOT / "factory.yaml"
 class Budget:
     # 10 simulations in flight x 12 hours x 20 per hour (about 3 minutes each) = 2,400.
     daily_sim_cap: int = 2400
-    v1_daily_cap: int = 1000  # 10/12 定: 工厂每天 1000 次（扫描器 4000）
-    active_datasets: int = 1  # 你定的: one dataset at a time
-    dataset_sim_cap: int = 1000  # 第 6 问: 每个数据集一样的 1000 次，才能和扫描器一对一比
+    # Factory allocation (decided 2026-10-12); the template scanner has its own 4,000
+    v1_daily_cap: int = 1000
+    active_datasets: int = 1  # Owner's decision: one dataset at a time
+    # Design Q6: the same 1,000 per dataset as the scanner, for a one-to-one comparison
+    dataset_sim_cap: int = 1000
     health_sample: int = 40  # families sampled for the health check (update period, coverage)
     survey_per_stratum: int = 2  # families sampled per stratum for the survey
     survey_max_families: int = 100
@@ -35,8 +37,8 @@ class Budget:
     refine_structures: int = 3  # structures tried per refinement round of one family
     combo_count: int = 6  # combinations per arm (llm and random) per strong stratum
     slots: int = 6  # upper bound; lowered automatically to what the platform accepts
-    children_per_slot: int = 10  # 规则: 10 alphas per multi-simulation
-    min_batch_interval_s: float = 20.0  # 论坛: >3 batches / 10 min triggers 429 storms
+    children_per_slot: int = 10  # Platform rule: 10 alphas per multi-simulation
+    min_batch_interval_s: float = 20.0  # Forum reports: >3 batches / 10 min triggers 429 storms
     quota_reserve: int = 0  # Explicit reserve outside this factory's own daily allocation.
     quota_timezone: str = "America/Los_Angeles"
     quota_reset_hour: int = 21  # Same allocation window as the existing 4,000/day scanner.
@@ -65,30 +67,34 @@ class Budget:
 
 @dataclass
 class Thresholds:
-    noise_sigma: float = 0.316  # 第 5 问: 1/sqrt(10 年); 扫描器无信号数据集实测 0.25-0.33
-    screen_line: float = (
-        0.8  # survey queueing line (not a pass line): noise reaches it 13% of the time
-    )
+    # Design Q5: 1/sqrt(10 years); measured 0.25-0.33 on scanner datasets without signal
+    noise_sigma: float = 0.316
+    # survey queueing line (not a pass line): noise reaches it 13% of the time
+    screen_line: float = 0.8
     sprt_alpha: float = 0.05  # P(call a no-signal dataset "signal")
     sprt_beta: float = 0.20  # P(miss a dataset with signal)
     sprt_extra_hits: float = 0.12  # a dataset worth working has this many more hits than noise
-    min_filled_coverage: float = 0.50  # 默认值 (待你确认): coverage after filling one update period
-    min_coverage: float = 0.60  # 官方小贴士 10: drop data covering fewer than 60% of stocks
-    suspicious_sharpe: float = 3.0  # 你定的: above this the result is checked, never mined
+    # Default (pending owner review): coverage after filling one update period
+    min_filled_coverage: float = 0.50
+    min_coverage: float = 0.60  # Official tip 10: drop data covering fewer than 60% of stocks
+    # Owner's decision: above this the result is checked, never mined
+    suspicious_sharpe: float = 3.0
     suspicious_turnover: float = 0.70
-    refine_min_gain: float = 0.35  # 第 5 问: 3 个相关 0.7-0.87 的变体里挑最好，噪音就能差 0.34-0.50
-    refine_max_rounds: int = 3  # 默认值 (待你确认)
-    submit_sharpe: float = 1.58  # 规则手册: consultant D1
+    # Design Q5: the best of 3 variants correlated 0.7-0.87 beats its parent by 0.34-0.50
+    # from noise alone, so a smaller gain is not evidence of improvement.
+    refine_min_gain: float = 0.35
+    refine_max_rounds: int = 3  # Default (pending owner review)
+    submit_sharpe: float = 1.58  # Rules handbook: consultant D1
     submit_sharpe_chn: float = 2.08
     submit_fitness: float = 1.0
     turnover_min: float = 0.01
     turnover_max: float = 0.70
-    robust_keep_ratio: float = 0.5  # 研究小组: rank/sign variants keep >=50% of sharpe
-    pnl_corr_max: float = 0.7  # 规则: self/prod correlation < 0.7
-    dataset_cap: int = 8  # 论坛: <=8-10 submissions per dataset
+    robust_keep_ratio: float = 0.5  # Research group: rank/sign variants keep >=50% of sharpe
+    pnl_corr_max: float = 0.7  # Platform rule: self/prod correlation < 0.7
+    dataset_cap: int = 8  # Forum: <=8-10 submissions per dataset
     margin_bps: dict[str, float] = field(
         default_factory=lambda: {"USA": 5.0, "CHN": 20.0, "IND": 20.0, "MEA": 20.0, "default": 15.0}
-    )  # AI课
+    )  # Official AI course
 
 
 @dataclass
@@ -102,7 +108,7 @@ class LLMConfig:
     max_calls_per_day: int = 1000
     max_completion_tokens: int = 4096
     thinking: bool = False  # Keep bounded JSON output from being consumed by reasoning.
-    # 第 9 问: yuan per million tokens [input cache miss, output], DeepSeek official Chinese
+    # Design Q9: yuan per million tokens [input cache miss, output], provider's official
     # price page 2026-10-14; peak = Beijing Mon-Fri 9-12 and 14-18, all other hours off-peak
     prices_cny: dict[str, dict[str, list[float]]] = field(
         default_factory=lambda: {
@@ -114,8 +120,8 @@ class LLMConfig:
 
 @dataclass
 class Policy:
-    max_submissions_per_day: int = 4  # 规则
-    auto_submit: bool = False  # 设计 ③: you confirm every submission
+    max_submissions_per_day: int = 4  # Platform rule
+    auto_submit: bool = False  # Design principle: you confirm every submission
     regions: list[str] = field(default_factory=list)  # empty = every region you can access
     delays: list[int] = field(default_factory=lambda: [1])
 
@@ -124,10 +130,11 @@ class Policy:
 class FactoryConfig:
     db_path: str = "~/.alpha_factory/factory.db"
     reports_dir: str = "reports"
-    scanner_progress: str = ""  # 提案 1: the template scanner's 数据集进度.csv; empty = off
-    # 第 3 问: the scanner's runs folder; the factory only digs datasets it found worth digging
+    # Proposal 1: the template scanner's dataset-progress CSV; empty = off
+    scanner_progress: str = ""
+    # Design Q3: the scanner's runs folder; the factory only digs datasets it found worth digging
     scanner_runs: str = ""
-    # 现行设计 第 1 步: the pilot digs only these cells ("USA|1|TOP3000|analyst_consensus")
+    # Current design step 1: the pilot digs only these cells ("REGION|DELAY|UNIVERSE|dataset")
     only_datasets: list[str] = field(default_factory=list)
     quarantine_exception: dict[str, str] = field(default_factory=dict)
     # Item 7: DeepSeek reads the whole pool of a dataset's ideas and proposes which to stop or

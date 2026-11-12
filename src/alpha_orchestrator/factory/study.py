@@ -1,4 +1,4 @@
-"""The research loop of 设计文档 v1 (Obsidian「Alpha工厂 工作台」), one step per function.
+"""The research loop of design document v1, one step per function.
 
 Every decision here cites the step of the design document it implements. A decision the
 document does not contain does not belong in this file.
@@ -22,7 +22,7 @@ from alpha_orchestrator.factory.quarantine import exception_scope
 
 # 11/02: only fields the scanner found signal in; v5 datasets are redone (reset_old_verdicts)
 DESIGN = "v7"
-FILL_DAYS = 63  # 第 2 步: quarterly data carried one quarter (官方小贴士 10)
+FILL_DAYS = 63  # Step 2: quarterly data carried one quarter (official tip 10)
 NUMERIC_TYPES = ("MATRIX", "VECTOR")
 
 
@@ -56,11 +56,11 @@ def reset_old_verdicts(ledger: Ledger) -> int:
     return n
 
 
-# ---------- 第 1 步 选数据集 ----------
+# ---------- Step 1: choose a dataset ----------
 def choose_dataset(
     s: Session, config: FactoryConfig, rng: random.Random | None = None
 ) -> str | None:
-    """第 3 问: only datasets the template scanner found worth digging (first-pass hit rate
+    """Design Q3: only datasets the template scanner found worth digging (first-pass hit rate
     >= 2%), highest hit rate first, each once under this design. Without the scanner's
     folder, the old ranking (best score, coverage known and >= min_coverage)."""
     _, excluded = exception_scope(s, config)
@@ -119,7 +119,7 @@ def v7_dataset_pool(s: Session, config: FactoryConfig, excluded: set[str]) -> li
     ]
 
 
-WORTH_RATE = 0.02  # 第 3 问: the scanner's "worth digging" line (its SPRT keeps >= 2%)
+WORTH_RATE = 0.02  # Design Q3: the scanner's "worth digging" line (its SPRT keeps >= 2%)
 FIRST_PASS_FILE = re.compile(r"^([A-Z]+)_(.+?)(?:_v\d+)?_1阶\.csv$")
 FIELDS_FILE = re.compile(r"^fields_([A-Z]+)_([A-Z0-9]+)_(\d)_(.+)\.json$")
 
@@ -127,7 +127,7 @@ FIELDS_FILE = re.compile(r"^fields_([A-Z]+)_([A-Z0-9]+)_(\d)_(.+)\.json$")
 def scanner_worth(folder: str) -> list[dict[str, Any]]:
     """Datasets in the scanner's first-pass results with |Sharpe| >= 1 and turnover 1-70%
     in at least 2% of simulations, highest rate first. Each row also carries the scanner's
-    regular-line count (Sharpe >= 1.58, Fitness >= 1) for the comparison (第 8 问)."""
+    regular-line count (Sharpe >= 1.58, Fitness >= 1) for the comparison (Design Q8)."""
     root = Path(folder).expanduser()
     if not root.is_dir():
         return []
@@ -170,12 +170,12 @@ def scanner_worth(folder: str) -> list[dict[str, Any]]:
     return rows
 
 
-SCANNER_JUDGED = ("止损", "值得跑")  # 提案 1: scanner verdicts that count for the comparison
+SCANNER_JUDGED = ("止损", "值得跑")  # Proposal 1: scanner verdicts that count for the comparison
 
 
 def scanner_judged(path: str) -> set[tuple[str, str, str]]:
     """(region, universe, dataset) the template scanner has judged, read from its
-    数据集进度.csv, so both methods are compared on the same datasets. Empty if no file."""
+    dataset-progress CSV, so both methods are compared on the same datasets. Empty if no file."""
     if not path:
         return set()
     p = Path(path).expanduser()
@@ -230,17 +230,17 @@ def region_evidence(s: Session) -> dict[str, float]:
     }
 
 
-# ---------- 第 2 步 读字段 ----------
+# ---------- Step 2: read fields ----------
 # Released a few times a year: carried forward so they are not empty between releases
-# (官方小贴士 10). Everything else (news, sentiment, price-volume, ...) is used as is:
-# "新闻是最讲时效性的东西，你把它填充过来干嘛呢……不是什么都该填的" (官方零基础课).
+# (official tip 10). Everything else (news, sentiment, price-volume, ...) is used as is:
+# news is the most time-sensitive data, so carrying it forward is wrong (official intro course).
 LOW_FREQUENCY = frozenset(
     {"fundamental", "analyst", "earnings", "insiders", "institutions", "shortinterest"}
 )
 
 
 def prep(field_id: str, field_type: str, category: str = "fundamental") -> str:
-    """How a field enters every formula: vectors averaged (官方课); low-frequency data
+    """How a field enters every formula: vectors averaged (official course); low-frequency data
     carried for one quarter, everything else left as is."""
     base = f"vec_avg({field_id})" if field_type == "VECTOR" else field_id
     if category.lower() in LOW_FREQUENCY:

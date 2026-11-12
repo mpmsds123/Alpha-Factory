@@ -1,4 +1,4 @@
-"""第 2 问 可追溯 and 第 6 问 查重: everything here is a mechanical check, no LLM.
+"""Design Q2 (traceability) and Q6 (duplicates): everything here is a mechanical check, no LLM.
 
 An idea must carry one piece of evidence, either
   {"type": "card", "id": "Q3"}                                   a method card (cards.py), or
@@ -21,7 +21,7 @@ OFFICIAL_SOURCES = ("Research_Papers_for_Consultants", "Research_Papers_for_User
 DOCS_SHOWN = 5  # documents offered to the LLM per idea
 DOC_CHARS = 2000  # characters of each document shown
 QUOTE_MAX = 400  # a quote is a passage, not a whole document
-DUPLICATE_OVERLAP = 0.5  # 第 6 问: measured on the ledger, duplicates 0.56-0.62, others <= 0.38
+DUPLICATE_OVERLAP = 0.5  # Design Q6: measured on the ledger, duplicates 0.56-0.62, others <= 0.38
 REQUIRED = ("title", "mechanism", "long", "short", "horizon_days", "evidence")
 WORD = re.compile(r"[a-z0-9]+")
 
@@ -56,7 +56,7 @@ def _norm(text: str) -> str:
 
 
 def check_idea(card: dict[str, Any], docs: dict[str, dict[str, str]]) -> tuple[bool, str]:
-    """Format and evidence (第 2 问 规则 1). Returns (ok, reason when not ok)."""
+    """Format and evidence (Design Q2, rule 1). Returns (ok, reason when not ok)."""
     missing = [k for k in REQUIRED if not str(card.get(k, "")).strip()]
     if missing:
         return False, f"missing: {', '.join(missing)}"
@@ -93,7 +93,7 @@ def overlap(a: str, b: str) -> float:
 
 
 def duplicate_of(card: dict[str, Any], earlier: list[dict[str, str]]) -> str | None:
-    """第 6 问: same evidence and search words overlapping at least half -> the title it
+    """Design Q6: same evidence and search words overlapping at least half -> the title it
     repeats. `earlier` rows carry title, query and evidence_key."""
     key = evidence_key(card)
     query = str(card.get("query", ""))
