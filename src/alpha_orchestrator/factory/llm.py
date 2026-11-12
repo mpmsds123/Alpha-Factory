@@ -40,10 +40,25 @@ SYSTEM = (
 )
 
 
+# The provider prices by Beijing time (UTC+8): weekdays 09-12 and 14-18 are peak hours.
+PRICING_UTC_OFFSET_HOURS = 8
+PEAK_HOUR_RANGES = ((9, 12), (14, 18))
+WEEKDAYS = 5  # Monday-Friday (datetime.weekday() 0-4)
+TOKENS_PER_PRICE_UNIT = 1_000_000  # prices are quoted per million tokens
+# Default acceptance requirements shown to the refinement prompt when the caller passes
+# none; they mirror the platform's regular submission line.
+DEFAULT_ACCEPTANCE = {
+    "sharpe_min": 1.58,
+    "fitness_min": 1.0,
+    "turnover_min": 0.01,
+    "turnover_max": 0.70,
+}
+
+
 def is_peak(now: datetime) -> bool:
-    """DeepSeek peak hours: Beijing (UTC+8) Monday-Friday 9-12 and 14-18."""
-    bj = now.astimezone(UTC) + timedelta(hours=8)
-    return bj.weekday() < 5 and (9 <= bj.hour < 12 or 14 <= bj.hour < 18)
+    """Return True during the provider's peak-price hours (Beijing time, weekdays)."""
+    bj = now.astimezone(UTC) + timedelta(hours=PRICING_UTC_OFFSET_HOURS)
+    return bj.weekday() < WEEKDAYS and any(lo <= bj.hour < hi for lo, hi in PEAK_HOUR_RANGES)
 
 
 class LLMUnavailable(RuntimeError):
@@ -87,7 +102,7 @@ class FactoryLLM:
         if not table:
             return 0.0
         price = table["peak"] if is_peak(now or datetime.now(UTC)) else table["off"]
-        return (prompt_tokens * price[0] + completion_tokens * price[1]) / 1_000_000
+        return (prompt_tokens * price[0] + completion_tokens * price[1]) / TOKENS_PER_PRICE_UNIT
 
     # ---------- transport ----------
     def _deepseek(self, model: str, system: str, user: str) -> tuple[str, int, int]:
@@ -689,14 +704,7 @@ class FactoryLLM:
             "idea": idea,
             "best": best,
             "acceptance_requirements": (
-                requirements
-                if requirements is not None
-                else {
-                    "sharpe_min": 1.58,
-                    "fitness_min": 1.0,
-                    "turnover_min": 0.01,
-                    "turnover_max": 0.70,
-                }
+                requirements if requirements is not None else dict(DEFAULT_ACCEPTANCE)
             ),
             "history_all_tries": list(history),
             "fields": list(fields),

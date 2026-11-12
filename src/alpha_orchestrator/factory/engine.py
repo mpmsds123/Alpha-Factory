@@ -50,9 +50,9 @@ FIELD_LINES = 200  # field families shown to the LLM
 MAX_FORM_OPERATORS = 4  # Design Q4: 4 + one per round x 4 rounds = 8, the Power Pool limit
 IDEA_FAILS_TO_STOP = 2  # Design Q6: 2 failed ideas in a row (cost cap) -> the dataset is done
 # Step 4: coarse keyword filter, then LLM scoring in batches; keep fields scoring >= 6/10
-COARSE = 300
-SCORE_BATCH = 100
-KEEP_SCORE = 6
+COARSE = 300  # fields kept by the keyword filter before LLM scoring (bounds LLM cost)
+SCORE_BATCH = 100  # fields scored per LLM call (keeps each prompt within limits)
+KEEP_SCORE = 6  # minimum LLM relevance score (0-10) for a field to stay in the pool
 # Step 5 (revised 2026-10-05)
 FORMULAS = 5  # per idea; a batch of 10 holds two ideas (scheduler mixes ideas in a batch)
 FORMULA_FIELDS = 8  # distinct quantities the LLM may combine in its formulas
@@ -63,7 +63,7 @@ GATE_CONFIDENCE = 0.95
 # Design Q1: an idea "hits" when one of its formulas passes the regular line (_passes_floor)
 # Design Q5 (10/14)
 PARENTS = 1  # Current design steps 5+6: every change starts from the current best formula
-VARIANTS = 3
+VARIANTS = 3  # one-change variants per round; 3 x 3 rounds fits the 12-per-idea budget
 DRY_ROUNDS = 1  # Current design step 7: a round that does not add refine_min_gain stops it
 MAX_ROUNDS = 3  # Current design step 7: at most 3 + 3x3 = 12 simulations per idea
 # Current design (10/14 evening)
@@ -78,8 +78,8 @@ FORMULA_MAX_FIELDS = 3  # Power Pool
 # that reached 1.58, had a first formula of at least 1.0. Ledger of 2026-10-31.
 FIRST_GATE = 1.0
 HORIZONS = (5, 21, 63, 126, 252)  # the windows the system prompt allows
-GROUP_FIELD_LINES = 400
-DIRECTION_SHORTLIST = 8
+GROUP_FIELD_LINES = 400  # field families shown when grouping fields (prompt-size cap)
+DIRECTION_SHORTLIST = 8  # candidate datasets offered to the research-direction trial
 # Revised after the first production run (10/15)
 GROUP_REFILLS = 10  # Safety cap; the real stop is the dataset budget (100 simulations) running out
 # Decided 10/15: scout 8 groups first; none above 0.8 -> no signal, move on; any above ->
@@ -120,7 +120,7 @@ ACTIVE_IDEAS = 2  # proposed value in the design document
 # v7: 6 ideas in flight. In v6 two ideas used 17% of the daily quota (peak 321 of 1,000):
 # each idea waits for its own backtests, so more ideas in parallel keep the platform busy.
 V7_ACTIVE_IDEAS = 6
-V7_QUEUE_CAP = 40
+V7_QUEUE_CAP = 40  # v7 backlog cap: 6 ideas in flight need more queued work than v6's 20
 V7_DRY_ROUNDS = 2  # v7: two rounds in a row without a better variant end the idea
 PAST_IDEAS = 40  # v7: finished ideas shown to idea generation
 # Item 3. No new idea is opened while this many simulations are already waiting or running.
@@ -131,6 +131,25 @@ CHUNK = 20  # simulations between decisions
 NO_FLIP_REGIONS = frozenset({"CHN"})  # Step 6: short side is constrained in China
 ROBUST_ROLES = frozenset({"neutralization"})  # Design Q7: the platform checks sub-universe
 PENDING = (CandidateStatus.QUEUED, CandidateStatus.RUNNING)
+# Platform limits and unit conversions.
+PLATFORM_MAX_DECAY = 512  # largest decay the platform accepts
+MIN_DOUBLED_DECAY = 5  # a "raise decay" fix starts from at least this many days
+BPS_PER_UNIT = 10_000  # margins are stored as fractions, configured in basis points
+# Safety cap on dataset draws per call: each draw that yields no usable fields is retried,
+# and 30 bounds a pathological catalog without stopping a normal day.
+MAX_DATASET_DRAWS = 30
+POOL_REVIEW_ROWS = 40  # most recent ideas shown to the pool review (keeps the prompt bounded)
+MAX_REJECTIONS_SHOWN = 5  # validation errors echoed back to the LLM per retry
+# Idea memory fed to idea generation: scan the latest 200 ideas, show at most 20 dead ends
+# and 20 successes, enough for the model to avoid repeats without crowding the prompt.
+MEMORY_SCAN_IDEAS = 200
+MEMORY_EXAMPLES = 20
+DEFAULT_HORIZON_DAYS = 21  # about one trading month, used when the LLM gives no horizon
+# Queue priority: finish robustness checks first, then enhancements, then refinements, so
+# work closest to a submittable alpha is simulated first.
+STAGE_PRIORITY = {Stage.ROBUST: 3.0, Stage.ENHANCE: 2.5, Stage.IMPROVE: 2.0}
+DEFAULT_STAGE_PRIORITY = 1.0
+DEFAULT_RUN_MINUTES = 720.0  # 12 hours: one unattended overnight run
 WORD = re.compile(r"[a-z0-9]+")
 
 
@@ -245,7 +264,7 @@ class Engine:
 
     def _open_dataset(self) -> str | None:
         """Steps 1-2, repeated until a dataset has usable fields."""
-        for _ in range(30):
+        for _ in range(MAX_DATASET_DRAWS):
             if self.config.design == "v7" and self.config.direction_trial:
                 cell_id = self._choose_direction()
             else:
@@ -390,7 +409,7 @@ class Engine:
             brief = self._brief(cell)
         self.llm.idea_id = None
         try:
-            raw = self.llm.pool_review(brief, table[-40:], left)
+            raw = self.llm.pool_review(brief, table[-POOL_REVIEW_ROWS:], left)
         except LLMUnavailable:
             raise
         except RuntimeError:
@@ -430,7 +449,7 @@ class Engine:
                 cell_id,
                 proposed=[(d.idea[:8], d.action, d.why) for d in decisions],
                 executed=done,
-                rejected=problems[:5],
+                rejected=problems[:MAX_REJECTIONS_SHOWN],
             )
         return done
 
@@ -665,7 +684,7 @@ class Engine:
                 long_side=g["direction"],
                 short_side="",
                 # groups saved in a dataset's plan before this field existed ran on 21 days
-                horizon_days=int(g.get("horizon_days") or 21),
+                horizon_days=int(g.get("horizon_days") or DEFAULT_HORIZON_DAYS),
                 query=" ".join(g["fields"]),
                 extra={"group": g, "n": k},
             )
@@ -711,7 +730,7 @@ class Engine:
             exprs = exprs[:FIRST_FORMULAS]
             if len(exprs) >= FIRST_FORMULAS or (exprs and not problems):
                 break
-            rejected = "; ".join(problems[:5])
+            rejected = "; ".join(problems[:MAX_REJECTIONS_SHOWN])
         added = 0
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
@@ -940,7 +959,7 @@ class Engine:
                 "fitness_min": self.config.thresholds.submit_fitness,
                 "turnover_min": self.config.thresholds.turnover_min,
                 "turnover_max": self.config.thresholds.turnover_max,
-                "margin_min": self.config.margin_floor(cell.region) / 10_000,
+                "margin_min": self.config.margin_floor(cell.region) / BPS_PER_UNIT,
             }
             usable = {f.field_id: f for f in study.usable_fields(s, idea.cell_id)}
             group = idea.extra.get("group") or {}
@@ -1011,7 +1030,7 @@ class Engine:
                 variants.append(v)
             if len(variants) >= VARIANTS or (variants and not problems):
                 break
-            rejected = "; ".join(problems[:5]) or "no valid variant"
+            rejected = "; ".join(problems[:MAX_REJECTIONS_SHOWN]) or "no valid variant"
         with self.ledger.session() as s:
             idea = s.get(ResearchIdeaORM, idea_id)
             assert idea is not None
@@ -1038,7 +1057,7 @@ class Engine:
             for v in variants[:VARIANTS]:
                 settings = dict(parent.settings)
                 if isinstance(v.get("decay"), int):
-                    settings["decay"] = max(0, min(512, int(v["decay"])))
+                    settings["decay"] = max(0, min(PLATFORM_MAX_DECAY, int(v["decay"])))
                 if str(v.get("neutralization", "")).upper() in neutral:
                     settings["neutralization"] = str(v["neutralization"]).upper()
                 c = self._add(
@@ -1259,7 +1278,10 @@ class Engine:
                 if fix.shape is not None:
                     expression = fix.shape.format(f=parent_row.expression)
                 elif fix.setting == "decay":
-                    settings["decay"] = min(512, max(5, 2 * int(settings.get("decay") or 0)))
+                    settings["decay"] = min(
+                        PLATFORM_MAX_DECAY,
+                        max(MIN_DOUBLED_DECAY, 2 * int(settings.get("decay") or 0)),
+                    )
                 elif fix.setting == "neutralization":
                     if not options:
                         continue
@@ -1580,7 +1602,7 @@ class Engine:
             change=change,
             expression=expression,
             settings=settings,
-            priority={Stage.ROBUST: 3.0, Stage.ENHANCE: 2.5, Stage.IMPROVE: 2.0}.get(stage, 1.0),
+            priority=STAGE_PRIORITY.get(stage, DEFAULT_STAGE_PRIORITY),
             extra={
                 "design": "v1",
                 "idea": idea_id,
@@ -1812,7 +1834,7 @@ class Engine:
             (c.sharpe or 0) >= self.config.sharpe_floor(cell.region)
             and c.fitness >= t.submit_fitness
             and t.turnover_min <= c.turnover <= t.turnover_max
-            and (c.margin or 0) * 10_000 >= self.config.margin_floor(cell.region)
+            and (c.margin or 0) * BPS_PER_UNIT >= self.config.margin_floor(cell.region)
         )
 
 
@@ -2006,11 +2028,11 @@ def _knowledge(s: Session) -> tuple[list[str], list[str]]:
         select(ResearchIdeaORM)
         .where(ResearchIdeaORM.status != IdeaStatus.RETIRED)
         .order_by(ResearchIdeaORM.created_at.desc())
-        .limit(200)
+        .limit(MEMORY_SCAN_IDEAS)
     ):
-        if i.status == IdeaStatus.DEAD and len(dead) < 20:
+        if i.status == IdeaStatus.DEAD and len(dead) < MEMORY_EXAMPLES:
             dead.append(f"{i.title}: {i.extra.get('why_dead', '')}"[:200])
-        elif i.status == IdeaStatus.DONE and len(worked) < 20:
+        elif i.status == IdeaStatus.DONE and len(worked) < MEMORY_EXAMPLES:
             worked.append(f"{i.title} (best Sharpe {i.best_sharpe:.2f}): {i.form}"[:300])
     return dead, worked
 
@@ -2144,7 +2166,7 @@ def run_day(
     ledger: Ledger,
     llm: FactoryLLM,
     *,
-    minutes: float = 720.0,
+    minutes: float = DEFAULT_RUN_MINUTES,
     rng: random.Random | None = None,
     meta: Metadata | None = None,
     sleep: Callable[[float], None] = time.sleep,
