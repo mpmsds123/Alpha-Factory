@@ -214,6 +214,8 @@ class FactoryConfig:
     private_dir: str = "~/.alpha_factory/private"  # platform vocabulary, never in the repo
     scanner_runs: str = ""  # the template scanner's runs folder, for the originality check
     v7_db: str = "~/.alpha_factory/factory.db"  # read-only source for `memory import-v7`
+    # one expiring, digest-pinned permission to resume a quarantined batch (see quarantine.py)
+    quarantine_exception: dict[str, str] = field(default_factory=dict)
     gates: Gates = field(default_factory=Gates)
     search: Search = field(default_factory=Search)
     budget: Budget = field(default_factory=Budget)
@@ -254,6 +256,7 @@ class FactoryConfig:
             private_dir=raw.get("private_dir", cls.private_dir),
             scanner_runs=raw.get("scanner_runs", cls.scanner_runs),
             v7_db=raw.get("v7_db", cls.v7_db),
+            quarantine_exception=dict(raw.get("quarantine_exception") or {}),
             search=Search(**search),
             budget=Budget(**(raw.get("budget") or {})),
             cost=Cost(**(raw.get("cost") or {})),
