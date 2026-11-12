@@ -100,6 +100,9 @@ def compute(ledger: Ledger, cfg: FactoryConfig) -> tuple[dict[str, Counter[str]]
                 elif str(c.status) == "FAILED":
                     n["回测报错"] += 1
                     reasons[(d, "回测", _error_kind(c.error))] += 1
+            if extra.get("unoriginal"):
+                why = "same structure as a scanner formula"
+                reasons[(d, "原创检查", why)] += int(extra["unoriginal"])
             if not extra.get("formulas") and str(idea.status) == "DEAD":
                 reasons[(d, "写公式", str(extra.get("why_dead", ""))[:ERROR_CHARS])] += 1
             if _passed_gate(idea):

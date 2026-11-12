@@ -81,3 +81,53 @@ def test_v7_keeps_only_scanner_signal_fields(tmp_path: Path) -> None:
         assert [f.field_id for f in study.usable_fields(s, "USA|1|TOP3000|ds1")] == ["f_hit"]
         cell = s.get(CellORM, "USA|1|TOP3000|ds1")
         assert cell is not None and cell.plan["scanner_fields"] == ["f_hit"]
+
+
+def test_v7_day_uses_scanner_fields_and_skips_scanner_formulas(tmp_path: Path) -> None:
+    """End to end on the simulated world: with the scanner's evidence configured, ideas
+    are built on its signal fields and formulas it already ran are not simulated again."""
+    import random
+
+    from sqlalchemy import select
+
+    from alpha_orchestrator.factory import engine as eng
+    from alpha_orchestrator.factory.llm import FactoryLLM
+    from alpha_orchestrator.factory.models import CandidateORM, ResearchIdeaORM
+
+    from .test_engine import _SizeWorld, eps_fields
+    from .test_v7 import v7_llm
+
+    def day(scanner: str) -> Ledger:
+        ledger = Ledger("sqlite://")
+        cfg = FactoryConfig(design="v7", scanner_runs=scanner)
+        cfg.budget.min_batch_interval_s = 0
+        eng.run_day(
+            cfg,
+            _SizeWorld({"est": eps_fields(1.1)}).platform(),
+            ledger,
+            FactoryLLM(cfg, ledger, complete=v7_llm),
+            minutes=5,
+            rng=random.Random(3),
+            sleep=lambda _s: None,
+        )
+        return ledger
+
+    plain = day("")
+    with plain.session() as s:
+        cell = s.scalars(select(CellORM)).first()
+        assert cell is not None
+        region, dataset = cell.region, cell.dataset_id
+        firsts = [c.expression for c in s.scalars(select(CandidateORM)) if c.stage == "FIELD"]
+        fields = sorted({f for c in s.scalars(select(CandidateORM)) for f in c.extra["fields"]})
+    assert firsts and fields
+    _master(
+        tmp_path,
+        [f'{region},{dataset},1阶,{f},1.9,0.10,"{firsts[0]}"' for f in fields],
+    )
+    ledger = day(str(tmp_path))
+    with ledger.session() as s:
+        ideas = list(s.scalars(select(ResearchIdeaORM)))
+        assert ideas and all(i.extra.get("scanner_fields") for i in ideas)
+        assert any(i.extra.get("unoriginal") for i in ideas)
+        shapes = {eng._formula_shape(c.expression) for c in s.scalars(select(CandidateORM))}
+        assert eng._formula_shape(firsts[0]) not in shapes
