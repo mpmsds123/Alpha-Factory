@@ -1,7 +1,11 @@
-"""The factory ledger. Every simulation, decision and LLM call lands here.
+"""The factory's one SQLite database.
 
-One SQLite file (`factory.db`) is the single source of truth: the scheduler reads its
-queue from it, the planner reads cell statistics from it, the dashboard renders it.
+Five research tables (hypotheses, expressions, simulations, decisions, priors) and two
+plumbing tables: `catalog` caches datasets and fields so a dataset can be sampled without
+calling the platform each time, and `batches` keeps in-flight multi-simulations so a crash
+or a face check resumes by polling instead of simulating again.
+
+Integer ids are what the LLM cites: hypothesis 12 is "H12", prior 7 is "P7".
 """
 
 from datetime import datetime
@@ -24,149 +28,217 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from alpha_orchestrator.factory.util import utc_now
 
 
-def new_id() -> str:
-    """Return a new random UUID string."""
-    return str(uuid4())
-
-
-class FactoryBase(DeclarativeBase):
+class Base(DeclarativeBase):
     pass
 
 
-class CellState:
-    NEW = "NEW"  # known from the catalog, nothing spent yet
-    STUDYING = "STUDYING"  # health check: update period and filled coverage, by sampling
-    SURVEY = "SURVEY"  # sampled survey: does this dataset carry more signal than noise?
-    RESEARCH = "RESEARCH"  # signal found: budget allocated to strata by concentration
-    EXHAUSTED = "EXHAUSTED"  # finished; `plan["outcome"]` says how
-    SATURATED = "SATURATED"  # enough submissions from this dataset (concentration cap)
+class HStatus:
+    OPEN = "OPEN"
+    CLOSED = "CLOSED"
 
 
-class CandidateStatus:
+class Verdict:
+    """How a hypothesis ended. Memory B and prior updates read this."""
+
+    PASSED = "passed"  # an expression passed every gate and was stored for review
+    SUPPORTED = "supported"  # signal as predicted, but no expression reached the gates
+    IDEA_FAILED = "idea_failed"  # the claim did not hold
+    IMPLEMENTATION_FAILED = "implementation_failed"  # the claim was never tested properly
+    BUDGET = "budget"  # stopped by the program's budget or stopping rule
+    INVALID = "invalid"  # no valid output from the LLM
+
+
+class SimStatus:
     QUEUED = "QUEUED"
     RUNNING = "RUNNING"
     DONE = "DONE"
-    FAILED = "FAILED"  # platform error (bad field, operator, etc.)
-    INVALID = "INVALID"  # rejected locally before any simulation was spent
+    FAILED = "FAILED"
 
 
-class Stage:
-    PROFILE = "PROFILE"  # health probe (neutralization NONE, decay 0); read long/short counts
-    SURVEY = "SURVEY"  # one of the 4 fixed signal shapes on a sampled family
-    REFINE = "REFINE"  # a library structure around a family's best survey formula
-    COMBO = "COMBO"  # two fields combined (arm "llm" or "random", compared head to head)
-    IDEA = "IDEA"  # legacy: an idea's template expanded over its fields and windows
-    DIG = "DIG"  # legacy: variant written by the LLM around ore it found in review
-    SECOND = "SECOND"  # group operator wrapped around a survivor
-    THIRD = "THIRD"  # trade_when / timing wrapped around a survivor
-    REPAIR = "REPAIR"  # one-variable fix routed by the failing check
-    FLIP = "FLIP"  # multiply(-1, parent)
-    ROBUST = "ROBUST"  # stress variant of a candidate (rank, sign, perturbation, ...)
-    FIELD = "FIELD"  # Design step 5: one field in an idea's simplest form
-    # Enhance: liquidity/size-bucket grouping, then a trade condition, around a near miss
-    ENHANCE = "ENHANCE"
-    IMPROVE = "IMPROVE"  # Design step 7: one-change variant of a parent
-
-
-class HypothesisStatus:
-    PROPOSED = "PROPOSED"  # waiting for you (only when policy.hypotheses_need_approval)
-    APPROVED = "APPROVED"  # being tested
-    REJECTED = "REJECTED"  # you said no
-    RETIRED = "RETIRED"  # the LLM review dropped it, with a reason
-
-
-class ReviewStatus:
+class Review:
+    NONE = ""
     PENDING = "PENDING"
-    APPROVED = "APPROVED"
     SUBMITTED = "SUBMITTED"
     REJECTED = "REJECTED"
     FAILED = "FAILED"
 
 
-class CellORM(FactoryBase):
-    __tablename__ = "cells"
+class HypothesisORM(Base):
+    __tablename__ = "hypotheses"
 
-    cell_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    parent_id: Mapped[int | None] = mapped_column(ForeignKey("hypotheses.id"))  # revision of
+    source: Mapped[str] = mapped_column(String(16), default="factory")  # or "v7" (imported)
+    region: Mapped[str] = mapped_column(String(16))
+    delay: Mapped[int] = mapped_column(Integer, default=1)
+    universe: Mapped[str] = mapped_column(String(64), default="")
+    dataset_id: Mapped[str] = mapped_column(String(128))
+    dataset_name: Mapped[str] = mapped_column(String(255), default="")
+    category: Mapped[str] = mapped_column(String(64), default="")
+    field_id: Mapped[str] = mapped_column(String(255), default="")
+    field_type: Mapped[str] = mapped_column(String(16), default="")
+    field_description: Mapped[str] = mapped_column(Text, default="")
+    claim: Mapped[str] = mapped_column(Text, default="")  # the mechanism, in words
+    direction: Mapped[int] = mapped_column(Integer, default=0)  # +1 higher value -> long
+    hypothesis_type: Mapped[str] = mapped_column(String(32), default="unknown")
+    holding_days: Mapped[int] = mapped_column(Integer, default=21)
+    turnover_band: Mapped[str] = mapped_column(String(16), default="")
+    falsifier: Mapped[str] = mapped_column(Text, default="")
+    helper_fields: Mapped[list[str]] = mapped_column(JSON, default=list)
+    tags: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # set by the program
+    status: Mapped[str] = mapped_column(String(16), default=HStatus.OPEN)
+    verdict: Mapped[str] = mapped_column(String(32), default="")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    lesson: Mapped[str] = mapped_column(Text, default="")
+    round: Mapped[int] = mapped_column(Integer, default=0)
+    dry_rounds: Mapped[int] = mapped_column(Integer, default=0)
+    best_train_sharpe: Mapped[float] = mapped_column(Float, default=0.0)
+    sims_used: Mapped[int] = mapped_column(Integer, default=0)
+    sims_budget: Mapped[int] = mapped_column(Integer, default=12)
+    state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # loop bookkeeping
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ExpressionORM(Base):
+    __tablename__ = "expressions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    hypothesis_id: Mapped[int] = mapped_column(ForeignKey("hypotheses.id"))
+    parent_id: Mapped[int | None] = mapped_column(ForeignKey("expressions.id"))  # lineage
+    round: Mapped[int] = mapped_column(Integer, default=1)
+    origin: Mapped[str] = mapped_column(String(16), default="initial")  # initial/mutation
+    mutation: Mapped[str] = mapped_column(String(32), default="")  # declared change type
+    reason: Mapped[str] = mapped_column(Text, default="")
+    expression: Mapped[str] = mapped_column(Text)
+    canonical: Mapped[str] = mapped_column(Text, default="")
+    shape: Mapped[str] = mapped_column(Text, default="")
+    fields: Mapped[list[str]] = mapped_column(JSON, default=list)
+    operators: Mapped[int] = mapped_column(Integer, default=0)
+    nodes: Mapped[int] = mapped_column(Integer, default=0)
+    valid: Mapped[bool] = mapped_column(Boolean, default=True)
+    rejection: Mapped[str] = mapped_column(Text, default="")
+    decision_id: Mapped[int | None] = mapped_column(ForeignKey("decisions.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class SimulationORM(Base):
+    __tablename__ = "simulations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    expression_id: Mapped[int] = mapped_column(ForeignKey("expressions.id"))
+    hypothesis_id: Mapped[int] = mapped_column(ForeignKey("hypotheses.id"))
+    region: Mapped[str] = mapped_column(String(16))
+    delay: Mapped[int] = mapped_column(Integer)
+    settings: Mapped[dict[str, Any]] = mapped_column(JSON)
+    fingerprint: Mapped[str] = mapped_column(String(64), unique=True)
+    priority: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[str] = mapped_column(String(16), default=SimStatus.QUEUED)
+    batch_id: Mapped[str | None] = mapped_column(ForeignKey("batches.id"))
+    alpha_id: Mapped[str | None] = mapped_column(String(32))
+    # Train period: the only numbers the LLM ever sees.
+    train_sharpe: Mapped[float | None] = mapped_column(Float)
+    train_fitness: Mapped[float | None] = mapped_column(Float)
+    train_turnover: Mapped[float | None] = mapped_column(Float)
+    train_returns: Mapped[float | None] = mapped_column(Float)
+    train_margin: Mapped[float | None] = mapped_column(Float)
+    train_drawdown: Mapped[float | None] = mapped_column(Float)
+    # Test period: read only by the program's out-of-sample gate.
+    test_sharpe: Mapped[float | None] = mapped_column(Float)
+    test_fitness: Mapped[float | None] = mapped_column(Float)
+    test_returns: Mapped[float | None] = mapped_column(Float)
+    # Whole IS period (what the platform's submission checks use).
+    is_sharpe: Mapped[float | None] = mapped_column(Float)
+    is_fitness: Mapped[float | None] = mapped_column(Float)
+    is_turnover: Mapped[float | None] = mapped_column(Float)
+    is_returns: Mapped[float | None] = mapped_column(Float)
+    checks: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    fails: Mapped[str] = mapped_column(Text, default="")
+    train_pass: Mapped[bool] = mapped_column(Boolean, default=False)
+    oos_pass: Mapped[bool | None] = mapped_column(Boolean)
+    checks_pass: Mapped[bool | None] = mapped_column(Boolean)
+    gate_note: Mapped[str] = mapped_column(Text, default="")
+    review: Mapped[str] = mapped_column(String(16), default=Review.NONE)
+    review_note: Mapped[str] = mapped_column(Text, default="")
+    submission_check: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DecisionORM(Base):
+    __tablename__ = "decisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    hypothesis_id: Mapped[int | None] = mapped_column(ForeignKey("hypotheses.id"))
+    step: Mapped[str] = mapped_column(String(32))  # hypothesis/expression/diagnosis/decision
+    actor: Mapped[str] = mapped_column(String(16), default="llm")  # or "program" (override)
+    inputs: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    retrieved: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # ids shown
+    output: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    cited: Mapped[list[str]] = mapped_column(JSON, default=list)
+    flags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    prompt_version: Mapped[str] = mapped_column(String(64), default="")
+    model: Mapped[str] = mapped_column(String(64), default="")
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    attempts: Mapped[int] = mapped_column(Integer, default=1)
+    ok: Mapped[bool] = mapped_column(Boolean, default=True)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class PriorORM(Base):
+    __tablename__ = "priors"
+    __table_args__ = (UniqueConstraint("claim", "source_ref"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    claim: Mapped[str] = mapped_column(Text)
+    source_type: Mapped[str] = mapped_column(String(16))  # official / forum / own
+    source_ref: Mapped[str] = mapped_column(String(255), default="")
+    source_title: Mapped[str] = mapped_column(Text, default="")
+    quote: Mapped[str] = mapped_column(Text, default="")
+    tags: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # what it applies to
+    a: Mapped[float] = mapped_column(Float, default=1.0)  # Beta successes
+    b: Mapped[float] = mapped_column(Float, default=1.0)  # Beta failures
+    history: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    @property
+    def confidence(self) -> float:
+        """Mean of the Beta distribution."""
+        return self.a / (self.a + self.b)
+
+
+class CatalogORM(Base):
+    __tablename__ = "catalog"
+    __table_args__ = (
+        UniqueConstraint("kind", "region", "delay", "universe", "dataset_id", "field_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(8))  # dataset / field
     region: Mapped[str] = mapped_column(String(16))
     delay: Mapped[int] = mapped_column(Integer)
     universe: Mapped[str] = mapped_column(String(64))
     dataset_id: Mapped[str] = mapped_column(String(128))
     dataset_name: Mapped[str] = mapped_column(String(255), default="")
-    category: Mapped[str] = mapped_column(String(64), default="other")
+    category: Mapped[str] = mapped_column(String(64), default="")
+    field_id: Mapped[str] = mapped_column(String(255), default="")
+    field_type: Mapped[str] = mapped_column(String(16), default="")
     description: Mapped[str] = mapped_column(Text, default="")
-    multiplier: Mapped[float] = mapped_column(Float, default=1.0)
-    value_score: Mapped[float] = mapped_column(Float, default=0.0)
+    coverage: Mapped[float] = mapped_column(Float, default=0.0)
     alpha_count: Mapped[int] = mapped_column(Integer, default=0)
     user_count: Mapped[int] = mapped_column(Integer, default=0)
-    coverage: Mapped[float] = mapped_column(Float, default=0.0)
     field_count: Mapped[int] = mapped_column(Integer, default=0)
-    themes: Mapped[list[Any]] = mapped_column(JSON, default=list)
-    state: Mapped[str] = mapped_column(String(16), default=CellState.NEW)
-    rank_score: Mapped[float] = mapped_column(Float, default=0.0)
-    rank_reason: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    paper_refs: Mapped[int] = mapped_column(Integer, default=0)
-    rounds: Mapped[int] = mapped_column(Integer, default=0)  # LLM reviews done
-    rounds_without_ore: Mapped[int] = mapped_column(Integer, default=0)
-    hits: Mapped[int] = mapped_column(Integer, default=0)  # results with |sharpe| >= ore
-    stop_reason: Mapped[str] = mapped_column(Text, default="")
-    plan: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # phase state and outcome
-    sims_used: Mapped[int] = mapped_column(Integer, default=0)
-    submitted: Mapped[int] = mapped_column(Integer, default=0)
-    best_sharpe: Mapped[float] = mapped_column(Float, default=0.0)
-    active: Mapped[bool] = mapped_column(Boolean, default=True)
     refreshed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
-class FieldORM(FactoryBase):
-    __tablename__ = "fields"
-    __table_args__ = (UniqueConstraint("cell_id", "field_id"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    cell_id: Mapped[str] = mapped_column(ForeignKey("cells.cell_id"))
-    field_id: Mapped[str] = mapped_column(String(255))
-    type: Mapped[str] = mapped_column(String(16))
-    description: Mapped[str] = mapped_column(Text, default="")
-    coverage: Mapped[float] = mapped_column(Float, default=0.0)
-    alpha_count: Mapped[int] = mapped_column(Integer, default=0)
-    family: Mapped[str] = mapped_column(String(255), default="")
-    representative: Mapped[bool] = mapped_column(Boolean, default=False)
-    profile: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # health readings
-    prep: Mapped[str] = mapped_column(Text, default="{x}")  # how the field enters a template
-    stratum: Mapped[str] = mapped_column(String(255), default="")
-    eligible: Mapped[bool] = mapped_column(Boolean, default=True)
-    filled_coverage: Mapped[float | None] = mapped_column(Float)
-    survey: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # shape -> candidate id
-    survey_score: Mapped[float | None] = mapped_column(Float)  # best |Sharpe| over the shapes
-
-
-class HypothesisORM(FactoryBase):
-    __tablename__ = "hypotheses"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    cell_id: Mapped[str] = mapped_column(ForeignKey("cells.cell_id"))
-    title: Mapped[str] = mapped_column(String(255))
-    statement: Mapped[str] = mapped_column(Text)
-    direction: Mapped[str] = mapped_column(Text, default="")
-    fields: Mapped[list[str]] = mapped_column(JSON, default=list)
-    sources: Mapped[list[str]] = mapped_column(JSON, default=list)
-    template: Mapped[str] = mapped_column(Text, default="")
-    slots: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    windows: Mapped[list[int]] = mapped_column(JSON, default=list)
-    settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # decay, neutralization
-    status: Mapped[str] = mapped_column(String(16), default=HypothesisStatus.PROPOSED)
-    rounds: Mapped[int] = mapped_column(Integer, default=0)  # rounds queued
-    reviewed: Mapped[int] = mapped_column(Integer, default=0)  # rounds the LLM has judged
-    verdicts: Mapped[list[Any]] = mapped_column(JSON, default=list)  # review history
-    best_sharpe: Mapped[float] = mapped_column(Float, default=0.0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
-class BatchORM(FactoryBase):
+class BatchORM(Base):
     __tablename__ = "batches"
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     region: Mapped[str] = mapped_column(String(16))
     delay: Mapped[int] = mapped_column(Integer)
     location: Mapped[str] = mapped_column(String(512), default="")
@@ -174,137 +246,3 @@ class BatchORM(FactoryBase):
     status: Mapped[str] = mapped_column(String(16), default="RUNNING")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
-class CandidateORM(FactoryBase):
-    __tablename__ = "candidates"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    cell_id: Mapped[str] = mapped_column(ForeignKey("cells.cell_id"))
-    hypothesis_id: Mapped[str | None] = mapped_column(ForeignKey("hypotheses.id"))
-    parent_id: Mapped[str | None] = mapped_column(ForeignKey("candidates.id"))
-    stage: Mapped[str] = mapped_column(String(16))
-    role: Mapped[str] = mapped_column(String(64), default="")
-    change: Mapped[str] = mapped_column(Text, default="")
-    expression: Mapped[str] = mapped_column(Text)
-    settings: Mapped[dict[str, Any]] = mapped_column(JSON)
-    fingerprint: Mapped[str] = mapped_column(String(64), unique=True)
-    priority: Mapped[float] = mapped_column(Float, default=0.0)
-    status: Mapped[str] = mapped_column(String(16), default=CandidateStatus.QUEUED)
-    batch_id: Mapped[str | None] = mapped_column(ForeignKey("batches.id"))
-    alpha_id: Mapped[str | None] = mapped_column(String(32))
-    sharpe: Mapped[float | None] = mapped_column(Float)
-    fitness: Mapped[float | None] = mapped_column(Float)
-    turnover: Mapped[float | None] = mapped_column(Float)
-    returns: Mapped[float | None] = mapped_column(Float)
-    margin: Mapped[float | None] = mapped_column(Float)
-    drawdown: Mapped[float | None] = mapped_column(Float)
-    long_count: Mapped[int | None] = mapped_column(Integer)
-    short_count: Mapped[int | None] = mapped_column(Integer)
-    fails: Mapped[str] = mapped_column(Text, default="")
-    checks: Mapped[list[Any]] = mapped_column(JSON, default=list)
-    extra: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    error: Mapped[str | None] = mapped_column(Text)
-    evaluated: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
-class ReviewORM(FactoryBase):
-    __tablename__ = "reviews"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    candidate_id: Mapped[str] = mapped_column(ForeignKey("candidates.id"), unique=True)
-    alpha_id: Mapped[str] = mapped_column(String(32))
-    score: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    description: Mapped[str] = mapped_column(Text, default="")
-    status: Mapped[str] = mapped_column(String(16), default=ReviewStatus.PENDING)
-    note: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
-class LLMCallORM(FactoryBase):
-    __tablename__ = "llm_calls"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    purpose: Mapped[str] = mapped_column(String(64))
-    model: Mapped[str] = mapped_column(String(128))
-    request_hash: Mapped[str] = mapped_column(String(64), default="")
-    response_hash: Mapped[str] = mapped_column(String(64), default="")
-    system_hash: Mapped[str] = mapped_column(String(64), default="")
-    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)  # unused since 10/14
-    cost_cny: Mapped[float] = mapped_column(
-        Float, default=0.0
-    )  # Design Q9: what the LLM provider bills
-    ok: Mapped[bool] = mapped_column(Boolean, default=True)
-    error: Mapped[str | None] = mapped_column(Text)
-    idea_id: Mapped[str | None] = mapped_column(String(36))  # Design Q9: which idea paid for it
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-
-
-class IdeaORM(FactoryBase):
-    __tablename__ = "ideas"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    source: Mapped[str] = mapped_column(String(255))
-    title: Mapped[str] = mapped_column(Text)
-    url: Mapped[str] = mapped_column(Text, default="")
-    body: Mapped[str] = mapped_column(Text)
-    __table_args__ = (UniqueConstraint("source", "title"),)
-
-
-class IdeaStatus:
-    TESTING = "TESTING"  # first fields being simulated
-    PROMISING = "PROMISING"  # a field reached the continue line; being improved
-    DEAD = "DEAD"  # nothing reached the continue line
-    DONE = "DONE"  # improvement finished
-    RETIRED = "RETIRED"  # judged under an earlier design; ignored
-
-
-class ResearchIdeaORM(FactoryBase):
-    """One research idea on one dataset (design step 3)."""
-
-    __tablename__ = "research_ideas"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    cell_id: Mapped[str] = mapped_column(ForeignKey("cells.cell_id"))
-    title: Mapped[str] = mapped_column(Text)
-    mechanism: Mapped[str] = mapped_column(Text, default="")  # who wins, who loses, why it lasts
-    long_side: Mapped[str] = mapped_column(Text, default="")
-    short_side: Mapped[str] = mapped_column(Text, default="")
-    horizon_days: Mapped[int] = mapped_column(Integer, default=21)
-    form: Mapped[str] = mapped_column(Text, default="")  # simplest expression, one {X}
-    query: Mapped[str] = mapped_column(Text, default="")  # search words for narrowing fields
-    status: Mapped[str] = mapped_column(String(16), default=IdeaStatus.TESTING)
-    best_sharpe: Mapped[float] = mapped_column(Float, default=0.0)
-    extra: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-
-
-class IdeaFieldORM(FactoryBase):
-    """One field ranked for one idea (design step 4) and its first test (step 5)."""
-
-    __tablename__ = "idea_fields"
-    __table_args__ = (UniqueConstraint("idea_id", "field_id"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    idea_id: Mapped[str] = mapped_column(ForeignKey("research_ideas.id"))
-    field_id: Mapped[str] = mapped_column(String(255))
-    score: Mapped[int] = mapped_column(Integer, default=0)  # LLM relevance 0-10
-    reason: Mapped[str] = mapped_column(Text, default="")
-    measures: Mapped[str] = mapped_column(Text, default="")  # what it measures, per the LLM
-    rank: Mapped[int] = mapped_column(Integer, default=0)  # 1 = most relevant
-    candidate_id: Mapped[str | None] = mapped_column(ForeignKey("candidates.id"))
-
-
-class EventORM(FactoryBase):
-    __tablename__ = "events"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    kind: Mapped[str] = mapped_column(String(64))
-    cell_id: Mapped[str | None] = mapped_column(String(255))
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
