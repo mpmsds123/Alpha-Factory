@@ -70,7 +70,6 @@ select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 # flag every fullwidth CJK punctuation mark in prose comments as "ambiguous," which
 # is the norm, not a mistake, for a script whose only reader is its Chinese-speaking
 # author.
-"tools/*.py" = ["RUF001", "RUF002", "RUF003"]
 "src/alpha_orchestrator/factory/*.py" = ["RUF001", "RUF002", "RUF003"]
 # HTML template strings; wrapping them hurts readability more than long lines do.
 "src/alpha_orchestrator/factory/dashboard.py" = ["RUF001", "RUF002", "RUF003", "E501"]

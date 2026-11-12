@@ -261,7 +261,8 @@ class LiveBrainClient:
                 ErrorClass.AUTHENTICATION,
                 f"BRAIN session expires in {int(remaining)}s, below the "
                 f"{int(MINIMUM_SESSION_REMAINING_SECONDS)}s minimum: stopping cleanly "
-                "instead of risking a mid-run expiry. Run tools/取会话.py for a fresh one.",
+                "instead of risking a mid-run expiry. "
+                "Run scripts/refresh_session.py for a fresh one.",
             )
         # Recorded as a deadline on the monotonic clock, not the raw `remaining`
         # value, so later callers (mid-run, no new request) can tell how much is
