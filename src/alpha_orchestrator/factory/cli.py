@@ -23,6 +23,7 @@ from alpha_orchestrator.brain.notify import notify
 from alpha_orchestrator.brain.session import AuthenticationFailed, BrainSession, NeedBiometric
 from alpha_orchestrator.factory.config import DEFAULT_CONFIG, FactoryConfig, llm_key_available
 from alpha_orchestrator.factory.dashboard import render
+from alpha_orchestrator.factory.funnel import write_funnel
 from alpha_orchestrator.factory.ideas import import_ideas
 from alpha_orchestrator.factory.ledger import Ledger, WorkerAlreadyRunning
 from alpha_orchestrator.factory.llm import FactoryLLM
@@ -197,6 +198,10 @@ def run(
             write_progress(ledger, cfg, status)
         except Exception as exc:  # the progress file must never stop a run
             typer.echo(f"进度文件没写成：{exc}")
+        try:
+            write_funnel(ledger, cfg)
+        except Exception as exc:  # the funnel files must never stop a run either
+            typer.echo(f"漏斗文件没写成：{exc}")
 
     llm = _llm(cfg, ledger)
     if llm is None:
@@ -265,6 +270,13 @@ def run(
     typer.echo(msg + f"；停止原因：{report.stopped_because or '完成'}")
     typer.echo(f"研究记录：{record_path}")
     notify(msg)
+
+
+@app.command()
+def funnel(config: ConfigOpt = DEFAULT_CONFIG) -> None:
+    """只读：从账本重算漏斗，写 工厂_漏斗.csv 和 工厂_漏斗_原因.csv（不登录、不回测）。"""
+    cfg, ledger = _ctx(config)
+    typer.echo(f"漏斗：{write_funnel(ledger, cfg).resolve()}")
 
 
 @app.command()
