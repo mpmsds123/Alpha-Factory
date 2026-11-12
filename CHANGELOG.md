@@ -7,6 +7,29 @@ Operational detail that used to live in `docs/` is summarized in the entries bel
 Entry format for new days: **Ran** (what was run, in counts), **Found** (aggregate results
 only), **Changed** (code or design), **Open** (unresolved).
 
+## 2026-11-12 (v8: hypothesis factory)
+
+- Changed. Rebuilt around hypotheses instead of field x template. The program picks a
+  dataset (any delay-1 dataset, by Thompson draw on past round-1 results) and a field; the
+  LLM states a hypothesis and writes 1-3 expressions; after each round it diagnoses (idea
+  vs implementation) and decides mutate / revise / drop inside program budgets (12
+  simulations per hypothesis, 6 for one revision, round-1 gate 1.0, 3 improvement
+  rounds, 2 dry rounds). Children must make exactly the change they declare.
+- Changed. Every simulation holds out the last 2 years as a test period. The LLM sees
+  training numbers only; winners must keep a test Sharpe of 0.5 and then pass every
+  platform check. Submission gates are the official delay-1 numbers.
+- Changed. One new database with hypotheses, expressions, simulations, decisions and
+  priors. Every LLM answer is schema-checked, cites the retrieved records and priors it
+  used (uncited answers flagged) and is logged with prompt version, model and cost.
+  Priors carry a Beta confidence updated from the factory's own verdicts.
+- Changed. Daily LLM dollar cap and a dollars-per-stored-alpha guard; per-stage CSVs
+  written during runs.
+- Changed. Removed the earlier orchestrator, the v7 engine, the launchd scheduler and the
+  shell launcher. Platform vocabulary moved to a private folder; a test scans tracked
+  files for it.
+- Open. Not yet run against the platform. Thresholds measured on v7 (round-1 gate,
+  minimum gain) need re-measuring on train-period numbers.
+
 ## 2026-11-12
 
 - Found. Funnel of the v7 design (2026-11-03 to 11-11, about 2,930 simulations): 805 ideas,

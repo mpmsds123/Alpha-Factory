@@ -1,157 +1,129 @@
 # Alpha Factory
 
-An LLM-assisted research pipeline that searches for quantitative trading signals ("alphas")
-on a cloud backtesting platform, under a fixed daily simulation budget, and stops every
-result at human review.
+A research factory for daily cross-sectional equity signals on a simulation platform. An
+LLM proposes economic hypotheses and the expressions that test them; the program owns
+every budget, gate and stop. Nothing is ever submitted automatically.
 
 ## The problem
 
-Mining alphas by brute force (expanding templates over every data field) burns simulation
-quota on ideas with no economic reason behind them, and the few that pass are often noise
-that happened to clear a threshold. Doing it by hand does not scale. This project lets a
-language model propose *reasoned* research ideas while deterministic code owns everything
-that has to be trustworthy: budgets, validation, statistics, identity, crash recovery and
-the audit trail. Nothing is ever submitted automatically.
+Fixed-template scanners cover what their templates can express and nothing else. Free
+LLM generation covers more, but it overfits: thousands of loosely motivated variants,
+selected on in-sample results, look good and then fail out of sample. This factory tests
+**hypotheses**, not field × template combinations, and searches each one with a small,
+fixed budget, a stopping rule and a held-out period.
 
 ## How it works
 
-One run is one allocation day. The loop repeats until the daily budget, the time limit or
-the available ideas run out:
-
 ```
- pick a dataset ─► LLM groups its fields into economic ideas ─► LLM writes first formulas
- (scanner signal only)
-        ▲                                                          │
-        │                                        local validator rejects invalid ones
-        │                                                          ▼
- next idea / dataset ◄── idea dies (below the luck line) ◄── simulate on the platform
-                                                                   │ promising
-                                                                   ▼
-                      diagnose failed checks ─► pick fixes (menu + Thompson sampling)
-                                                                   │ passes the line
-                                                                   ▼
-                      robustness test ─► platform submission checks ─► review list
-                                                                   │
-                                                  you approve ─► submit (manual only)
+program: pick a dataset and a field        (Thompson draw; coverage, family, usage rules)
+LLM (a): hypothesis                         mechanism, direction, type, holding period,
+                                            expected turnover, falsifier
+LLM (b): 1-3 expressions                    checked locally: operators, arity, fields,
+                                            windows, direction, originality, repeats
+program: simulate                           with the last 2 years held out as a test period
+LLM (c): diagnosis                          idea supported / idea failed / implementation failed
+program: stopping rule                      round-1 gate, rounds, dry rounds, budget
+LLM (d): decision                           mutate (one declared change per child), revise, drop
+program: gates                              train numbers -> test period -> platform checks
+you:     review approve                     the only path that submits
 ```
 
-- **Scanner evidence first.** Only datasets and fields in which the separate template scanner
-  found signal are mined, and a first formula that repeats the structure of a formula the
-  scanner already ran is sent back as a rewrite rather than a new alpha.
-- **Ideas, not templates.** The LLM reads field descriptions and past outcomes and proposes
-  field groups with an economic rationale; every LLM call is budgeted and stored with hashes.
-- **Statistics before effort.** An idea whose best first formula does not clear the level
-  that noise alone would reach for that many tries is dropped instead of tuned.
-- **Bounded refinement.** Failed checks are mapped to a fixed menu of fixes; a Thompson-sampling
-  bandit chooses among them using the record of past repairs.
-- **Budget and recovery.** Simulations are reserved in a SQLite ledger *before* they are sent,
-  so a crash or restart never overspends or duplicates work; one worker owns one ledger, and an
-  ambiguous platform response blocks further runs until it is reconciled.
-- **Human control.** Survivors are re-checked by the platform and land on a review list.
-  `alpha-factory review approve` is the only code path that submits.
+* **Program layer** (never touched by the LLM): submission gates copied from the official
+  documentation, simulation budget per hypothesis (12; 6 for a revision), the stopping
+  rule, the out-of-sample gate, a daily LLM dollar cap and a dollars-per-passing-alpha
+  guard. Every number and its source is in `src/alpha_orchestrator/factory/config.py`.
+* **LLM layer**: four decision points, strict JSON validated against a schema. Each answer
+  must cite the memory records and priors it used; citing an id that was not retrieved
+  is an error, citing nothing is flagged. The LLM only ever sees training-period numbers.
+* **Memory A (priors)**: claims from documents, each with its source, a verbatim quote
+  and a Beta(a, b) confidence that the factory's own results update.
+* **Memory B (experience)**: one record per hypothesis. Records are retrieved by
+  program-defined tags (dataset category, region, field type, hypothesis type), never by
+  embeddings, and every decision logs which ids it was shown.
+* **Expressions are trees**: canonical text, structure shape, operator and node counts,
+  and the exact change between a child and its parent.
 
-The repository also contains **`alpha-lab`**, the earlier offline-first engine (replay
-adapter, method-card retrieval, narrow MCP server). It is kept working and is what the
-offline demo below exercises; `alpha-factory` is the current runtime.
+Prior art this borrows from: R&D-Agent(Q) (hypothesis → experiment → feedback that
+separates the idea from its implementation), AlphaAgent (originality against existing
+formulas, hypothesis-expression alignment, complexity limits), FunSearch/AlphaEvolve
+(a deterministic evaluator outside the LLM, best-so-far shown in the mutation prompt,
+each hypothesis its own island).
 
 ## Quick start
 
-Requires Python 3.11+ (verified on 3.12, macOS).
-
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-make install          # pinned versions from requirements.txt, then the package itself
-make check            # black, ruff, mypy and the full offline test suite
-make demo             # offline end-to-end run against a sanitized replay fixture
+python3 -m venv .venv && source .venv/bin/activate
+make install
 ```
 
-Tests and the demo never contact the platform or an LLM.
+### Private folder
 
-### Configure secrets
+Platform vocabulary never enters the repository. It lives in `~/.alpha_factory/private/`:
 
-Secrets come only from environment variables or private files outside the repository.
-Copy `.env.example` to `.env` (git-ignored), fill in what you use, and load it:
+* `platform.yaml`: the API address, the expression-language name, grouping identifiers,
+  operator sign rules, preferred universes, default neutralizations, document sources
+  that count as official, and the names of the language-notes files shown to the LLM
+* `factory.local.yaml`: machine-specific overrides of `factory.yaml` (paths, regions)
 
-```bash
-set -a; source .env; set +a
-```
+### Secrets
 
-| Purpose | Environment variable | Fallback |
-| --- | --- | --- |
-| LLM key for `alpha-factory` | `ALPHA_FACTORY_LLM_API_KEY` | `llm.key_file` in `factory.yaml` |
-| Platform login | `ALPHA_LAB_BRAIN_USERNAME`, `ALPHA_LAB_BRAIN_PASSWORD` | `BRAIN_CREDENTIALS_FILE` |
-| `alpha-lab` LLM and live session | `ALPHA_LAB_LLM_*`, `ALPHA_LAB_BRAIN_*` | none (offline) |
+* LLM key: `ALPHA_FACTORY_LLM_API_KEY`, or `{"api_key": "..."}` in the `llm.key_file`
+* Platform login: `ALPHA_LAB_BRAIN_USERNAME` / `ALPHA_LAB_BRAIN_PASSWORD`, or the
+  credentials file named by `BRAIN_CREDENTIALS_FILE`
 
-Credential files must be readable only by you (`chmod 600`).
-
-### Run the factory
+### Run
 
 ```bash
-alpha-factory doctor                  # read-only: budget, in-flight and blocked batches
-alpha-factory login --then-run        # complete the platform's verification, then run a day
-alpha-factory run                     # run one allocation day (resumes where it stopped)
-alpha-factory dashboard               # open the local dashboard
-alpha-factory funnel                  # read-only: rewrite the per-stage funnel CSVs in reports/
-alpha-factory review list             # candidates waiting for you
-alpha-factory review approve ID       # the only command that submits
-alpha-factory schedule install        # optional: daily run via macOS launchd
+alpha-factory memory import-v7        # once: earlier results become experience records
+alpha-factory priors seed             # once: claims from official documents (capped cost)
+alpha-factory login --then-run        # face check if asked, then a run of up to 12 hours
+alpha-factory review list             # alphas that passed every gate
+alpha-factory review approve <id>     # submit one (cannot be undone)
 ```
 
-If a run stops on an ambiguous batch, inspect it on the platform and reconnect it with
-`alpha-factory recover-batch BATCH_ID --location /simulations/VERIFIED_ID`; never delete it.
+`alpha-factory run`, `status`, `stats`, `priors add`, `review reject` and `recover-batch`
+are also available; each has `--help`. In VS Code, run
+`python -m alpha_orchestrator.factory.cli run` from the integrated terminal. Runs are
+started by hand; there is no scheduler.
 
 ## Configuration
 
-- **`factory.yaml`** overrides the defaults in `src/alpha_orchestrator/factory/config.py`,
-  where every tunable number carries a comment saying where it came from. Key settings:
-  daily simulation caps (`budget.v1_daily_cap`, `budget.daily_sim_cap`; the lower wins), the
-  quota reset time, pass thresholds, LLM models and the regions to search.
-- **Trial switches** (`direction_trial`, `refinement_trial`) turn on paired experiments that
-  compare an LLM choice with a random or fixed-rule control on the same inputs; both are off
-  by default and only descriptive until a stopping rule is frozen in advance.
-- **`alpha-lab` policies** (routing, limits, error taxonomy, correlation) are versioned YAML
-  files in `src/alpha_orchestrator/default_policies/`.
+`factory.yaml` overrides the defaults in `config.py` (budgets, cost caps, models per
+step, memory weights); the submission gates are not overridable. Progress is written
+during a run to `reports/` (git-ignored, it contains real expressions):
+
+| File | What |
+|---|---|
+| `stages.csv` | per quota day: counts entering and surviving each stage, LLM dollars |
+| `rejections.csv` | why expressions were rejected before simulation |
+| `by_prompt_model.csv` | calls, dollars and passing alphas per dollar by step, prompt version and model |
+| `hypotheses.csv` | Memory B, one row per hypothesis |
+| `priors.csv` | Memory A with current confidence |
+| `review_queue.csv` | alphas stored for review |
+
+The database (`~/.alpha_factory/factory_v8.db`) holds the tables `hypotheses`,
+`expressions` (with `parent_id` lineage), `simulations` (train, test and whole-period
+metrics apart), `decisions` (step, inputs, retrieved ids, output, citations, flags,
+prompt version, model, cost), `priors`, plus a catalog cache and in-flight batches.
 
 ## Safety boundaries and known limits
 
-- No automatic submission exists in any CLI command, MCP tool or adapter.
-- Local thresholds allocate research effort; they are not evidence of tradability. Offline
-  tests prove engineering controls (budget, recovery, identity), not alpha quality.
-- Missing, pending or erroneous platform checks never promote a candidate.
-- Live acceptance is staged (10, then 100, then the full daily cap on one ledger) and is
-  recorded in `CHANGELOG.md`; no economic edge is claimed.
-- Single worker, single SQLite ledger, one machine. Not built for distributed workloads.
-- Real expressions, results, reports and the ledger stay on the owner's machine
-  (see `.gitignore`).
-
-## Project layout
-
-```
-src/alpha_orchestrator/
-  factory/        alpha-factory: engine, scheduler, LLM layer, selection, reports, CLI
-  brain/          platform HTTP client, session handling, notifications
-  adapters/       alpha-lab adapters: fake, replay, live
-  orchestration/  alpha-lab run engine and platform checks
-  storage/        alpha-lab SQLAlchemy models and repository (migrations/ for Alembic)
-  gates/ domain/ knowledge/ llm/ mcp/ reporting/   shared rules, models and services
-  default_policies/ default_prompts/              packaged policies and prompts
-tests/            pytest suite (offline: fakes and replay fixtures only)
-scripts/          refresh_session.py (session cookie helper), daily_run.sh (alpha-lab day)
-seeds/            template file for the deterministic alpha-lab generator
-factory.yaml      factory configuration
-```
+* Only `review approve` submits; it re-runs the platform checks first.
+* One writer per database (OS file lock); interrupted batches are re-polled, never resent.
+* The out-of-sample gate is only as honest as its isolation: no prompt may contain a
+  test-period value (enforced in the LLM client), and nothing selects on it before the gate.
+* Thresholds marked "ledger" in `config.py` were measured on earlier runs and should be
+  re-measured once this design has its own data.
 
 ## Development
 
 ```bash
-make check                 # black --check, ruff, mypy (strict), pytest with coverage >= 85%
-black . && ruff check .    # format and lint
+make check   # black, ruff, mypy, pytest (coverage >= 85%)
 ```
 
-Commits follow [Conventional Commits](https://www.conventionalcommits.org/). History and
-live-run evidence are in [CHANGELOG.md](CHANGELOG.md).
+Tests use a made-up expression language and an in-memory platform; a guard test scans
+every tracked file for platform vocabulary.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT
