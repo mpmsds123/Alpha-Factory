@@ -35,7 +35,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from alpha_orchestrator.brain.api import BrainAPI
-from alpha_orchestrator.domain.models import utc_now
+from alpha_orchestrator.factory.util import utc_now
 from alpha_orchestrator.factory import generators as gen
 from alpha_orchestrator.factory import profile as prof
 from alpha_orchestrator.factory import stats

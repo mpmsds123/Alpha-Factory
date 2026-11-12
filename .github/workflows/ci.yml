@@ -15,5 +15,3 @@ jobs:
       - run: ruff check .
       - run: mypy src
       - run: pytest
-      - name: Offline demo
-        run: make demo

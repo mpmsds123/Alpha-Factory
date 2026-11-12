@@ -1,9 +1,0 @@
-# Not a guess: 0.7 is the reference client's own default for both self- and
-# prod-correlation checks (`ace_lib.py`: check_self_corr_test / check_prod_corr_test),
-# and matches the dedup cutoff this account's prior pipeline used, sourced to BRAIN
-# community post HQ17963. A candidate at or above this against either its own history
-# or production is redundant with something that already exists, per the platform's
-# own correlation numbers -- not the project's expression fingerprint, which cannot
-# see two different spellings of one signal.
-version: correlation.v1
-maximum_correlation: 0.70

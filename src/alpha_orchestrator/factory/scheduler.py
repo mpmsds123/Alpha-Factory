@@ -19,7 +19,7 @@ from sqlalchemy import select
 from alpha_orchestrator.brain.api import BrainAPI, simulation_payload
 from alpha_orchestrator.brain.client import AmbiguousRequest, RateLimited, SessionExpired
 from alpha_orchestrator.brain.session import AuthenticationFailed, NeedBiometric
-from alpha_orchestrator.domain.models import utc_now
+from alpha_orchestrator.factory.util import utc_now
 from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ledger import Ledger, fingerprint
 from alpha_orchestrator.factory.models import BatchORM, CandidateORM, CandidateStatus

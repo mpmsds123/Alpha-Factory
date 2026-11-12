@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
-from alpha_orchestrator.domain.identity import tokenize_expression
+from alpha_orchestrator.factory.util import tokenize_expression
 
 # Operators that rise with their FIRST input (the other inputs are windows, groups or flags).
 INCREASING = frozenset(
