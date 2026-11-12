@@ -630,8 +630,9 @@ class FactoryLLM:
                 "When present, signed_first_formula_sharpe is for the original preselected "
                 "formula aligned with the idea. A negative value suggests reconsidering the "
                 "direction or the proxy. Do not use the best Sharpe to override that sign.",
-                "A field marked scanner_found_signal passed an earlier template scan. It is "
-                "evidence, not a requirement.",
+                "A field marked scanner_found_signal passed an earlier template scan. Build "
+                "every group from such fields and propose a new economic relation, not the "
+                "template the scanner already ran.",
                 "Skip identifier and metadata fields (names, name lengths, tickers, codes, "
                 "classification labels): they carry no economic meaning.",
             ]
