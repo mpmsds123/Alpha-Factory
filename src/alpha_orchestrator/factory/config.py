@@ -1,8 +1,9 @@
-"""Every tunable number in one place, each with where it came from.
+"""Every number the program decides with, and where it came from.
 
-Sources: rules handbook = notes on the official documentation; API course = official API
-training 2026-04-29; AI course = the platform's official AI introduction; forum = community
-posts; history = 21,368 earlier simulations; Design Qn = question n of the design review.
+Program layer: the LLM never sees or changes anything in this file. Sources:
+  official docs   the platform's documentation pages, cited by page id and last-modified date
+  ledger          measurements on this factory's own earlier runs (date given)
+  arithmetic      a calculation shown next to the number
 """
 
 import json
@@ -15,41 +16,97 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
-# The repository root (this file is src/alpha_orchestrator/factory/config.py), so the
-# command works from any folder.
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG = REPO_ROOT / "factory.yaml"
+LLM_KEY_ENV = "ALPHA_FACTORY_LLM_API_KEY"
+LOCAL_OVERRIDES = "factory.local.yaml"  # in private_dir; read after factory.yaml
+
+
+@dataclass
+class Gates:
+    """Submission criteria, copied from the official docs page "Consultant Submission Tests"
+    (id consultant-submission-tests, last modified 2026-09-18). Delay-1 values."""
+
+    source: str = "consultant-submission-tests, 2026-09-18"
+    sharpe_min: float = 1.58  # "Greater than 1.58 for Delay 1"
+    sharpe_min_chn: float = 2.08  # CHN: "Sharpe >= 2.08, Returns >= 8% and Fitness >= 1.0"
+    returns_min_chn: float = 0.08
+    fitness_min: float = 1.0  # "Greater than 1 for Delay 1"
+    turnover_min: float = 0.01  # "Greater than 1% and less than 70%"
+    turnover_max: float = 0.70
+    corr_max: float = 0.7  # self- and production-correlation "Less than 0.7"
+
+    def sharpe_line(self, region: str) -> float:
+        """The Sharpe line for a region."""
+        return self.sharpe_min_chn if region == "CHN" else self.sharpe_min
+
+
+@dataclass
+class Search:
+    """How one hypothesis is searched and when it stops."""
+
+    # Official docs "Test Period" (test-period, 2026-09-18): the last N years of the 10-year
+    # IS become a test period; selection uses train numbers only, the test period judges
+    # the winners. 2 years: the IS-ladder test also starts from the most recent 2 years.
+    test_period: str = "P2Y"
+    first_round: int = 3  # spec: 1-3 expressions; v7 ideas also started with 3
+    # Ledger 2026-10-31: every idea that later reached 1.2 had a first formula >= 1.0.
+    # Theory for 3 noise formulas on 8 train years: 95% line = 0.354 x 2.39 = 0.85;
+    # measured noise per dataset was wider (sigma 0.36-0.58), so the measured line is used.
+    first_gate: float = 1.0
+    children: int = 3  # one-change children per improvement round
+    max_rounds: int = 3  # 3 + 3 x 3 = 12 simulations at most per hypothesis
+    hypothesis_budget: int = 12
+    # Ledger: the best of 3 variants correlated 0.7-0.87 beats its parent by 0.34-0.50 from
+    # noise alone, so a smaller gain is not evidence of improvement.
+    min_gain: float = 0.35
+    dry_rounds: int = 2  # two rounds in a row without min_gain end the search
+    near_miss: float = 1.2  # one step from the line: keep going up to max_rounds
+    # A claim revised after seeing results is the easiest way to overfit: one revision,
+    # with half the budget, counted as its own hypothesis.
+    max_revisions: int = 1
+    revision_budget: int = 6
+    impl_retry: int = 3  # extra simulations when round 1 is judged "implementation failed"
+    # Owner's decision (v7): above these the result is checked, never mined.
+    suspicious_sharpe: float = 3.0
+    suspicious_turnover: float = 0.70
+    # Out-of-sample gate on the 2-year test period. No-skill Sharpe on 2 years has spread
+    # 1/sqrt(2) = 0.71: noise clears 0.5 24% of the time; a real 1.58 alpha that loses 30%
+    # out of sample (1.1) clears it about 80% of the time.
+    oos_min_sharpe: float = 0.5
+    # Per dataset: 30 hypotheses x ~5 sims = ~150 sims (about 6 datasets a day); the forum
+    # advises <= 8 submissions per dataset. 10 misses in a row at the round-1 gate: a
+    # typical dataset (~20% of hypotheses clear it) does that 0.8^10 = 11% of the time.
+    dataset_hypotheses_max: int = 30
+    dataset_submissions_max: int = 8
+    dataset_dry_streak: int = 10
+    # Official docs "Understanding simulation limits": skip ID/date fields, one field per
+    # family of similar fields; earlier factory rule (official tip): coverage >= 60%.
+    min_field_coverage: float = 0.60
+    windows: tuple[int, ...] = (5, 21, 63, 126, 252)  # week, month, quarter, half, year
+    # Official docs "Clear these tests": Power Pool <= 8 operators, <= 3 data fields.
+    max_operators: int = 8
+    max_fields: int = 3
 
 
 @dataclass
 class Budget:
-    # 10 simulations in flight x 12 hours x 20 per hour (about 3 minutes each) = 2,400.
-    daily_sim_cap: int = 2400
-    # Factory allocation (decided 2026-10-12); the template scanner has its own 4,000
-    v1_daily_cap: int = 1000
-    active_datasets: int = 1  # Owner's decision: one dataset at a time
-    # Design Q6: the same 1,000 per dataset as the scanner, for a one-to-one comparison
-    dataset_sim_cap: int = 1000
-    health_sample: int = 40  # families sampled for the health check (update period, coverage)
-    survey_per_stratum: int = 2  # families sampled per stratum for the survey
-    survey_max_families: int = 100
-    round_size: int = 50  # simulations planned per allocation round once signal is found
-    refine_structures: int = 3  # structures tried per refinement round of one family
-    combo_count: int = 6  # combinations per arm (llm and random) per strong stratum
-    slots: int = 6  # upper bound; lowered automatically to what the platform accepts
-    children_per_slot: int = 10  # Platform rule: 10 alphas per multi-simulation
-    min_batch_interval_s: float = 20.0  # Forum reports: >3 batches / 10 min triggers 429 storms
-    quota_reserve: int = 0  # Explicit reserve outside this factory's own daily allocation.
+    daily_sim_cap: int = 1000  # this factory's own allocation per quota window
     quota_timezone: str = "America/Los_Angeles"
-    quota_reset_hour: int = 21  # Same allocation window as the existing 4,000/day scanner.
+    quota_reset_hour: int = 21  # the allocation window the scanner also uses
+    quota_reserve: int = 0
+    slots: int = 6  # upper bound; lowered to what the platform accepts, and remembered
+    children_per_slot: int = 10  # platform rule: 10 alphas per multi-simulation
+    min_batch_interval_s: float = 20.0  # forum: > 3 batches / 10 min triggers 429 storms
+    chunk: int = 20  # simulations between loop decisions
+    queue_cap: int = 40  # no new hypothesis while this many simulations wait or run
+    active_hypotheses: int = 8  # in flight at once, so the platform stays busy
 
     def __post_init__(self) -> None:
-        if any(v < 0 for v in (self.daily_sim_cap, self.v1_daily_cap, self.quota_reserve)):
-            raise ValueError("Daily caps and quota reserve must be nonnegative")
+        if self.daily_sim_cap < 0 or self.quota_reserve < 0:
+            raise ValueError("Daily cap and quota reserve must be nonnegative")
         if self.slots < 1 or not 1 <= self.children_per_slot <= 10:
             raise ValueError("Need at least one slot and 1-10 children per batch")
-        if self.min_batch_interval_s < 0:
-            raise ValueError("Batch interval must be nonnegative")
         if not 0 <= self.quota_reset_hour <= 23:
             raise ValueError("Quota reset hour must be 0-23")
         ZoneInfo(self.quota_timezone)
@@ -67,131 +124,143 @@ class Budget:
 
 
 @dataclass
-class Thresholds:
-    # Design Q5: 1/sqrt(10 years); measured 0.25-0.33 on scanner datasets without signal
-    noise_sigma: float = 0.316
-    # survey queueing line (not a pass line): noise reaches it 13% of the time
-    screen_line: float = 0.8
-    sprt_alpha: float = 0.05  # P(call a no-signal dataset "signal")
-    sprt_beta: float = 0.20  # P(miss a dataset with signal)
-    sprt_extra_hits: float = 0.12  # a dataset worth working has this many more hits than noise
-    # Default (pending owner review): coverage after filling one update period
-    min_filled_coverage: float = 0.50
-    min_coverage: float = 0.60  # Official tip 10: drop data covering fewer than 60% of stocks
-    # Owner's decision: above this the result is checked, never mined
-    suspicious_sharpe: float = 3.0
-    suspicious_turnover: float = 0.70
-    # Design Q5: the best of 3 variants correlated 0.7-0.87 beats its parent by 0.34-0.50
-    # from noise alone, so a smaller gain is not evidence of improvement.
-    refine_min_gain: float = 0.35
-    refine_max_rounds: int = 3  # Default (pending owner review)
-    submit_sharpe: float = 1.58  # Rules handbook: consultant D1
-    submit_sharpe_chn: float = 2.08
-    submit_fitness: float = 1.0
-    turnover_min: float = 0.01
-    turnover_max: float = 0.70
-    robust_keep_ratio: float = 0.5  # Research group: rank/sign variants keep >=50% of sharpe
-    pnl_corr_max: float = 0.7  # Platform rule: self/prod correlation < 0.7
-    dataset_cap: int = 8  # Forum: <=8-10 submissions per dataset
-    margin_bps: dict[str, float] = field(
-        default_factory=lambda: {"USA": 5.0, "CHN": 20.0, "IND": 20.0, "MEA": 20.0, "default": 15.0}
-    )  # Official AI course
+class Cost:
+    # Estimate: ~200 hypotheses/day x ~4 calls x ~$0.005 = ~$4, plus headroom.
+    daily_usd_cap: float = 5.0
+    # Owner's target: LLM dollars per passing alpha. Checked over a trailing window once
+    # enough has been spent for the ratio to mean something.
+    usd_per_pass_max: float = 1.6
+    guard_window_days: int = 7
+    guard_min_spend_usd: float = 5.0
 
 
 @dataclass
 class LLMConfig:
     base_url: str = "https://api.deepseek.com"
-    model: str = "deepseek-flash"  # grouping fields, descriptions
-    strong_model: str = "deepseek-v4-pro"  # combinations of fields
     key_file: str = "~/secrets/deepseek.json"
-    temperature: float = 0.4
-    timeout_s: float = 120.0
-    max_calls_per_day: int = 1000
-    max_completion_tokens: int = 4096
-    thinking: bool = False  # Keep bounded JSON output from being consumed by reasoning.
-    # Design Q9: yuan per million tokens [input cache miss, output], provider's official
-    # price page 2026-10-14; peak = Beijing Mon-Fri 9-12 and 14-18, all other hours off-peak
-    prices_cny: dict[str, dict[str, list[float]]] = field(
+    # Ideas and their first expressions decide everything downstream: stronger model.
+    # Diagnosis and decision are short, structured judgements: cheaper model. Every
+    # decision row records the model, so passing alphas per $ can overturn this.
+    models: dict[str, str] = field(
         default_factory=lambda: {
-            "deepseek-v4-pro": {"peak": [9.0, 27.0], "off": [4.5, 13.5]},
-            "deepseek-flash": {"peak": [2.0, 8.0], "off": [1.0, 4.0]},
+            "hypothesis": "deepseek-v4-pro",
+            "expression": "deepseek-v4-pro",
+            "diagnosis": "deepseek-flash",
+            "decision": "deepseek-flash",
+            "prior_seed": "deepseek-flash",
         }
     )
+    max_tokens: dict[str, int] = field(
+        default_factory=lambda: {
+            "hypothesis": 1200,
+            "expression": 1500,
+            "diagnosis": 800,
+            "decision": 1000,
+            "prior_seed": 1500,
+        }
+    )
+    temperature: float = 0.4
+    timeout_s: float = 120.0
+    thinking: bool = False  # keeps bounded JSON output from being consumed by reasoning
+    # Provider's official price page (api-docs.deepseek.com/quick_start/pricing, read
+    # 2026-11-12): USD per 1M tokens [input cache miss, output] at PEAK; off-peak is half.
+    # Peak hours: 01-04 and 06-10 UTC, Monday-Friday.
+    prices_usd_peak: dict[str, list[float]] = field(
+        default_factory=lambda: {
+            "deepseek-v4-pro": [1.32, 3.96],
+            "deepseek-flash": [0.30, 1.20],
+        }
+    )
+    peak_hours_utc: tuple[tuple[int, int], ...] = ((1, 4), (6, 10))
+
+
+@dataclass
+class Memory:
+    k_records: int = 5  # experience records shown per decision
+    k_priors: int = 5  # priors shown per decision
+    # Same kind of data and same kind of idea matter most; field type and region less.
+    weights: dict[str, int] = field(
+        default_factory=lambda: {
+            "category": 3,
+            "hypothesis_type": 2,
+            "field_type": 1,
+            "region": 1,
+        }
+    )
+    min_score: int = 3  # below this a record is not "similar"; nothing is shown
+    # Initial Beta(a, b) by source: worth about 4-5 observations, so a handful of the
+    # factory's own results can overturn a claim.
+    prior_seed: dict[str, list[float]] = field(
+        default_factory=lambda: {
+            "official": [3.0, 2.0],
+            "forum": [2.0, 2.0],
+            "own": [1.0, 1.0],
+        }
+    )
+    seed_usd_cap: float = 0.5  # one-time cost cap for extracting priors from documents
 
 
 @dataclass
 class Policy:
-    max_submissions_per_day: int = 4  # Platform rule
-    auto_submit: bool = False  # Design principle: you confirm every submission
-    regions: list[str] = field(default_factory=list)  # empty = every region you can access
-    delays: list[int] = field(default_factory=lambda: [1])
+    regions: list[str] = field(default_factory=list)  # empty = every region offered
+    delay: int = 1  # spec: delay-1 only for now
+    max_submissions_per_day: int = 4  # platform rule; submission is always by hand
 
 
 @dataclass
 class FactoryConfig:
-    db_path: str = "~/.alpha_factory/factory.db"
+    db_path: str = "~/.alpha_factory/factory_v8.db"
     reports_dir: str = "reports"
-    # Proposal 1: the template scanner's dataset-progress CSV; empty = off
-    scanner_progress: str = ""
-    # Design Q3: the scanner's runs folder; the factory only digs datasets it found worth digging
-    scanner_runs: str = ""
-    # Current design step 1: the pilot digs only these cells ("REGION|DELAY|UNIVERSE|dataset")
-    only_datasets: list[str] = field(default_factory=list)
-    quarantine_exception: dict[str, str] = field(default_factory=dict)
-    # Item 7: DeepSeek reads the whole pool of a dataset's ideas and proposes which to stop or
-    # enhance; the program checks every proposal. Off = fixed thresholds only (current design).
-    pool_review: bool = False
-    pool_review_max_calls: int = 10  # per dataset; about one review per 5 ideas
-    # v7 (2026-11-03, modelled on R&D-Agent(Q)): random dataset order, scanner fields marked
-    # instead of filtered, past ideas fed to idea generation, menu + Thompson-sampling
-    # refinement, 6 ideas in flight. "v6" keeps the earlier behaviour.
-    design: str = "v6"
-    direction_trial: bool = False  # v7: compare model-directed dataset research to random
-    refinement_trial: bool = False  # v7: compare one LLM and one rule choice on the same parent
+    private_dir: str = "~/.alpha_factory/private"  # platform vocabulary, never in the repo
+    scanner_runs: str = ""  # the template scanner's runs folder, for the originality check
+    v7_db: str = "~/.alpha_factory/factory.db"  # read-only source for `memory import-v7`
+    gates: Gates = field(default_factory=Gates)
+    search: Search = field(default_factory=Search)
     budget: Budget = field(default_factory=Budget)
-    thresholds: Thresholds = field(default_factory=Thresholds)
+    cost: Cost = field(default_factory=Cost)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    memory: Memory = field(default_factory=Memory)
     policy: Policy = field(default_factory=Policy)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "FactoryConfig":
-        """Load factory.yaml, falling back to defaults for missing keys."""
+        """Load factory.yaml, falling back to defaults for missing keys. Gates are not
+        overridable: they come from the official docs."""
         source = (path or DEFAULT_CONFIG).expanduser()
-        if not source.exists():
-            return cls(reports_dir=str(REPO_ROOT / cls.reports_dir))
-        raw: dict[str, Any] = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+        raw: dict[str, Any] = {}
+        if source.exists():
+            raw = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+        # Machine-specific values (personal paths) live next to the private vocabulary.
+        local = Path(raw.get("private_dir", cls.private_dir)).expanduser() / LOCAL_OVERRIDES
+        if local.is_file():
+            for key, value in (yaml.safe_load(local.read_text(encoding="utf-8")) or {}).items():
+                if isinstance(value, dict) and isinstance(raw.get(key), dict):
+                    raw[key] = {**raw[key], **value}
+                else:
+                    raw[key] = value
+        base = source.parent if source.exists() else REPO_ROOT
         reports = Path(raw.get("reports_dir", cls.reports_dir)).expanduser()
+        search = dict(raw.get("search") or {})
+        if "windows" in search:
+            search["windows"] = tuple(search["windows"])
+        llm = dict(raw.get("llm") or {})
+        defaults = LLMConfig()
+        for key in ("models", "max_tokens", "prices_usd_peak"):
+            if key in llm:
+                llm[key] = {**getattr(defaults, key), **llm[key]}
         return cls(
             db_path=raw.get("db_path", cls.db_path),
-            reports_dir=str(reports if reports.is_absolute() else source.parent / reports),
-            scanner_progress=raw.get("scanner_progress", cls.scanner_progress),
+            reports_dir=str(reports if reports.is_absolute() else base / reports),
+            private_dir=raw.get("private_dir", cls.private_dir),
             scanner_runs=raw.get("scanner_runs", cls.scanner_runs),
-            only_datasets=list(raw.get("only_datasets") or []),
-            quarantine_exception=dict(raw.get("quarantine_exception") or {}),
-            pool_review=bool(raw.get("pool_review", cls.pool_review)),
-            pool_review_max_calls=int(raw.get("pool_review_max_calls", cls.pool_review_max_calls)),
-            design=str(raw.get("design", cls.design)),
-            direction_trial=bool(raw.get("direction_trial", cls.direction_trial)),
-            refinement_trial=raw.get("refinement_trial", cls.refinement_trial) is True,
-            budget=Budget(**raw.get("budget", {})),
-            thresholds=Thresholds(**raw.get("thresholds", {})),
-            llm=LLMConfig(**raw.get("llm", {})),
-            policy=Policy(**raw.get("policy", {})),
+            v7_db=raw.get("v7_db", cls.v7_db),
+            search=Search(**search),
+            budget=Budget(**(raw.get("budget") or {})),
+            cost=Cost(**(raw.get("cost") or {})),
+            llm=LLMConfig(**llm),
+            memory=Memory(**(raw.get("memory") or {})),
+            policy=Policy(**(raw.get("policy") or {})),
         )
-
-    def margin_floor(self, region: str) -> float:
-        """Return the minimum margin (basis points) for a region."""
-        table = self.thresholds.margin_bps
-        return table.get(region, table["default"])
-
-    def sharpe_floor(self, region: str) -> float:
-        """Return the submission Sharpe line for a region."""
-        t = self.thresholds
-        return t.submit_sharpe_chn if region == "CHN" else t.submit_sharpe
-
-
-# Environment variable that, when set, supplies the factory's LLM key instead of key_file.
-LLM_KEY_ENV = "ALPHA_FACTORY_LLM_API_KEY"
 
 
 def llm_key_available(path: str) -> bool:
@@ -200,10 +269,7 @@ def llm_key_available(path: str) -> bool:
 
 
 def load_llm_key(path: str) -> str:
-    """Read the LLM key at call time (environment first, then the key file).
-
-    The key is never copied into the repository or the ledger.
-    """
+    """Read the LLM key at call time (environment first, then the key file)."""
     from_env = os.environ.get(LLM_KEY_ENV)
     if from_env:
         return from_env
