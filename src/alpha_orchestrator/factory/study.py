@@ -255,12 +255,52 @@ SIGNAL_SHARPE = 1.58  # 11/02: a field "has signal" once any scanner template on
 ORDER_FILE = re.compile(r"^([A-Z]+)_(.+?)(?:_v\d+)?_\d阶\.csv$")
 
 
+# 11/12: the scanner now keeps every result in one master table instead of one file per
+# dataset and order. Its field column may hold a field wrapped in a reducer, so every
+# identifier in it is kept; load_fields intersects them with the dataset's real field ids.
+MASTER_FILE = "alpha总表.csv"
+MASTER_REGION, MASTER_DATASET, MASTER_FIELD, MASTER_FORMULA = "地区", "数据集", "字段", "公式"
+IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _signal(r: dict[str, str]) -> bool:
+    try:
+        sharpe, turnover = abs(float(r["sharpe"])), float(r["turnover"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return sharpe >= SIGNAL_SHARPE and 0.01 <= turnover <= 0.70
+
+
+def scanner_master_rows(folder: str, region: str, dataset: str) -> list[dict[str, str]] | None:
+    """The master-table rows of one dataset; None when the table is missing or the scanner
+    never ran this dataset."""
+    path = Path(folder).expanduser() / MASTER_FILE
+    if not path.is_file():
+        return None
+    with path.open(encoding="utf-8-sig", newline="") as fh:
+        rows = [
+            r
+            for r in csv.DictReader(fh)
+            if (r.get(MASTER_REGION), r.get(MASTER_DATASET)) == (region, dataset)
+        ]
+    return rows or None
+
+
 def scanner_signal_fields(folder: str, region: str, dataset: str) -> set[str] | None:
-    """Field ids the template scanner found signal in for this dataset, from all of its
-    order files. None when the scanner has no results for the dataset at all."""
+    """Field ids the template scanner found signal in for this dataset, from its master
+    table or, for older scanner runs, its per-order files. None when the scanner has no
+    results for the dataset at all."""
     root = Path(folder).expanduser()
     if not root.is_dir():
         return None
+    master = scanner_master_rows(folder, region, dataset)
+    if master is not None:
+        return {
+            token
+            for r in master
+            if _signal(r)
+            for token in IDENTIFIER.findall(r.get(MASTER_FIELD) or "")
+        }
     seen = False
     hits: set[str] = set()
     logs = sorted(root.glob("*.csv")) + sorted((root / "机器记录").glob("*.csv"))
