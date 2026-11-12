@@ -131,3 +131,24 @@ def test_v7_day_uses_scanner_fields_and_skips_scanner_formulas(tmp_path: Path) -
         assert any(i.extra.get("unoriginal") for i in ideas)
         shapes = {eng._formula_shape(c.expression) for c in s.scalars(select(CandidateORM))}
         assert eng._formula_shape(firsts[0]) not in shapes
+
+
+def test_dataset_opened_before_scanner_only_mining_gets_no_new_ideas(tmp_path: Path) -> None:
+    from alpha_orchestrator.factory import engine as eng
+    from alpha_orchestrator.factory.models import CellState
+
+    ledger = Ledger("sqlite://")
+    with ledger.session() as s:
+        old, new = _cell("old"), _cell("new")
+        old.state = new.state = CellState.RESEARCH
+        old.plan = {"design": "v7"}
+        new.plan = {"design": "v7", "scanner_fields": ["f_hit"]}
+        s.add_all([old, new])
+    config = FactoryConfig(design="v7", scanner_runs=str(tmp_path))
+    engine = eng.Engine(None, ledger, config, None, None)  # type: ignore[arg-type]
+    assert engine._dataset_finished("USA|1|TOP3000|old")
+    assert not engine._dataset_finished("USA|1|TOP3000|new")
+    engine._close_dataset("USA|1|TOP3000|old")
+    with ledger.session() as s:
+        cell = s.get(CellORM, "USA|1|TOP3000|old")
+        assert cell is not None and cell.stop_reason.startswith("opened before scanner-only")

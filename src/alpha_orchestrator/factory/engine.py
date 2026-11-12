@@ -489,6 +489,8 @@ class Engine:
             spent = cell.sims_used - int(plan.get("sims_at_open", 0))
             if spent >= self.config.budget.dataset_sim_cap:
                 return True
+            if _opened_without_scanner(plan, self.config):
+                return True  # its in-flight ideas finish; no new idea is opened on it
             if (
                 plan.get("groups") is not None
                 and int(plan.get("next_group", 0)) >= len(plan["groups"])
@@ -536,12 +538,16 @@ class Engine:
                     "direction_result": {"settled": spent, "regular_candidates": len(hits)},
                 }
             why = (
-                "no usable field groups"
-                if plan.get("no_usable_groups")
+                "opened before scanner-only mining"
+                if _opened_without_scanner(plan, self.config)
                 else (
-                    "budget spent"
-                    if spent >= self.config.budget.dataset_sim_cap
-                    else "no valid new idea twice in a row"
+                    "no usable field groups"
+                    if plan.get("no_usable_groups")
+                    else (
+                        "budget spent"
+                        if spent >= self.config.budget.dataset_sim_cap
+                        else "no valid new idea twice in a row"
+                    )
                 )
             )
             cell.stop_reason = (
@@ -1865,6 +1871,11 @@ class Engine:
 
 
 # ======================= small pieces =======================
+def _opened_without_scanner(plan: dict[str, Any], config: FactoryConfig) -> bool:
+    """A dataset opened before 11/12, when v7 ignored the scanner's signal fields."""
+    return bool(config.scanner_runs) and "scanner_fields" not in plan
+
+
 def _int(v: Any, default: int) -> int:
     try:
         return int(v)
