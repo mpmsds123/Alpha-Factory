@@ -17,6 +17,7 @@ import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, select
@@ -464,10 +465,8 @@ class FactoryLLM:
     # ---------- v4 (现行设计, 10/14 晚) + cnhkmcp guides (10/15) ----------
     @staticmethod
     def guide(name: str) -> str:
-        """cnhkmcp's fixed guidance documents, copied into prompts/guides/."""
-        from alpha_orchestrator.factory.config import REPO_ROOT
-
-        path = REPO_ROOT / "prompts" / "guides" / f"{name}.md"
+        """Return a packaged guidance document from default_prompts/guides/ ("" if absent)."""
+        path = Path(__file__).resolve().parents[1] / "default_prompts" / "guides" / f"{name}.md"
         return path.read_text(encoding="utf-8") if path.exists() else ""
 
     def experiment_proposal(

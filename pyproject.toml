@@ -40,7 +40,7 @@ alpha-factory = "alpha_orchestrator.factory.cli:app"
 where = ["src"]
 
 [tool.setuptools.package-data]
-alpha_orchestrator = ["default_policies/*.yaml", "default_policies/*.json", "default_prompts/*.md"]
+alpha_orchestrator = ["default_policies/*.yaml", "default_policies/*.json", "default_prompts/*.md", "default_prompts/guides/*.md"]
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers --cov=alpha_orchestrator --cov-branch --cov-report=term-missing --cov-fail-under=85"
