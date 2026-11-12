@@ -21,6 +21,8 @@ import httpx
 
 API_URL = "https://api.worldquantbrain.com"
 DEFAULT_CREDENTIALS = Path("~/secrets/platform-brain.json")
+USERNAME_ENV = "ALPHA_LAB_BRAIN_USERNAME"
+PASSWORD_ENV = "ALPHA_LAB_BRAIN_PASSWORD"
 DEFAULT_STATE_DIR = Path("~/.alpha_factory")
 RELOGIN_COOLDOWN_SECONDS = 1800.0
 
@@ -44,6 +46,15 @@ class Credentials:
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Credentials":
+        """Load credentials from the environment, else from a private JSON file.
+
+        ALPHA_LAB_BRAIN_USERNAME and ALPHA_LAB_BRAIN_PASSWORD win when both are set and
+        no explicit path is given; otherwise the file at ``path``, BRAIN_CREDENTIALS_FILE
+        or ~/secrets/platform-brain.json is read.
+        """
+        user, password = os.getenv(USERNAME_ENV, ""), os.getenv(PASSWORD_ENV, "")
+        if path is None and user and password:
+            return cls(email=user, password=password)
         source = path or Path(os.getenv("BRAIN_CREDENTIALS_FILE", str(DEFAULT_CREDENTIALS)))
         data = json.loads(source.expanduser().read_text(encoding="utf-8"))
         if isinstance(data, list) and len(data) == 2:
