@@ -298,9 +298,22 @@ def import_v7(s: Session, db_path: str) -> int:
         con.close()
     n = 0
     for (
-        _rid, status, title, mechanism, best, _created, why, field_id,
-        region, delay, universe, dataset_id, dataset_name, category, sims,
-    ) in rows:  # fmt: skip
+        _rid,
+        status,
+        title,
+        mechanism,
+        best,
+        _created,
+        why,
+        field_id,
+        region,
+        delay,
+        universe,
+        dataset_id,
+        dataset_name,
+        category,
+        sims,
+    ) in rows:
         verdict = _v7_verdict(status, why)
         if verdict == Verdict.INVALID:
             continue

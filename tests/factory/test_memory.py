@@ -55,21 +55,48 @@ def test_prior_retrieval_and_update() -> None:
     ledger = Ledger("sqlite://")
     with ledger.session() as s:
         general = memory.add_prior(
-            s, claim="c1", source_type="official", source_ref="doc:1", source_title="t",
-            quote="q" * 10, tags={}, cfg=CFG,
-        )  # fmt: skip
+            s,
+            claim="c1",
+            source_type="official",
+            source_ref="doc:1",
+            source_title="t",
+            quote="q" * 10,
+            tags={},
+            cfg=CFG,
+        )
         specific = memory.add_prior(
-            s, claim="c2", source_type="forum", source_ref="doc:2", source_title="t",
-            quote="q" * 10, tags={"categories": ["cat_a"]}, cfg=CFG,
-        )  # fmt: skip
+            s,
+            claim="c2",
+            source_type="forum",
+            source_ref="doc:2",
+            source_title="t",
+            quote="q" * 10,
+            tags={"categories": ["cat_a"]},
+            cfg=CFG,
+        )
         memory.add_prior(
-            s, claim="c3", source_type="own", source_ref="x", source_title="t", quote="",
-            tags={"hypothesis_types": ["level"]}, cfg=CFG,
-        )  # fmt: skip
-        assert memory.add_prior(
-            s, claim="c1", source_type="official", source_ref="doc:1", source_title="t",
-            quote="", tags={}, cfg=CFG,
-        ) is None  # fmt: skip
+            s,
+            claim="c3",
+            source_type="own",
+            source_ref="x",
+            source_title="t",
+            quote="",
+            tags={"hypothesis_types": ["level"]},
+            cfg=CFG,
+        )
+        assert (
+            memory.add_prior(
+                s,
+                claim="c1",
+                source_type="official",
+                source_ref="doc:1",
+                source_title="t",
+                quote="",
+                tags={},
+                cfg=CFG,
+            )
+            is None
+        )
         assert general is not None and specific is not None
         got = memory.retrieve_priors(s, {"category": "cat_a", "hypothesis_type": "reversal"}, CFG)
         assert [p.id for p in got] == [specific.id, general.id]
@@ -99,8 +126,12 @@ def test_seed_keeps_only_quoted_claims_and_stops_at_cap() -> None:
     spent = iter([0.0, 0.0, 9.0])
     counts = memory.seed_priors(ledger.session, docs, lambda d: claims, CFG, lambda: next(spent))
     assert counts == {
-        "documents": 1, "claims": 2, "kept": 1, "quote_not_found": 1, "stopped_at_cap": 1
-    }  # fmt: skip
+        "documents": 1,
+        "claims": 2,
+        "kept": 1,
+        "quote_not_found": 1,
+        "stopped_at_cap": 1,
+    }
     with ledger.session() as s:
         p = s.query(PriorORM).one()
         assert (p.source_ref, p.tags["categories"], p.confidence) == ("doc:1", ["news"], 0.6)

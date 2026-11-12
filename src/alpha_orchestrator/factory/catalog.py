@@ -1,150 +1,151 @@
-"""Daily catalog refresh: which cells exist, what the platform pays for each, what you own.
+"""The catalog cache: which datasets exist per region (delay 1), and their fields.
 
-A cell is (region, delay, universe, dataset). The universe per region is the broadest one
-your account offers, because sub-universe tests are easier to pass from a wide pool
-(rules handbook) and the IQC runs used the same choice.
+Dataset lists are refreshed once a day; a dataset's fields are fetched when the sampler
+first opens it. The universe per region is the broadest one offered (wide pools pass the
+sub-universe test more easily), unless the private vocabulary names one.
 """
 
-from collections import Counter
 from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from alpha_orchestrator.brain.api import BrainAPI
 from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ledger import Ledger
-from alpha_orchestrator.factory.models import CellORM
+from alpha_orchestrator.factory.models import CatalogORM
 from alpha_orchestrator.factory.util import utc_now
+from alpha_orchestrator.factory.vocab import Vocabulary
 
-PREFERRED_UNIVERSE = {
-    "USA": "TOP3000",
-    "EUR": "TOP2500",
-    "ASI": "MINVOL1M",
-    "GLB": "TOP3000",
-    "CHN": "TOP2000U",
-    "IND": "TOP500",
-    "JPN": "TOP1600",
-    "KOR": "TOP600",
-    "TWN": "TOP500",
-    "HKG": "TOP500",
-    "AMR": "TOP600",
-}
+MIN_DATASET_FIELDS = 3  # a dataset with fewer fields offers nothing to sample
+STALE_HOURS = 20.0  # refresh once per day
 
 
-def cell_id(region: str, delay: int, universe: str, dataset_id: str) -> str:
-    """Return the ledger key of a (region, delay, universe, dataset) cell."""
-    return f"{region}|{delay}|{universe}|{dataset_id}"
-
-
-def pick_universe(region: str, offered: list[str]) -> str | None:
-    """Choose the broadest universe the region offers."""
-    preferred = PREFERRED_UNIVERSE.get(region)
-    if preferred in offered:
-        return preferred
+def pick_universe(region: str, offered: list[str], preferred: Mapping[str, str]) -> str | None:
+    """The preferred universe when offered, else the largest TOP<n>, else the first."""
+    if preferred.get(region) in offered:
+        return preferred[region]
     tops = sorted(
         (u for u in offered if u.startswith("TOP") and u[3:].isdigit()), key=lambda u: -int(u[3:])
     )
     return tops[0] if tops else (offered[0] if offered else None)
 
 
-def upsert_cells(
+def _upsert(s: Session, kind: str, key: dict[str, Any], values: dict[str, Any]) -> None:
+    row = s.scalar(
+        select(CatalogORM).where(
+            CatalogORM.kind == kind,
+            CatalogORM.region == key["region"],
+            CatalogORM.delay == key["delay"],
+            CatalogORM.universe == key["universe"],
+            CatalogORM.dataset_id == key["dataset_id"],
+            CatalogORM.field_id == key.get("field_id", ""),
+        )
+    )
+    if row is None:
+        row = CatalogORM(kind=kind, **key)
+        s.add(row)
+    for k, v in values.items():
+        setattr(row, k, v)
+    row.refreshed_at = utc_now()
+
+
+def _category(row: Mapping[str, Any]) -> str:
+    cat = row.get("category") or ""
+    return str(cat.get("id") if isinstance(cat, dict) else cat).lower()
+
+
+def upsert_datasets(
     s: Session, rows: Iterable[Mapping[str, Any]], region: str, delay: int, universe: str
 ) -> int:
-    """Insert or update catalog cells from a dataset listing; return the count."""
-    now = utc_now()
-    count = 0
-    for row in rows:
-        cid = cell_id(region, delay, universe, str(row["id"]))
-        cell = s.get(CellORM, cid) or CellORM(
-            cell_id=cid, region=region, delay=delay, universe=universe, dataset_id=str(row["id"])
-        )
-        category = row.get("category") or {}
-        cell.dataset_name = str(row.get("name") or "")
-        cell.category = str(
-            category.get("id") if isinstance(category, dict) else category or "other"
-        )
-        cell.description = str(row.get("description") or "")[:4000]
-        cell.multiplier = float(row.get("pyramidMultiplier") or 1.0)
-        cell.value_score = float(row.get("valueScore") or 0.0)
-        cell.alpha_count = int(row.get("alphaCount") or 0)
-        cell.user_count = int(row.get("userCount") or 0)
-        cell.coverage = float(row.get("coverage") or 0.0)
-        cell.field_count = int(row.get("fieldCount") or 0)
-        cell.themes = list(row.get("themes") or [])
-        cell.active = True
-        cell.refreshed_at = now
-        s.add(cell)
-        count += 1
-    return count
-
-
-def refresh(api: BrainAPI, ledger: Ledger, config: FactoryConfig) -> dict[str, Any]:
-    """Refresh the dataset catalog for every allowed region and record a summary."""
-    options = api.simulation_options()
-    regions = config.policy.regions or sorted(options)
-    summary: dict[str, Any] = {"regions": {}}
-    for region in regions:
-        offered = options.get(region)
-        if not offered:
+    """Insert or update dataset rows; return how many were kept."""
+    n = 0
+    for r in rows:
+        if int(r.get("fieldCount") or 0) < MIN_DATASET_FIELDS:
             continue
-        universe = pick_universe(region, offered["universes"])
-        if universe is None:
-            continue
-        for delay in config.policy.delays:
-            if delay not in offered["delays"]:
-                continue
-            rows = [
-                r
-                for r in api.datasets(region, delay, universe)
-                if int(r.get("fieldCount") or 0) >= 3
-            ]
-            with ledger.session() as s:
-                n = upsert_cells(s, rows, region, delay, universe)
-                ledger.log(s, "catalog", region=region, delay=delay, universe=universe, cells=n)
-            summary["regions"][f"{region}/D{delay}/{universe}"] = n
-    with ledger.session() as s:
-        ledger.log(
+        key = {"region": region, "delay": delay, "universe": universe, "dataset_id": str(r["id"])}
+        _upsert(
             s,
-            "pyramids",
-            counts={
-                f"{k[0]}|{k[1]}|{k[2]}": v for k, v in pyramid_counts(api.pyramid_alphas()).items()
+            "dataset",
+            key,
+            {
+                "dataset_name": str(r.get("name") or ""),
+                "category": _category(r),
+                "description": str(r.get("description") or "")[:4000],
+                "coverage": float(r.get("coverage") or 0.0),
+                "alpha_count": int(r.get("alphaCount") or 0),
+                "user_count": int(r.get("userCount") or 0),
+                "field_count": int(r.get("fieldCount") or 0),
             },
         )
-    return summary
+        n += 1
+    return n
 
 
-def pyramid_counts(records: Iterable[Mapping[str, Any]]) -> Counter[tuple[str, int, str]]:
-    """Your submissions per (region, delay, category) this quarter. Tolerates both the
-    nested ({"region":..., "category": {"id":...}, "alphaCount": n}) and the flat
-    ({"pyramid": "USA/D1/ANALYST", "count": n}) shapes the platform has returned."""
-    out: Counter[tuple[str, int, str]] = Counter()
-    for r in records:
-        if "pyramid" in r and isinstance(r["pyramid"], str):
-            parts = r["pyramid"].split("/")
-            if len(parts) == 3:
-                key = (parts[0], int(parts[1].lstrip("Dd") or 1), parts[2].lower())
-                out[key] += int(r.get("count") or r.get("alphaCount") or 0)
+def refresh(api: BrainAPI, ledger: Ledger, config: FactoryConfig, vocab: Vocabulary) -> int:
+    """Refresh the dataset list of every allowed region at the configured delay."""
+    options = api.simulation_options()
+    regions = config.policy.regions or sorted(options)
+    total = 0
+    for region in regions:
+        offered = options.get(region)
+        if not offered or config.policy.delay not in offered["delays"]:
             continue
-        category = r.get("category")
-        cat = category.get("id") if isinstance(category, dict) else category
-        if r.get("region") and cat is not None:
-            key = (str(r["region"]), int(r.get("delay", 1)), str(cat).lower())
-            out[key] += int(r.get("alphaCount") or r.get("count") or 0)
-    return out
+        universe = pick_universe(region, offered["universes"], vocab.preferred_universe)
+        if universe is None:
+            continue
+        rows = api.datasets(region, config.policy.delay, universe)
+        with ledger.session() as s:
+            n = upsert_datasets(s, rows, region, config.policy.delay, universe)
+        ledger.log("catalog", region=region, universe=universe, datasets=n)
+        total += n
+    return total
 
 
-def latest_pyramid_counts(s: Session) -> Counter[tuple[str, int, str]]:
-    """Return the most recently recorded alpha counts per pyramid."""
-    from alpha_orchestrator.factory.models import EventORM
+def is_stale(ledger: Ledger, now: datetime | None = None) -> bool:
+    """True when the dataset list was never loaded or is older than a day."""
+    with ledger.session() as s:
+        last = s.scalar(
+            select(func.max(CatalogORM.refreshed_at)).where(CatalogORM.kind == "dataset")
+        )
+    if last is None:
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=UTC)
+    return (now or datetime.now(UTC)) - last > timedelta(hours=STALE_HOURS)
 
-    event = s.scalar(
-        select(EventORM).where(EventORM.kind == "pyramids").order_by(EventORM.id.desc()).limit(1)
-    )
-    out: Counter[tuple[str, int, str]] = Counter()
-    if event:
-        for key, value in (event.payload.get("counts") or {}).items():
-            region, delay, cat = key.split("|")
-            out[(region, int(delay), cat)] = int(value)
-    return out
+
+def load_fields(api: BrainAPI, ledger: Ledger, dataset: CatalogORM) -> int:
+    """Fetch and cache one dataset's fields."""
+    rows = api.datafields(dataset.region, dataset.delay, dataset.universe, dataset.dataset_id)
+    n = 0
+    with ledger.session() as s:
+        for r in rows:
+            if not r.get("id"):
+                continue
+            key = {
+                "region": dataset.region,
+                "delay": dataset.delay,
+                "universe": dataset.universe,
+                "dataset_id": dataset.dataset_id,
+                "field_id": str(r["id"]),
+            }
+            _upsert(
+                s,
+                "field",
+                key,
+                {
+                    "dataset_name": dataset.dataset_name,
+                    "category": dataset.category,
+                    "field_type": str(r.get("type") or "").upper(),
+                    "description": str(r.get("description") or "")[:1000],
+                    "coverage": float(r.get("coverage") or 0.0),
+                    "alpha_count": int(r.get("alphaCount") or 0),
+                    "user_count": int(r.get("userCount") or 0),
+                },
+            )
+            n += 1
+    ledger.log("fields_loaded", dataset=dataset.dataset_id, region=dataset.region, fields=n)
+    return n
