@@ -191,9 +191,20 @@ class LLMClient:
                 text, p, c = self._complete(model, prompt.system, message, max_tokens)
             except Exception as exc:  # network, auth, quota at the provider
                 self._record(
-                    prompt, model, hypothesis_id, payload, retrieved, {}, [], ["transport"],
-                    p_tok, c_tok, cost, attempt, f"{type(exc).__name__}: {exc}"[:500],
-                )  # fmt: skip
+                    prompt,
+                    model,
+                    hypothesis_id,
+                    payload,
+                    retrieved,
+                    {},
+                    [],
+                    ["transport"],
+                    p_tok,
+                    c_tok,
+                    cost,
+                    attempt,
+                    f"{type(exc).__name__}: {exc}"[:500],
+                )
                 raise LLMUnavailable(f"{step}: {type(exc).__name__}: {exc}") from exc
             p_tok, c_tok = p_tok + p, c_tok + c
             cost += self.cost(model, p, c)
@@ -213,14 +224,36 @@ class LLMClient:
             if attempt > 1:
                 flags.append("retried")
             decision_id = self._record(
-                prompt, model, hypothesis_id, payload, retrieved, answer.model_dump(),
-                list(answer.cites), flags, p_tok, c_tok, cost, attempt, None,
-            )  # fmt: skip
+                prompt,
+                model,
+                hypothesis_id,
+                payload,
+                retrieved,
+                answer.model_dump(),
+                list(answer.cites),
+                flags,
+                p_tok,
+                c_tok,
+                cost,
+                attempt,
+                None,
+            )
             return answer, decision_id
         decision_id = self._record(
-            prompt, model, hypothesis_id, payload, retrieved, {}, [], ["invalid"],
-            p_tok, c_tok, cost, 2, " | ".join(errors)[:2000],
-        )  # fmt: skip
+            prompt,
+            model,
+            hypothesis_id,
+            payload,
+            retrieved,
+            {},
+            [],
+            ["invalid"],
+            p_tok,
+            c_tok,
+            cost,
+            2,
+            " | ".join(errors)[:2000],
+        )
         raise LLMInvalid(f"{step}: no valid answer after 2 tries", decision_id)
 
     def _record(
