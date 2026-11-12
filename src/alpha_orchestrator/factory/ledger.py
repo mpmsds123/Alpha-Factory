@@ -15,7 +15,6 @@ from sqlalchemy import Engine, create_engine, event, func, inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from alpha_orchestrator.factory.util import canonical_json, sha256_text
 from alpha_orchestrator.factory.models import (
     BatchORM,
     CandidateORM,
@@ -23,6 +22,7 @@ from alpha_orchestrator.factory.models import (
     EventORM,
     FactoryBase,
 )
+from alpha_orchestrator.factory.util import canonical_json, sha256_text
 
 P = ParamSpec("P")
 R = TypeVar("R")

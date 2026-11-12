@@ -6,7 +6,10 @@ from collections.abc import Mapping, Set
 from dataclasses import dataclass, field
 
 from alpha_orchestrator.factory.util import tokenize_expression
-GROUP_CLASSIFICATION_IDENTIFIERS = frozenset({"market", "sector", "industry", "subindustry", "country", "exchange"})
+
+GROUP_CLASSIFICATION_IDENTIFIERS = frozenset(
+    {"market", "sector", "industry", "subindustry", "country", "exchange"}
+)
 
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 FREE_OPERATORS = frozenset({"ts_backfill", "group_backfill"})  # Platform rule: not counted
