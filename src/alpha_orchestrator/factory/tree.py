@@ -74,7 +74,7 @@ class _Parser:
         return cond
 
     def _binary(self, ops: tuple[str, ...], nxt: str) -> Node:
-        left = getattr(self, nxt)()
+        left: Node = getattr(self, nxt)()
         while self.peek() in ops:
             op = self.take()
             left = Node("binop", op, (left, getattr(self, nxt)()))

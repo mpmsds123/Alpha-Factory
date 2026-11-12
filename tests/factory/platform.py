@@ -36,6 +36,19 @@ class FakeAPI:
         self._child: dict[str, str | None] = {}
 
     # metadata
+    def simulation_options(self) -> dict[str, Any]:
+        return {"R1": {"universes": ["TOP100"], "delays": [1], "neutralizations": ["N1", "N2"]}}
+
+    def datasets(self, region: str, delay: int, universe: str) -> list[dict[str, Any]]:
+        return [{"id": "d1", "name": "Data one", "category": {"id": "cat"}, "fieldCount": 5}]
+
+    def datafields(self, *args: Any) -> list[dict[str, Any]]:
+        return [
+            {"id": "sig_a", "type": "MATRIX", "coverage": 0.9, "description": "a quantity"},
+            {"id": "sig_b", "type": "MATRIX", "coverage": 0.9, "description": "another one"},
+            {"id": "zone_f", "type": "GROUP", "coverage": 1.0, "description": "groups"},
+        ]
+
     def operators(self) -> list[dict[str, Any]]:
         return [{"name": k, "definition": v, "description": ""} for k, v in self.ops.items()]
 
