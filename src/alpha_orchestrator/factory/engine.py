@@ -496,11 +496,7 @@ class Engine:
             outcome = (
                 "unavailable"
                 if plan.get("no_usable_groups")
-                else "budget"
-                if budget_stop
-                else "signal"
-                if worked
-                else "noise"
+                else "budget" if budget_stop else "signal" if worked else "noise"
             )
             cell.state = CellState.EXHAUSTED
             cell.plan = {**plan, "verdict": outcome, "outcome": outcome, "sims_spent": spent}
@@ -519,9 +515,11 @@ class Engine:
             why = (
                 "no usable field groups"
                 if plan.get("no_usable_groups")
-                else "budget spent"
-                if spent >= self.config.budget.dataset_sim_cap
-                else "no valid new idea twice in a row"
+                else (
+                    "budget spent"
+                    if spent >= self.config.budget.dataset_sim_cap
+                    else "no valid new idea twice in a row"
+                )
             )
             cell.stop_reason = (
                 f"{why}; {len(ideas)} ideas, {worked} reached the regular line, {spent} sims"
@@ -2037,9 +2035,11 @@ def _past_ideas(s: Session, limit: int) -> list[dict[str, Any]]:
                 "region": cell.region if cell else "",
                 "best_sharpe": round(i.best_sharpe, 2),
                 "signed_first_formula_sharpe": probe.get("signed_sharpe"),
-                "outcome": "passed the submission line"
-                if i.status == IdeaStatus.DONE
-                else str((i.extra or {}).get("why_dead", "stopped"))[:120],
+                "outcome": (
+                    "passed the submission line"
+                    if i.status == IdeaStatus.DONE
+                    else str((i.extra or {}).get("why_dead", "stopped"))[:120]
+                ),
             }
         )
     return out

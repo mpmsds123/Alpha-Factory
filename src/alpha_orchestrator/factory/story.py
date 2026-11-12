@@ -144,21 +144,16 @@ def _research(s: Session, cell: CellORM, sigma: float) -> str:
                 f"<tr><td>{'DeepSeek' if arm == 'llm' else '随机'}</td><td class='n'>{len(xs)}</td>"
                 f"<td class='n'>{sum(x >= 0.8 for x in xs)}</td><td class='n'>{max(xs):.2f}</td></tr>"
             )
-    return (
-        f"<p>已规划 {plan.get('rounds', 0)} 轮。各层信号浓度（比噪声多出的部分，样本少的往整体平均拉）：</p>"
-        f"<div class='wrap'><table><tr><th>层</th><th>测过的家族</th><th>浓度</th></tr>{strata_rows}</table></div>"
-        + (
-            f"<p>挖深的家族：</p><div class='wrap'><table><tr><th>家族</th><th>轮数</th>"
-            f"<th>最好 Sharpe</th><th></th></tr>{fam_rows}</table></div>"
-            if fam_rows
-            else ""
-        )
-        + (
-            "<p>挖组合（DeepSeek 对随机）：</p><div class='wrap'><table><tr><th></th><th>条数</th>"
-            f"<th>到排队线</th><th>最好</th></tr>{arm_rows}</table></div>"
-            if arm_rows
-            else ""
-        )
+    return f"<p>已规划 {plan.get('rounds', 0)} 轮。各层信号浓度（比噪声多出的部分，样本少的往整体平均拉）：</p>" f"<div class='wrap'><table><tr><th>层</th><th>测过的家族</th><th>浓度</th></tr>{strata_rows}</table></div>" + (
+        f"<p>挖深的家族：</p><div class='wrap'><table><tr><th>家族</th><th>轮数</th>"
+        f"<th>最好 Sharpe</th><th></th></tr>{fam_rows}</table></div>"
+        if fam_rows
+        else ""
+    ) + (
+        "<p>挖组合（DeepSeek 对随机）：</p><div class='wrap'><table><tr><th></th><th>条数</th>"
+        f"<th>到排队线</th><th>最好</th></tr>{arm_rows}</table></div>"
+        if arm_rows
+        else ""
     )
 
 

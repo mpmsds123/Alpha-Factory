@@ -80,8 +80,7 @@ def test_homework_thread_becomes_one_document_per_answer(tmp_path: Path) -> None
         "--- #1  2026-05-01  (0赞) ---\nlong count 是做多的股票数 " + "x" * 100 + "\n\n"
         "# 系列课程Course 3作业\n## 学员作业与回复\n\n"
         "--- #1  2026-05-20  (2赞) ---\n模板一：group_rank(ts_delta(pcr_oi_30, 5), sector) "
-        + "期权情绪"
-        * 30
+        + "期权情绪" * 30
         + "\n\n"
         "--- #2  2026-05-21  (0赞) ---\n已完成，没有表达式" + "y" * 100 + "\n",
         encoding="utf-8",
