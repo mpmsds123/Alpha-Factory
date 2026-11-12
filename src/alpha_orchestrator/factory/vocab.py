@@ -46,6 +46,8 @@ class Vocabulary:
     language_notes: str = ""
     # document sources (in the earlier ledger) that count as official, for prior seeding
     official_doc_sources: tuple[str, ...] = ()
+    # the platform's name for its expression language (a simulation setting)
+    expression_language: str = ""
     # region -> universe to use when the account offers it
     preferred_universe: dict[str, str] = field(default_factory=dict)
     # region -> neutralization to start from (the first offered one otherwise)
@@ -87,6 +89,7 @@ class Vocabulary:
             negate_template=str(raw.get("negate_template") or "-({x})"),
             language_notes=notes.strip(),
             official_doc_sources=tuple(str(x) for x in raw.get("official_doc_sources") or []),
+            expression_language=str(raw.get("expression_language") or ""),
             preferred_universe={
                 str(k): str(v) for k, v in (raw.get("preferred_universe") or {}).items()
             },
