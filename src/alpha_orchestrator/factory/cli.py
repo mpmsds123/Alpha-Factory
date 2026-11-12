@@ -1,6 +1,5 @@
 """`alpha-factory`: the commands you actually type."""
 
-import json
 import webbrowser
 from pathlib import Path
 from typing import Annotated
@@ -10,33 +9,24 @@ from sqlalchemy import select
 
 from alpha_orchestrator.brain.api import BrainAPI
 from alpha_orchestrator.brain.client import (
-    AmbiguousRequest,
     BrainClient,
     RateLimited,
     SessionExpired,
 )
-from alpha_orchestrator.brain.notify import notify
 from alpha_orchestrator.brain.session import AuthenticationFailed, BrainSession, NeedBiometric
 from alpha_orchestrator.factory.config import DEFAULT_CONFIG, FactoryConfig, llm_key_available
-from alpha_orchestrator.factory.dashboard import render
-from alpha_orchestrator.factory.funnel import write_funnel
-from alpha_orchestrator.factory.ideas import import_ideas
 from alpha_orchestrator.factory.ledger import Ledger, WorkerAlreadyRunning
 from alpha_orchestrator.factory.llm import FactoryLLM
 from alpha_orchestrator.factory.models import (
     CandidateORM,
-    CellORM,
     ReviewORM,
     ReviewStatus,
 )
-from alpha_orchestrator.factory.progress import write_progress
 from alpha_orchestrator.factory.select import approve, reject
 
 app = typer.Typer(help="Alpha 工厂：WorldQuant BRAIN 自动挖掘流水线", no_args_is_help=True)
 review_app = typer.Typer(help="待你确认的 alpha：查看、提交、放弃", no_args_is_help=True)
-ideas_app = typer.Typer(help="灵感库", no_args_is_help=True)
 app.add_typer(review_app, name="review")
-app.add_typer(ideas_app, name="ideas")
 
 ConfigOpt = Annotated[Path, typer.Option("--config", help="factory.yaml")]
 
@@ -63,37 +53,6 @@ def _llm(config: FactoryConfig, ledger: Ledger) -> FactoryLLM | None:
         )
         return None
     return FactoryLLM(config, ledger)
-
-
-def _dashboard_path(config: FactoryConfig) -> Path:
-    return Path(config.reports_dir) / "dashboard.html"
-
-
-@app.command()
-def doctor(
-    live: Annotated[bool, typer.Option("--live")] = False, config: ConfigOpt = DEFAULT_CONFIG
-) -> None:
-    """只读检查预算、在途和异常批次；--live 只检查登录，不登录或回测。"""
-    from alpha_orchestrator.factory.health import inspect_local
-
-    report = inspect_local(FactoryConfig.load(config))
-    if live:
-        session = BrainSession()
-        try:
-            response = session.http.get("/authentication")
-            report["authentication_http_status"] = response.status_code
-            report["authenticated"] = response.status_code == 200
-            if response.status_code != 200:
-                report["blockers"].append("authentication_required")
-        except Exception as exc:
-            report["authenticated"] = False
-            report["blockers"].append("authentication_unreachable")
-            report["connection_error"] = type(exc).__name__
-        finally:
-            session.close()
-    typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
-    if report["blockers"]:
-        raise typer.Exit(1)
 
 
 @app.command("recover-batch")
@@ -159,249 +118,10 @@ def login(
     global _live_session
     _live_session = session
     try:
-        run(config=config)
+        typer.echo("run is being rebuilt; not available in this commit")
     finally:
         _live_session = None
         session.close()
-
-
-@app.command()
-def run(
-    minutes: Annotated[float, typer.Option(help="最长运行分钟数")] = 720,
-    llm_only: Annotated[
-        bool,
-        typer.Option("--llm-only", help="只生成 1 个点子和 5 个公式，不发起回测"),
-    ] = False,
-    config: ConfigOpt = DEFAULT_CONFIG,
-) -> None:
-    """跑一天（设计文档 v1）：选数据集 → 读字段 → 想点子 → 缩字段 → 测前 10 → 判断 → 改进 →
-    排除运气 → 待确认。"""
-    from alpha_orchestrator.factory.engine import run_day, run_llm_only
-    from alpha_orchestrator.factory.record import render_record
-
-    try:
-        cfg, ledger = _ctx(config)
-    except WorkerAlreadyRunning as exc:
-        typer.echo(f"安全暂停：{exc}")
-        raise typer.Exit(4) from None
-
-    def progress(status: str) -> None:
-        """Write the progress CSV, never letting a failure stop the run."""
-        try:
-            write_progress(ledger, cfg, status)
-        except Exception as exc:  # the progress file must never stop a run
-            typer.echo(f"进度文件没写成：{exc}")
-        try:
-            write_funnel(ledger, cfg)
-        except Exception as exc:  # the funnel files must never stop a run either
-            typer.echo(f"漏斗文件没写成：{exc}")
-
-    llm = _llm(cfg, ledger)
-    if llm is None:
-        progress("没跑：找不到 DeepSeek 密钥")
-        typer.echo("设计文档 v1 需要 DeepSeek 想点子、挑字段；找不到密钥就不跑。")
-        raise typer.Exit(1)
-    record_path = Path(cfg.reports_dir) / "record.html"
-
-    def refresh_record() -> None:
-        """Re-render the research record page and mark the run in progress."""
-        render_record(ledger, record_path)
-        progress("运行中")
-
-    api = _api()
-    progress("运行中：登录")
-    try:
-        with ledger.writer_lock():
-            api.client.session.ensure()
-            if llm_only:
-                preview = run_llm_only(cfg, api, ledger, llm)
-                if preview is None:
-                    typer.echo("没有可生成点子的数据集；回测次数 = 0")
-                    progress("预览：没有可生成点子的数据集")
-                    return
-                typer.echo(f"点子：{preview.title}")
-                typer.echo(f"机制：{preview.mechanism}")
-                for index, formula in enumerate(preview.formulas, 1):
-                    typer.echo(f"公式 {index}：{formula}")
-                typer.echo("回测次数 = 0")
-                progress("预览完成（只生成点子，没有回测）")
-                return
-            report = run_day(
-                cfg,
-                api,
-                ledger,
-                llm,
-                minutes=minutes,
-                on_progress=refresh_record,
-            )
-    except (AmbiguousRequest, WorkerAlreadyRunning) as exc:
-        progress(f"停了：安全暂停（{str(exc)[:80]}）")
-        typer.echo(f"安全暂停：{exc}")
-        raise typer.Exit(4) from None
-    except NeedBiometric:
-        progress("停了：平台要求刷脸，运行 alpha-factory login --then-run")
-        notify("平台要求刷脸：运行 alpha-factory login --then-run，会从断点继续")
-        render_record(ledger, record_path)
-        raise typer.Exit(2) from None
-    except (AuthenticationFailed, SessionExpired, RateLimited) as exc:
-        progress(f"停了：{type(exc).__name__}（{str(exc)[:80]}）")
-        notify(f"运行暂停：{exc}。进度已保存，稍后重跑 alpha-factory run 会接着来")
-        render_record(ledger, record_path)
-        raise typer.Exit(3) from None
-    except Exception as exc:
-        progress(f"停了：程序出错 {type(exc).__name__}（{str(exc)[:80]}）")
-        raise
-    finally:
-        api.client.session.close()
-    render_record(ledger, record_path)
-    progress(f"今天结束：{report.stopped_because or '完成'}")
-    msg = (
-        f"本次完成 {report.simulations}（失败 {report.failed}），过门槛 {report.ready}，"
-        f"新存入待挑选 {len(report.reviews)} 条"
-    )
-    typer.echo(f"待挑选表格：{Path(cfg.reports_dir) / '工厂_待挑选.csv'}")
-    typer.echo(msg + f"；停止原因：{report.stopped_because or '完成'}")
-    typer.echo(f"研究记录：{record_path}")
-    notify(msg)
-
-
-@app.command()
-def funnel(config: ConfigOpt = DEFAULT_CONFIG) -> None:
-    """只读：从账本重算漏斗，写 工厂_漏斗.csv 和 工厂_漏斗_原因.csv（不登录、不回测）。"""
-    cfg, ledger = _ctx(config)
-    typer.echo(f"漏斗：{write_funnel(ledger, cfg).resolve()}")
-
-
-@app.command()
-def status(config: ConfigOpt = DEFAULT_CONFIG) -> None:
-    """账本概况，并刷新面板。"""
-    cfg, ledger = _ctx(config)
-    with ledger.session() as s:
-        cells = list(s.scalars(select(CellORM)))
-        n_cand = len(list(s.scalars(select(CandidateORM.id))))
-        pending = len(
-            list(s.scalars(select(ReviewORM.id).where(ReviewORM.status == ReviewStatus.PENDING)))
-        )
-    by_state: dict[str, int] = {}
-    for c in cells:
-        by_state[c.state] = by_state.get(c.state, 0) + 1
-    typer.echo(f"数据集组合 {len(cells)} {by_state}；候选 {n_cand}；待确认 {pending}")
-    typer.echo(f"面板：{render(ledger, cfg, _dashboard_path(cfg)).resolve()}")
-
-
-@app.command()
-def weekly(
-    days: Annotated[int, typer.Option(min=1, help="兼容旧版的滚动统计天数")] | None = None,
-    week_ending: Annotated[str | None, typer.Option(help="结束周五（YYYY-MM-DD）")] = None,
-    config: ConfigOpt = DEFAULT_CONFIG,
-) -> None:
-    """默认写最近已收口的周五快照；指定 --days 时保留旧版滚动口径。"""
-    import csv
-    from datetime import UTC, date, datetime
-
-    from alpha_orchestrator.factory.weekly import friday_cutoff, write_weekly
-
-    cfg, ledger = _ctx(config)
-    if days is not None and week_ending is not None:
-        raise typer.BadParameter("--days 和 --week-ending 只能选一个")
-    try:
-        ending = (
-            None
-            if days is not None
-            else friday_cutoff(
-                cfg, datetime.now(UTC), date.fromisoformat(week_ending) if week_ending else None
-            )
-        )
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    path = write_weekly(ledger, cfg, days or 7, ending=ending)
-    with path.open(encoding="utf-8-sig", newline="") as f:
-        reader = csv.reader(f)
-        next(reader)
-        for key, value in reader:
-            typer.echo(f"{key}：{value}")
-    typer.echo(f"已写入：{path.resolve()}")
-
-
-@app.command()
-def experiment_propose(input_file: Path, config: ConfigOpt = DEFAULT_CONFIG) -> None:
-    """用输入文件里的证据和序列清单，请 DeepSeek 提出一份试验建议。"""
-    import json
-
-    from alpha_orchestrator.factory.experiment import propose
-
-    inputs = json.loads(input_file.read_text(encoding="utf-8"))
-    cfg, ledger = _ctx(config)
-    llm = _llm(cfg, ledger)
-    if llm is None:
-        raise typer.BadParameter("未找到 DeepSeek 密钥")
-    with ledger.writer_lock():
-        result = propose(llm, inputs["evidence"], inputs["allowed_series"])
-    typer.echo(result.model_dump_json(indent=2))
-
-
-@app.command()
-def experiment_freeze(
-    proposal_file: Path,
-    start: Annotated[str, typer.Option()],
-    end: Annotated[str, typer.Option()],
-    min_observations: Annotated[int, typer.Option(min=4)],
-    min_signed_mean: Annotated[float, typer.Option(min=0.0)],
-) -> None:
-    """按人工设定的阈值和未来区间冻结提案，输出带指纹的协议。"""
-    from datetime import UTC, date, datetime
-
-    from alpha_orchestrator.factory.experiment import Proposal, Protocol, proposal_digest
-
-    proposal = Proposal.model_validate_json(proposal_file.read_text(encoding="utf-8"))
-    protocol = Protocol(
-        proposal_digest=proposal_digest(proposal),
-        approved_on=datetime.now(UTC).date(),
-        start=date.fromisoformat(start),
-        end=date.fromisoformat(end),
-        min_observations=min_observations,
-        min_signed_mean=min_signed_mean,
-    )
-    typer.echo(protocol.model_dump_json(indent=2))
-
-
-@app.command()
-def experiment_replay(proposal_file: Path, protocol_file: Path, series_file: Path) -> None:
-    """离线判定预先冻结的候选与基准 PnL 比较。"""
-    import json
-    from datetime import date
-
-    from pydantic import TypeAdapter
-
-    from alpha_orchestrator.factory.experiment import Proposal, Protocol, replay
-
-    proposal = Proposal.model_validate_json(proposal_file.read_text(encoding="utf-8"))
-    protocol = Protocol.model_validate_json(protocol_file.read_text(encoding="utf-8"))
-    series = TypeAdapter(dict[str, dict[date, float]]).validate_json(
-        series_file.read_text(encoding="utf-8")
-    )
-    typer.echo(json.dumps(replay(proposal, protocol, series), ensure_ascii=False))
-
-
-@app.command()
-def dashboard(
-    open_: Annotated[bool, typer.Option("--open")] = True, config: ConfigOpt = DEFAULT_CONFIG
-) -> None:
-    """重新生成面板并打开。"""
-    cfg, ledger = _ctx(config)
-    path = render(ledger, cfg, _dashboard_path(cfg)).resolve()
-    typer.echo(str(path))
-    if open_:
-        webbrowser.open(path.as_uri())
-
-
-@ideas_app.command("import")
-def ideas_import(paths: list[Path], config: ConfigOpt = DEFAULT_CONFIG) -> None:
-    """导入论文/论坛文件夹或合集 .md 文件（可重复执行，自动去重）。"""
-    _, ledger = _ctx(config)
-    with ledger.session() as s:
-        added = import_ideas(s, paths)
-    typer.echo(f"新增 {added} 篇。")
 
 
 def _match(ids: list[str], pool: list[str]) -> list[str]:

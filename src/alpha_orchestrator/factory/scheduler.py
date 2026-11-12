@@ -19,11 +19,11 @@ from sqlalchemy import select
 from alpha_orchestrator.brain.api import BrainAPI, simulation_payload
 from alpha_orchestrator.brain.client import AmbiguousRequest, RateLimited, SessionExpired
 from alpha_orchestrator.brain.session import AuthenticationFailed, NeedBiometric
-from alpha_orchestrator.factory.util import utc_now
 from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ledger import Ledger, fingerprint
 from alpha_orchestrator.factory.models import BatchORM, CandidateORM, CandidateStatus
 from alpha_orchestrator.factory.quarantine import exception_scope
+from alpha_orchestrator.factory.util import utc_now
 
 QUOTA_RESERVE = 0  # Compatibility import; actual reserve is configured per factory.
 REFUSED = -1
