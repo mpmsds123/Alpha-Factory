@@ -30,7 +30,8 @@ from alpha_orchestrator.factory.models import (
 
 # Official docs: technical fields (timestamps, dates, symbol identifiers) rarely carry alpha.
 TECHNICAL = re.compile(
-    r"\b(identifier|id code|isin|cusip|sedol|ticker|symbol|timestamp|date of|dates?)\b",
+    r"\b(identifier|id code|isin|cusip|sedol|ticker|symbol|timestamp|date of|dates?"
+    r"|domain names?|url|urls|website|web site|web address|email)\b",
     re.IGNORECASE,
 )
 FIELD_TYPES = ("MATRIX", "VECTOR")  # a grouping field is not a signal on its own

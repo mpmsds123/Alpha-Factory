@@ -320,12 +320,18 @@ class Factory:
 
     def _limits(self, count: int) -> dict[str, Any]:
         sc = self.config.search
-        return {
+        out: dict[str, Any] = {
             "count": count,
             "windows": list(sc.windows),
             "max_operators": sc.max_operators,
             "max_fields": sc.max_fields,
         }
+        if self.vocab.vector_reducer_prefix:
+            out["vector_fields"] = (
+                "a field of type VECTOR must first be reduced by an operator whose name "
+                f"starts with '{self.vocab.vector_reducer_prefix}'"
+            )
+        return out
 
     def _context(self, s: Session, h: HypothesisORM) -> tuple[dict[str, Any], dict[str, list[str]]]:
         tags = memory.tags_of(h)

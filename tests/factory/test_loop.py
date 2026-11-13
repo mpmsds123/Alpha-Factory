@@ -178,6 +178,7 @@ def test_hypothesis_to_review_with_lineage_and_logged_retrieval() -> None:
         assert first.retrieved["records"] == ["H1"] and first.flags == ["uncited"]
     assert all("test_sharpe" not in json.dumps(r) for r in seen)
     assert seen[0]["input"]["field"]["id"] in ("sig_a", "sig_b")
+    assert "red_" in seen[1]["input"]["limits"]["vector_fields"]
 
 
 def test_round_one_below_gate_is_closed_by_the_program() -> None:
