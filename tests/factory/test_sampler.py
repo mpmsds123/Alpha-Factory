@@ -51,6 +51,7 @@ def test_choose_field_filters_and_prefers_untapped() -> None:
         _field(s, d, "low_cov", coverage=0.3)
         _field(s, d, "grp", field_type="GROUP")
         _field(s, d, "when_x", description="announcement date of the report")
+        _field(s, d, "site_x", description="the cleaned domain name of the company")
         _field(s, d, "val_q1", alpha_count=50)
         _field(s, d, "val_q2", alpha_count=5)
         _field(s, d, "used_f")
