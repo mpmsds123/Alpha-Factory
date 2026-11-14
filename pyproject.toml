@@ -41,6 +41,7 @@ alpha_orchestrator = ["default_prompts/*.md", "default_prompts/guides/*.md"]
 [tool.pytest.ini_options]
 addopts = "--strict-markers --cov=alpha_orchestrator --cov-branch --cov-report=term-missing --cov-fail-under=85"
 testpaths = ["tests"]
+pythonpath = ["."]  # tests import shared fakes as tests.factory.*
 
 [tool.coverage.run]
 source = ["alpha_orchestrator"]
