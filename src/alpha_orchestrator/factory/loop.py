@@ -318,7 +318,7 @@ class Factory:
             "region": h.region,
         }
 
-    def _limits(self, count: int) -> dict[str, Any]:
+    def _limits(self, count: int, direction: int = 1) -> dict[str, Any]:
         sc = self.config.search
         out: dict[str, Any] = {
             "count": count,
@@ -326,6 +326,14 @@ class Factory:
             "max_operators": sc.max_operators,
             "max_fields": sc.max_fields,
         }
+        if direction < 0:
+            # 2026-11-13 run: 44% of short hypotheses closed with no valid expression
+            # because the field was entered unnegated; the check was right, the rule unstated.
+            out["direction"] = (
+                "this hypothesis is 'higher value -> short': negate the whole expression, "
+                f"written as {self.vocab.negate_template.format(x='<expression>')}, so that a "
+                "higher value of the hypothesis field gives a lower alpha value"
+            )
         if self.vocab.vector_reducer_prefix:
             out["vector_fields"] = (
                 "a field of type VECTOR must first be reduced by an operator whose name "
@@ -423,7 +431,7 @@ class Factory:
                     "grouping_identifiers": sorted(self.vocab.grouping_fields),
                     "operators": self.meta.definitions,
                     "language_notes": self.vocab.language_notes[: self.config.llm.notes_chars],
-                    "limits": self._limits(count - queued),
+                    "limits": self._limits(count - queued, h.direction),
                     "rejected_before": rejected,
                     **ctx,
                 }
@@ -692,7 +700,7 @@ class Factory:
                     "decay": [0, 2, 5, 10, 21],
                     "neutralization": self.meta.neutralizations(h.region),
                 },
-                "limits": self._limits(children),
+                "limits": self._limits(children, h.direction),
                 "budget_left": budget_left,
                 **ctx,
             }

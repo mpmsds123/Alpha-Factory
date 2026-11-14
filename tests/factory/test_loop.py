@@ -307,6 +307,18 @@ def test_invalid_and_opposite_expressions_are_rejected() -> None:
     assert any("not allowed" in r for r in reasons)
     second = [r for r in seen if r["step"] == STEP["expression"]][1]
     assert second["input"]["rejected_before"]
+    assert "direction" not in second["input"]["limits"]  # long hypothesis: no rule
+
+
+def test_short_hypothesis_is_told_how_to_negate() -> None:
+    answers = {
+        "hypothesis": [{**HYP, "direction": "higher_value_lower_return"}],
+        "expression": [lambda r: _expr(f"times(-1, order({_field(r)}))")],
+    }
+    factory, _, _, seen = _factory(answers, lambda e, st: MID)
+    factory.open_new()
+    limits = next(r for r in seen if r["step"] == STEP["expression"])["input"]["limits"]
+    assert "times(-1, <expression>)" in limits["direction"]
 
 
 def test_run_end_to_end_stops_when_nothing_is_left() -> None:
