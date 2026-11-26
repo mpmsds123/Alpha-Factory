@@ -1,5 +1,6 @@
-"""`alpha-factory`: the commands you type. Runs are started by hand; nothing schedules
-them. Nothing is submitted except by `review approve`."""
+"""`alpha-factory`: the commands you type. `daily` is what the schedule runs; `run` is one
+run by hand. Nothing is submitted except by `review approve`, unless submit_mode is
+"auto" in factory.yaml."""
 
 import webbrowser
 from datetime import UTC, datetime
@@ -132,6 +133,96 @@ def run(
     typer.echo(msg)
     typer.echo(f"Progress CSVs: {Path(cfg.reports_dir).resolve()}")
     notify(msg)
+
+
+# AlphaForge restarts a run that stopped early after a 5-minute pause, at most 12 times a
+# day; a login challenge stops everything and calls the human.
+DAILY_RETRY_WAIT_S = 300
+DAILY_MAX_RUNS = 12
+
+
+@app.command()
+def daily(
+    hours: Annotated[float, typer.Option(help="longest total time, in hours")] = 10,
+    config: ConfigOpt = DEFAULT_CONFIG,
+) -> None:
+    """What the schedule runs: `run` until every daily slot is filled, the budget is spent
+    or the time is up; restart after a pause (session, rate limit); stop and notify on a
+    face check."""
+    import time
+
+    from alpha_orchestrator.factory import slots
+
+    deadline = time.monotonic() + hours * 3600
+    for attempt in range(1, DAILY_MAX_RUNS + 1):
+        left = (deadline - time.monotonic()) / 60
+        if left < 5:
+            break
+        cfg, ledger = _ctx(config)
+        with ledger.session() as s:
+            if slots.next_slot(s, cfg) is None:
+                typer.echo("Every daily slot is filled.")
+                break
+        try:
+            run(minutes=left, config=config)
+            break  # finished normally: budget, deadline or nothing left
+        except typer.Exit as stop:
+            if stop.exit_code == 2:  # face check: only the owner can do it
+                raise
+            if stop.exit_code != 3 or attempt == DAILY_MAX_RUNS:
+                raise
+            typer.echo(f"Paused; trying again in {DAILY_RETRY_WAIT_S // 60} minutes.")
+            time.sleep(DAILY_RETRY_WAIT_S)
+
+
+LAUNCH_LABEL = "local.alpha-factory.daily"
+
+
+def launchd_plist(program: str, repo: Path, hour: int, minute: int, log_dir: Path) -> str:
+    """A macOS launchd job that runs `alpha-factory daily` every day at hour:minute."""
+    from xml.sax.saxutils import escape
+
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{LAUNCH_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array><string>{escape(program)}</string><string>daily</string></array>
+  <key>WorkingDirectory</key><string>{escape(str(repo))}</string>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>{hour}</integer><key>Minute</key><integer>{minute}</integer></dict>
+  <key>StandardOutPath</key><string>{escape(str(log_dir / "daily.log"))}</string>
+  <key>StandardErrorPath</key><string>{escape(str(log_dir / "daily.log"))}</string>
+</dict>
+</plist>
+"""
+
+
+@app.command()
+def schedule(
+    hour: Annotated[int, typer.Option(help="local hour to start, 0-23")],
+    minute: Annotated[int, typer.Option(help="minute, 0-59")] = 0,
+    write: Annotated[bool, typer.Option("--write", help="write the job file")] = False,
+) -> None:
+    """Print (or with --write, save) the macOS launchd job for the daily run. Load it with
+    `launchctl load ~/Library/LaunchAgents/<label>.plist`; remove it with unload."""
+    import shutil
+    import sys
+
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise typer.BadParameter("hour 0-23, minute 0-59")
+    program = shutil.which("alpha-factory") or str(Path(sys.executable).with_name("alpha-factory"))
+    log_dir = Path("~/.alpha_factory/logs").expanduser()
+    text = launchd_plist(program, Path.cwd(), hour, minute, log_dir)
+    if not write:
+        typer.echo(text)
+        return
+    log_dir.mkdir(parents=True, exist_ok=True)
+    target = Path("~/Library/LaunchAgents").expanduser() / f"{LAUNCH_LABEL}.plist"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    typer.echo(f"Wrote {target}. Load it with: launchctl load {target}")
 
 
 @app.command()

@@ -80,9 +80,12 @@ def check(
     windows: tuple[int, ...],
     max_operators: int,
     max_fields: int,
+    outside_pool: tuple[int, int] | None = None,
 ) -> Verdict:
     """`fields` maps every data field this expression may use to its type
-    (MATRIX / VECTOR / GROUP)."""
+    (MATRIX / VECTOR / GROUP). `outside_pool` = (pool operator limit, pool field limit):
+    when given, the expression must exceed one of them, or the platform routes it to the
+    pool."""
     try:
         node = tree.parse(expression)
     except ValueError as exc:
@@ -149,6 +152,13 @@ def check(
         v.issues.append(f"{v.operators} operators > {max_operators}")
     if len(used) > max_fields:
         v.issues.append(f"{len(used)} data fields > {max_fields}")
+    if outside_pool is not None:
+        pool_ops, pool_fields = outside_pool
+        if v.operators <= pool_ops and len(used) <= pool_fields:
+            v.issues.append(
+                f"inside the pool limits ({v.operators} operators, {len(used)} fields): this "
+                f"slot needs more than {pool_ops} operators or more than {pool_fields} fields"
+            )
     bad = sorted({w for w in tree.windows(node, vocab) if w not in windows})
     if bad:
         v.issues.append(f"window(s) {bad} not in the allowed set {list(windows)}")

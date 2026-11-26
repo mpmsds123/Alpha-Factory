@@ -20,7 +20,18 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from alpha_orchestrator.brain.api import BrainAPI
-from alpha_orchestrator.factory import catalog, gates, memory, prompts, sampler, tree
+from alpha_orchestrator.factory import (
+    catalog,
+    fixes,
+    gates,
+    guards,
+    memory,
+    notes,
+    prompts,
+    sampler,
+    slots,
+    tree,
+)
 from alpha_orchestrator.factory.config import FactoryConfig
 from alpha_orchestrator.factory.ledger import Ledger, fingerprint, ledger_locked
 from alpha_orchestrator.factory.llm import (
@@ -129,6 +140,19 @@ class Factory:
         self.rng = rng or random.Random()
         self.may_open = may_open
         self._scanner: dict[tuple[str, str], set[str]] = {}
+        self.crowded: set[str] = set()
+        self.rules = ""
+        self.lessons: list[str] = []
+        self.refresh_notes()
+
+    def refresh_notes(self) -> None:
+        """Re-read the crowded list, the rules and the latest lessons."""
+        self.crowded = guards.load_crowded(self.config)
+        self.rules = notes.rules(self.config.memory_dir)
+        self.lessons = notes.recent_lessons(self.config.memory_dir)
+
+    def _notes_view(self) -> dict[str, Any]:
+        return {"rules": self.rules, "lessons": self.lessons}
 
     # ======================= driving =======================
     def advance(self) -> dict[str, int]:
@@ -143,6 +167,9 @@ class Factory:
             if self._pending(hid) == 0:
                 self.step(hid)
                 moved["stepped"] += 1
+        retried = self.retry_platform_failures()
+        if retried:
+            moved["retried"] = retried
         b = self.config.budget
         while self._open_count() < b.active_hypotheses:
             with self.ledger.session() as s:
@@ -181,10 +208,26 @@ class Factory:
 
     # ======================= (a) hypothesis =======================
     def open_new(self) -> int | None:
-        """Pick a field, ask for a hypothesis, then for its first expressions."""
-        pick = self._pick()
-        if pick is None:
-            return None
+        """Pick a slot and a field, ask for a hypothesis, then for its first expressions."""
+        skip: set[str] = set()
+        while True:
+            with self.ledger.session() as s:
+                slot = slots.next_slot(s, self.config, skip=frozenset(skip))
+            if slot is None:
+                if not skip:
+                    self.ledger.log("open_blocked", reason="every daily slot is filled")
+                return None
+            pick = self._pick()
+            if pick is None:
+                return None
+            partner: list[Any] = []
+            if slot.datasets > 1:
+                partner = self._partner(pick.dataset)
+                if not partner:
+                    self.ledger.log("slot_skipped", slot=slot.name, reason="no second dataset")
+                    skip.add(slot.name)
+                    continue
+            break
         with self.ledger.session() as s:
             h = HypothesisORM(
                 region=pick.dataset.region,
@@ -198,9 +241,11 @@ class Factory:
                 field_description=pick.field.description,
                 sims_budget=self.config.search.hypothesis_budget,
                 state={
+                    "slot": slot.name,
                     "family": [f.field_id for f in pick.family],
-                    "helpers": {f.field_id: f.field_type for f in pick.helpers},
+                    "helpers": {f.field_id: f.field_type for f in pick.helpers + partner},
                     "family_types": {f.field_id: f.field_type for f in pick.family},
+                    "second_dataset": {f.field_id: f.dataset_id for f in partner},
                 },
             )
             s.add(h)
@@ -218,9 +263,13 @@ class Factory:
                 },
                 "region": pick.dataset.region,
                 "helper_candidates": [sampler.field_view(f) for f in pick.helpers],
+                "slot": self._slot_view(slot),
                 "records": [memory.record_view(r) for r in records],
                 "priors": [memory.prior_view(p) for p in priors],
+                **self._notes_view(),
             }
+            if partner:
+                payload["second_dataset_candidates"] = [sampler.field_view(f) for f in partner]
             retrieved = {
                 "records": [f"H{r.id}" for r in records],
                 "priors": [f"P{p.id}" for p in priors],
@@ -249,6 +298,10 @@ class Factory:
             h.turnover_band = out.turnover_band
             h.falsifier = out.falsifier
             h.helper_fields = [f for f in out.helper_fields if f in helpers][:2]
+            second = h.state.get("second_dataset") or {}
+            if second and not set(h.helper_fields) & set(second):
+                # the slot needs a second dataset: the program adds its least-used field
+                h.helper_fields = [*h.helper_fields[:1], next(iter(second))]
             h.tags = memory.tags_of(h)
         self.expressions(hid, self.config.search.first_round)
         return hid
@@ -267,12 +320,47 @@ class Factory:
             with self.ledger.session() as s:
                 d2 = s.get(CatalogORM, d.id)
                 assert d2 is not None
-                pick = sampler.choose_field(s, d2, self.config, self.rng)
+                pick = sampler.choose_field(s, d2, self.config, self.rng, self.crowded)
                 if pick is not None:
                     s.expunge_all()
                     return pick
             skip.add(key)
         return None
+
+    def _partner(self, d: CatalogORM) -> list[CatalogORM]:
+        """Fields of a second dataset for a multi-dataset hypothesis."""
+        with self.ledger.session() as s:
+            others = sampler.partner_datasets(s, d, self.rng)
+            s.expunge_all()
+        for other in others[:FIELD_DRAWS]:
+            with self.ledger.session() as s:
+                has_fields = bool(sampler.dataset_fields(s, other))
+            if not has_fields:
+                catalog.load_fields(self.api, self.ledger, other)
+            with self.ledger.session() as s:
+                found = sampler.partner_fields(s, other, self.config, self.crowded)
+                s.expunge_all()
+            if found:
+                return found
+        return []
+
+    def _slot_view(self, slot: Any) -> dict[str, Any]:
+        max_ops, max_fields = slots.limits(slot, self.config)
+        sc = self.config.search
+        view: dict[str, Any] = {
+            "name": slot.name,
+            "max_operators": max_ops,
+            "max_fields": max_fields,
+        }
+        if slot.outside_pool:
+            view["must_exceed"] = (
+                f"more than {sc.max_operators} operators or more than {sc.max_fields} fields"
+            )
+        if slot.datasets > 1:
+            view["second_dataset"] = (
+                "the claim must use at least one field from 'second_dataset_candidates'"
+            )
+        return view
 
     # ======================= (b) expressions =======================
     def _allowed_fields(self, h: HypothesisORM, with_family: bool) -> dict[str, str]:
@@ -318,14 +406,29 @@ class Factory:
             "region": h.region,
         }
 
-    def _limits(self, count: int, direction: int = 1) -> dict[str, Any]:
+    def _limits(self, h: HypothesisORM, count: int) -> dict[str, Any]:
         sc = self.config.search
+        direction = h.direction
+        slot = self.config.slots.get(slots.slot_of(h))
+        max_ops, max_fields = slots.limits(slot, self.config)
         out: dict[str, Any] = {
             "count": count,
             "windows": list(sc.windows),
-            "max_operators": sc.max_operators,
-            "max_fields": sc.max_fields,
+            "max_operators": max_ops,
+            "max_fields": max_fields,
         }
+        if slot.outside_pool:
+            out["must_exceed"] = (
+                f"more than {sc.max_operators} operators or more than {sc.max_fields} fields "
+                "(otherwise the platform routes it to another kind of alpha)"
+            )
+        second = h.state.get("second_dataset") or {}
+        if second:
+            out["second_dataset"] = (
+                f"use at least one of {sorted(set(second) & set(h.helper_fields))}"
+            )
+        if self.crowded:
+            out["crowded_fields"] = "never use a field from the crowded list"
         if direction < 0:
             # 2026-11-13 run: 44% of short hypotheses closed with no valid expression
             # because the field was entered unnegated; the check was right, the rule unstated.
@@ -349,6 +452,7 @@ class Factory:
             {
                 "records": [memory.record_view(r) for r in records],
                 "priors": [memory.prior_view(p) for p in priors],
+                **self._notes_view(),
             },
             {"records": [f"H{r.id}" for r in records], "priors": [f"P{p.id}" for p in priors]},
         )
@@ -374,6 +478,8 @@ class Factory:
     ) -> tuple[Any, list[str]]:
         """Local checks + direction + originality + no repeat within the hypothesis."""
         sc = self.config.search
+        slot = self.config.slots.get(slots.slot_of(h))
+        max_ops, max_fields = slots.limits(slot, self.config)
         v = check(
             expression,
             operators=self.meta.operators,
@@ -381,11 +487,18 @@ class Factory:
             fields=self._allowed_fields(h, with_family),
             vocab=self.vocab,
             windows=sc.windows,
-            max_operators=sc.max_operators,
-            max_fields=sc.max_fields,
+            max_operators=max_ops,
+            max_fields=max_fields,
+            outside_pool=(sc.max_operators, sc.max_fields) if slot.outside_pool else None,
         )
         issues = list(v.issues)
         if v.node is not None:
+            crowded = sorted((set(v.fields_used) & self.crowded) - {h.field_id})
+            if crowded:
+                issues.append(f"uses crowded field(s) {crowded}")
+            second = set(h.state.get("second_dataset") or {})
+            if second and not set(v.fields_used) & second:
+                issues.append("this slot needs a field from the second dataset")
             if h.field_id not in v.fields_used and not (
                 with_family and set(v.fields_used) & set(h.state.get("family") or [])
             ):
@@ -431,10 +544,17 @@ class Factory:
                     "grouping_identifiers": sorted(self.vocab.grouping_fields),
                     "operators": self.meta.definitions,
                     "language_notes": self.vocab.language_notes[: self.config.llm.notes_chars],
-                    "limits": self._limits(count - queued, h.direction),
+                    "limits": self._limits(h, count - queued),
                     "rejected_before": rejected,
                     **ctx,
                 }
+                retry = h.state.get("retry_of")
+                if retry:
+                    payload["required_fix"] = {
+                        "failure": retry["failure"],
+                        "instruction": retry["instruction"],
+                        "failed_expression": retry["expression"],
+                    }
             try:
                 out, did = self.llm.ask(
                     prompts.EXPRESSION,
@@ -680,6 +800,18 @@ class Factory:
             h = s.get(HypothesisORM, hid)
             assert h is not None
             parents = sorted(usable, key=lambda r: -(r[1].train_sharpe or 0.0))[:3]
+            fix = None
+            if parents and "mutate" in allowed:
+                tried = {e.mutation for e, _ in rows if e.mutation}
+                fix = fixes.for_train(parents[0][1], h.region, self.config.gates, tried, band)
+        if fix is not None and fix.decay is not None and children > 0:
+            # a setting fix needs no LLM: the program makes the child itself
+            if self._program_child(hid, parents[0][0].id, fix, label):
+                return
+            fix = None
+        with self.ledger.session() as s:
+            h = s.get(HypothesisORM, hid)
+            assert h is not None
             payload = {
                 "hypothesis": self._hypothesis_view(h),
                 "diagnosis": {"label": label, "reason": why},
@@ -700,10 +832,17 @@ class Factory:
                     "decay": [0, 2, 5, 10, 21],
                     "neutralization": self.meta.neutralizations(h.region),
                 },
-                "limits": self._limits(children, h.direction),
+                "limits": self._limits(h, children),
                 "budget_left": budget_left,
                 **ctx,
             }
+            if fix is not None:
+                payload["required_fix"] = {
+                    "failure": fix.failure,
+                    "change": fix.change,
+                    "instruction": fix.instruction,
+                    "rule": "every child must make exactly this kind of change",
+                }
         try:
             dec, did = self.llm.ask(
                 prompts.DECISION,
@@ -727,11 +866,51 @@ class Factory:
             self._close(hid, LABEL_TO_VERDICT[label], dec.reason, lesson=dec.lesson)
         elif action == "revise":
             self._revise(hid, dec, did)
-        elif self._mutate(hid, dec, did, {e.id for e, _ in parents}, children) == 0:
+        elif self._mutate(hid, dec, did, {e.id for e, _ in parents}, children, fix) == 0:
             self._close(hid, LABEL_TO_VERDICT[label], "no valid child", lesson=dec.lesson)
 
+    def _program_child(self, hid: int, parent_id: int, fix: fixes.Fix, label: str) -> bool:
+        """Apply a setting fix from the table: same expression, new decay."""
+        did = record_program_decision(
+            self.ledger,
+            hid,
+            "decision",
+            {"action": "mutate", "change": "setting", "decay": fix.decay, "reason": fix.failure},
+            {"label": label, "fix": fix.instruction},
+        )
+        with self.ledger.session() as s:
+            h = s.get(HypothesisORM, hid)
+            parent = s.get(ExpressionORM, parent_id)
+            psim = s.scalar(select(SimulationORM).where(SimulationORM.expression_id == parent_id))
+            assert h is not None and parent is not None and psim is not None
+            settings = {**psim.settings, "decay": fix.decay}
+            v, _ = self._vet(s, h, parent.expression, with_family=True)
+            e = self._store_expression(
+                s,
+                h,
+                parent.expression,
+                v,
+                [],
+                h.round + 1,
+                "mutation",
+                "setting",
+                f"fix table: {fix.failure} -> {fix.instruction}",
+                did,
+                parent.id,
+            )
+            if not self._queue(s, h, e, settings):
+                return False
+            h.round += 1
+        return True
+
     def _mutate(
-        self, hid: int, dec: prompts.DecisionOut, did: int, parent_ids: set[int], children: int
+        self,
+        hid: int,
+        dec: prompts.DecisionOut,
+        did: int,
+        parent_ids: set[int],
+        children: int,
+        fix: fixes.Fix | None = None,
     ) -> int:
         queued = 0
         with self.ledger.session() as s:
@@ -763,6 +942,11 @@ class Factory:
                 settings = dict(psim.settings)
                 expression = m.expression
                 issues: list[str] = []
+                if fix is not None and m.change != fix.change:
+                    issues.append(
+                        f"the fix table asks for a {fix.change} change ({fix.failure}), "
+                        f"not {m.change}"
+                    )
                 if m.change == "setting":
                     expression = parent.expression
                     if m.decay is not None:
@@ -845,6 +1029,84 @@ class Factory:
         self.ledger.log("hypothesis_revised", old=hid, new=new_id, decision=did)
         self.expressions(new_id, self.config.search.first_round)
 
+    # ======================= platform retry =======================
+    def retry_platform_failures(self) -> int:
+        """An alpha that passed the train and test gates but failed a platform check is
+        not abandoned: its hypothesis is reopened once as a child that keeps the claim and
+        gets the failure, the failed expression and the table's fix (AlphaForge: send the
+        failure back to the same researcher instead of starting over)."""
+        with self.ledger.session() as s:
+            todo = [
+                h.id
+                for h in s.scalars(
+                    select(HypothesisORM).where(HypothesisORM.status == HStatus.CLOSED)
+                )
+                if (h.state or {}).get("platform_failure")
+                and not h.state.get("retried")
+                and not h.state.get("retry_of")
+            ]
+        n = 0
+        for hid in todo:
+            if self._open_count() >= self.config.budget.active_hypotheses:
+                break
+            with self.ledger.session() as s:
+                old = s.get(HypothesisORM, hid)
+                assert old is not None
+                failure = old.state["platform_failure"]
+                fix = fixes.for_platform(list(failure.get("checks") or []))
+                new = HypothesisORM(
+                    parent_id=old.id,
+                    **{
+                        k: getattr(old, k)
+                        for k in (
+                            "region",
+                            "delay",
+                            "universe",
+                            "dataset_id",
+                            "dataset_name",
+                            "category",
+                            "field_id",
+                            "field_type",
+                            "field_description",
+                            "claim",
+                            "direction",
+                            "hypothesis_type",
+                            "holding_days",
+                            "turnover_band",
+                            "falsifier",
+                        )
+                    },
+                    helper_fields=list(old.helper_fields),
+                    sims_budget=self.config.search.revision_budget,
+                    state={
+                        **{
+                            k: old.state.get(k)
+                            for k in (
+                                "slot",
+                                "family",
+                                "helpers",
+                                "family_types",
+                                "second_dataset",
+                            )
+                        },
+                        "retry_of": {
+                            "hypothesis": old.id,
+                            "failure": fix.failure,
+                            "instruction": fix.instruction,
+                            "expression": str(failure.get("expression") or ""),
+                        },
+                    },
+                )
+                s.add(new)
+                s.flush()
+                new.tags = memory.tags_of(new)
+                old.state = {**old.state, "retried": new.id}
+                new_id = new.id
+            self.ledger.log("platform_retry", old=hid, new=new_id, failure=fix.failure)
+            self.expressions(new_id, self.config.search.first_round)
+            n += 1
+        return n
+
     # ======================= closing =======================
     def _close(
         self, hid: int, verdict: str, reason: str, lesson: str = "", s: Session | None = None
@@ -892,6 +1154,7 @@ class RunReport:
     simulations: int = 0
     failed: int = 0
     stored: list[str] = field(default_factory=list)
+    submitted: list[str] = field(default_factory=list)
     opened: int = 0
     stopped_because: str = ""
 
@@ -913,6 +1176,7 @@ def run(
 ) -> RunReport:
     """Run the factory until the daily budget, the deadline or nothing left to do."""
     report = RunReport()
+    started = utc_now()
     deadline = time.monotonic() + minutes * 60
     simulator = Simulator(api, ledger, config, sleep=sleep)
     simulator.assert_recoverable()
@@ -922,6 +1186,7 @@ def run(
     if catalog.is_stale(ledger):
         catalog.refresh(api, ledger, config, vocab)
     factory = Factory(api, ledger, config, llm, vocab, meta or Meta.fetch(api), rng, may_open)
+    selfcorr = guards.SelfCorrelation(api, config) if hasattr(api, "daily_pnl") else None
     idle = 0
     llm_stopped = ""
     while time.monotonic() < deadline:
@@ -940,8 +1205,10 @@ def run(
         stats = simulator.run(config.budget.chunk, deadline=deadline)
         report.simulations += stats.completed
         report.failed += stats.failed
-        report.stored += gates.evaluate(api, ledger, config)
+        report.stored += gates.evaluate(api, ledger, config, selfcorr)
+        report.submitted += gates.auto_submit(api, ledger, config)
         factory.promote_passed()
+        factory.refresh_notes()
         if on_progress is not None:
             on_progress("running")
         if stats.stopped_because in ("quota", "deadline", "platform kept refusing batches"):
@@ -956,6 +1223,11 @@ def run(
             idle = 0
     else:
         report.stopped_because = "deadline"
+    try:
+        lessons_after_run(ledger, config, report, started)
+        write_status(ledger, config, report)
+    except Exception as exc:  # the memory files must never fail a run
+        ledger.log("notes_not_written", error=str(exc)[:200])
     ledger.log(
         "run_done",
         simulations=report.simulations,
@@ -965,6 +1237,91 @@ def run(
         at=datetime.now(UTC).isoformat(),
     )
     return report
+
+
+def _round1_rate(
+    s: Session, config: FactoryConfig, since: datetime, until: datetime
+) -> tuple[float, int]:
+    rows = list(
+        s.scalars(
+            select(HypothesisORM).where(
+                HypothesisORM.status == HStatus.CLOSED,
+                HypothesisORM.closed_at >= since,
+                HypothesisORM.closed_at < until,
+            )
+        )
+    )
+    if not rows:
+        return 0.0, 0
+    hit = sum(1 for h in rows if h.best_train_sharpe >= config.search.first_gate)
+    return hit / len(rows), len(rows)
+
+
+def lessons_after_run(
+    ledger: Ledger, config: FactoryConfig, report: RunReport, started: datetime
+) -> None:
+    """Append lessons for the triggers a run can fire (see notes.py)."""
+    from datetime import timedelta
+
+    from alpha_orchestrator.factory.models import BatchORM
+
+    day = config.budget.window_start().date().isoformat()
+    md = config.memory_dir
+    if report.stopped_because in ("quota", "platform kept refusing batches"):
+        notes.add_lesson(
+            md,
+            "quota",
+            day,
+            f"Run stopped on '{report.stopped_because}' after {report.simulations} simulations.",
+        )
+    with ledger.session() as s:
+        wasted: list[str] = []
+        for b in s.scalars(select(BatchORM).where(BatchORM.created_at >= started)):
+            sims = list(s.scalars(select(SimulationORM).where(SimulationORM.batch_id == b.id)))
+            if sims and all(x.status == SimStatus.FAILED for x in sims):
+                wasted.append(str(sims[0].error or "no error text")[:120])
+        if len(wasted) >= 2:
+            notes.add_lesson(
+                md,
+                "wasted",
+                day,
+                f"{len(wasted)} batches came back with every simulation failed; first "
+                f"errors: {wasted[:2]}",
+            )
+        start = config.budget.window_start()
+        today, n_today = _round1_rate(s, config, start, utc_now())
+        past, n_past = _round1_rate(s, config, start - timedelta(days=7), start)
+        if n_today >= 10 and n_past >= 10 and notes.rate_jumped(today, past):
+            notes.add_lesson(
+                md,
+                "rate_jump",
+                day,
+                f"Round-1 pass rate {today:.0%} today ({n_today} hypotheses) against "
+                f"{past:.0%} over the past 7 days ({n_past}). Look at what changed.",
+            )
+
+
+def write_status(ledger: Ledger, config: FactoryConfig, report: RunReport) -> None:
+    """Rewrite STATUS.md: today's slots and the run's counts."""
+    with ledger.session() as s:
+        stored = slots.stored_today(s, config)
+        busy = slots.open_by_slot(s)
+        waiting = len(
+            list(s.scalars(select(SimulationORM.id).where(SimulationORM.review == Review.PENDING)))
+        )
+    lines = [
+        f"slot {r.name}: {stored.get(r.name, 0)} stored today, {busy.get(r.name, 0)} open"
+        for r in config.slots.rules
+    ]
+    lines += [
+        f"daily target {config.slots.per_day}; stored today {sum(stored.values())}; "
+        f"waiting for review {waiting}; submit mode {gates.submit_mode(config)}",
+        f"last run: {report.simulations} simulations ({report.failed} failed), "
+        f"{report.opened} hypotheses opened, {len(report.stored)} stored, "
+        f"{len(report.submitted)} submitted; stopped: {report.stopped_because}",
+        f"crowded fields: {len(guards.load_crowded(config))}",
+    ]
+    notes.write_status(config.memory_dir, lines)
 
 
 def decisions_of(s: Session, hid: int) -> list[DecisionORM]:
