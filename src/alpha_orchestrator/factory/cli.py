@@ -153,7 +153,7 @@ def daily(
 
     from alpha_orchestrator.factory import slots
 
-    deadline = time.monotonic() + hours * 3600
+    deadline = time.monotonic() + min(hours * 3600, _seconds_to_reset(config))
     for attempt in range(1, DAILY_MAX_RUNS + 1):
         left = (deadline - time.monotonic()) / 60
         if left < 5:
@@ -173,6 +173,20 @@ def daily(
                 raise
             typer.echo(f"Paused; trying again in {DAILY_RETRY_WAIT_S // 60} minutes.")
             time.sleep(DAILY_RETRY_WAIT_S)
+
+
+RESET_MARGIN_S = 900  # stop 15 minutes before the quota day ends
+
+
+def _seconds_to_reset(config: Path, now: datetime | None = None) -> float:
+    """Seconds until 15 minutes before the quota window resets, so a daily run never
+    spends the next day's simulations (the scanner's share)."""
+    from datetime import timedelta
+
+    cfg = FactoryConfig.load(config)
+    instant = now or datetime.now(UTC)
+    nxt = cfg.budget.window_start(instant) + timedelta(days=1)
+    return max(0.0, (nxt - instant).total_seconds() - RESET_MARGIN_S)
 
 
 LAUNCH_LABEL = "local.alpha-factory.daily"
