@@ -167,6 +167,11 @@ class BrainAPI:
                 out[str(row["date"])] = float(value)
         return out
 
+    def submitted_alphas(self) -> list[str]:
+        """Ids of every alpha this account has submitted (out of sample), all pages."""
+        rows = self._paged("/users/self/alphas", {"stage": "OS", "limit": PAGE})
+        return [str(r["id"]) for r in rows if r.get("id")]
+
     def check(self, alpha_id: str) -> list[dict[str, Any]]:
         """Pre-submission checks, including SELF/PROD correlation once the rest pass."""
         payload = self.client.wait_json(f"/alphas/{alpha_id}/check") or {}

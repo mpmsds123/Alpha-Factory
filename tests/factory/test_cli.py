@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from alpha_orchestrator.factory import cli
@@ -119,3 +120,41 @@ def test_recover_batch_validates_url(tmp_path: Path) -> None:
         cli.app, ["recover-batch", "b1", "--location", "/simulations/abc", "--config", cfg]
     )
     assert result.exit_code != 0  # no such UNKNOWN batch
+
+
+def test_daily_retries_pauses_and_stops_on_face_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import typer
+
+    cfg = str(_config(tmp_path))
+    calls: list[float] = []
+    codes = iter([3, 3, 0])
+
+    def fake_run(minutes: float, config: Path) -> None:
+        calls.append(minutes)
+        code = next(codes)
+        if code:
+            raise typer.Exit(code)
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    assert RUNNER.invoke(cli.app, ["daily", "--config", cfg]).exit_code == 0
+    assert len(calls) == 3  # two pauses, then a normal finish
+
+    def face(minutes: float, config: Path) -> None:
+        calls.append(minutes)
+        raise typer.Exit(2)
+
+    monkeypatch.setattr(cli, "run", face)
+    calls.clear()
+    assert RUNNER.invoke(cli.app, ["daily", "--config", cfg]).exit_code == 2
+    assert len(calls) == 1  # no retry: the face check needs the owner
+
+
+def test_schedule_prints_and_writes_a_launchd_job(tmp_path: Path) -> None:
+    out = _invoke("schedule", "--hour", "1", "--minute", "30")
+    assert "<integer>1</integer>" in out and "<string>daily</string>" in out
+    _invoke("schedule", "--hour", "1", "--write")
+    assert (tmp_path / "home" / "Library" / "LaunchAgents" / f"{cli.LAUNCH_LABEL}.plist").exists()
+    assert RUNNER.invoke(cli.app, ["schedule", "--hour", "25"]).exit_code != 0

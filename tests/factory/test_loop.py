@@ -71,11 +71,12 @@ def _factory(
     answers: dict[str, list[Any]],
     score: Callable[[str, dict[str, Any]], dict[str, Any]],
     cfg: FactoryConfig | None = None,
+    api_cls: type[FakeAPI] = FakeAPI,
 ) -> tuple[loop.Factory, Ledger, FakeAPI, list[dict[str, Any]]]:
     cfg = cfg or FactoryConfig()
     cfg.budget.min_batch_interval_s = 0
     ledger = Ledger("sqlite://")
-    api = FakeAPI(score, OPERATORS)
+    api = api_cls(score, OPERATORS)
     complete, seen = scripted({STEP[k]: v for k, v in answers.items()})
     llm = LLMClient(cfg, ledger, complete)
     meta = loop.Meta(
@@ -100,6 +101,18 @@ def _expr(*items: str) -> dict[str, Any]:
 
 def _field(req: dict[str, Any]) -> str:
     return str(req["input"]["hypothesis"]["field"])
+
+
+def _fits_slot(req: dict[str, Any]) -> dict[str, Any]:
+    """A simple expression for the pool slot; a 9-operator one for slots that must exceed
+    the pool limits."""
+    f = _field(req)
+    if "must_exceed" not in req["input"]["limits"]:
+        return _expr(f"order({f})")
+    x = f
+    for i in range(9):
+        x = f"w_avg({x}, 5)" if i % 2 else f"order({x})"
+    return _expr(x)
 
 
 def _drain(factory: loop.Factory, ledger: Ledger, api: FakeAPI, rounds: int = 6) -> None:
@@ -324,7 +337,7 @@ def test_short_hypothesis_is_told_how_to_negate() -> None:
 def test_run_end_to_end_stops_when_nothing_is_left() -> None:
     answers = {
         "hypothesis": [HYP],
-        "expression": [lambda r: _expr(f"order({_field(r)})")],
+        "expression": [_fits_slot],
         "diagnosis": [{"label": "idea_failed", "reason": "no signal in either direction at all"}],
         "decision": [{"action": "drop", "reason": "x" * 10, "lesson": "y" * 10}],
     }
@@ -342,8 +355,15 @@ def test_run_end_to_end_stops_when_nothing_is_left() -> None:
         sleep=lambda _: None,
         on_progress=progress.append,
     )
+    # the fake platform has one dataset: pool and single-dataset slots open, the
+    # multi-dataset slot is skipped
     assert report.opened == 2 and report.stopped_because == "nothing left to do"
     assert progress and report.simulations == 2
+    with ledger.session() as s:
+        assert sorted(h.state["slot"] for h in s.scalars(select(HypothesisORM))) == [
+            "pool",
+            "single_dataset",
+        ]
     with ledger.session() as s:
         assert len(list(s.scalars(select(DecisionORM)))) >= 6
 
