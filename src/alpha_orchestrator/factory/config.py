@@ -90,6 +90,58 @@ class Search:
 
 
 @dataclass
+class Slot:
+    """One daily slot: a kind of alpha the factory aims to deliver each day.
+
+    The pool limits are Search.max_operators / max_fields. AlphaForge (forum post,
+    2026-11-14, its Lesson 61): a delay-1 alpha inside those limits is routed to the pool
+    whatever the request says, so every other slot must exceed them (more operators or
+    more fields)."""
+
+    name: str
+    outside_pool: bool = False  # must exceed the pool limits
+    datasets: int = 1  # 2 = must also use a field from a second dataset
+    max_operators: int = 0  # 0 = the pool limit (Search.max_operators)
+    max_fields: int = 0  # 0 = the pool limit (Search.max_fields)
+
+
+def _default_slots() -> list[Slot]:
+    # AlphaForge's "3+1": pool / single dataset / multi dataset / combined alpha. The
+    # combined-alpha builder does not exist here yet, so its place is a spare slot that
+    # the first three kinds can fill once each has one.
+    # 64: the platform's hard cap per expression ("exceeds limit of 64", AlphaForge 11-14).
+    return [
+        Slot("pool"),
+        Slot("single_dataset", outside_pool=True, max_operators=64, max_fields=6),
+        Slot("multi_dataset", outside_pool=True, datasets=2, max_operators=64, max_fields=6),
+    ]
+
+
+@dataclass
+class Slots:
+    per_day: int = 4  # the platform's daily submission allowance (Policy)
+    rules: list[Slot] = field(default_factory=_default_slots)
+
+    def get(self, name: str) -> Slot:
+        for r in self.rules:
+            if r.name == name:
+                return r
+        return self.rules[0]
+
+
+@dataclass
+class Checks:
+    """Local checks before the platform's own (AlphaForge: '5 pre-check gates')."""
+
+    # AlphaForge checks locally at 0.60 so the platform's 0.7 line has a margin.
+    local_self_corr_max: float = 0.60
+    self_corr_years: int = 4  # the platform compares the last 4 years of daily PnL
+    hard_max_operators: int = 64  # platform cap per expression, whatever the slot
+    crowded_file: str = "crowded_fields.yaml"  # in private_dir: fields to avoid
+    pnl_cache: str = "~/.alpha_factory/pnl"  # daily PnL of submitted alphas
+
+
+@dataclass
 class Budget:
     daily_sim_cap: int = 1000  # this factory's own allocation per quota window
     quota_timezone: str = "America/Los_Angeles"
@@ -207,7 +259,15 @@ class Memory:
 class Policy:
     regions: list[str] = field(default_factory=list)  # empty = every region offered
     delay: int = 1  # spec: delay-1 only for now
-    max_submissions_per_day: int = 4  # platform rule; submission is always by hand
+    max_submissions_per_day: int = 4  # platform rule
+    # "approve": an alpha that passes every gate waits for `review approve` (default).
+    # "auto": it is submitted at once, up to max_submissions_per_day. A file named
+    # PAUSE_SUBMIT in the memory folder switches auto back to approve without an edit.
+    submit_mode: str = "approve"
+
+    def __post_init__(self) -> None:
+        if self.submit_mode not in ("approve", "auto"):
+            raise ValueError("submit_mode must be 'approve' or 'auto'")
 
 
 @dataclass
@@ -217,6 +277,8 @@ class FactoryConfig:
     private_dir: str = "~/.alpha_factory/private"  # platform vocabulary, never in the repo
     scanner_runs: str = ""  # the template scanner's runs folder, for the originality check
     v7_db: str = "~/.alpha_factory/factory.db"  # read-only source for `memory import-v7`
+    # rules / daily status / lessons files (private: they may name fields)
+    memory_dir: str = "~/.alpha_factory/memory"
     # one expiring, digest-pinned permission to resume a quarantined batch (see quarantine.py)
     quarantine_exception: dict[str, str] = field(default_factory=dict)
     gates: Gates = field(default_factory=Gates)
@@ -226,6 +288,8 @@ class FactoryConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     memory: Memory = field(default_factory=Memory)
     policy: Policy = field(default_factory=Policy)
+    slots: Slots = field(default_factory=Slots)
+    checks: Checks = field(default_factory=Checks)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "FactoryConfig":
@@ -253,8 +317,12 @@ class FactoryConfig:
         for key in ("models", "max_tokens", "prices_usd_peak"):
             if key in llm:
                 llm[key] = {**getattr(defaults, key), **llm[key]}
+        slots_raw = dict(raw.get("slots") or {})
+        if "rules" in slots_raw:
+            slots_raw["rules"] = [Slot(**r) for r in slots_raw["rules"]]
         return cls(
             db_path=raw.get("db_path", cls.db_path),
+            memory_dir=raw.get("memory_dir", cls.memory_dir),
             reports_dir=str(reports if reports.is_absolute() else base / reports),
             private_dir=raw.get("private_dir", cls.private_dir),
             scanner_runs=raw.get("scanner_runs", cls.scanner_runs),
@@ -266,6 +334,8 @@ class FactoryConfig:
             llm=LLMConfig(**llm),
             memory=Memory(**(raw.get("memory") or {})),
             policy=Policy(**(raw.get("policy") or {})),
+            slots=Slots(**slots_raw),
+            checks=Checks(**(raw.get("checks") or {})),
         )
 
 

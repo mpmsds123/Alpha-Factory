@@ -7,6 +7,28 @@ Operational detail that used to live in `docs/` is summarized in the entries bel
 Entry format for new days: **Ran** (what was run, in counts), **Found** (aggregate results
 only), **Changed** (code or design), **Open** (unresolved).
 
+## 2026-11-25 (daily slots, fix table, local checks, scheduled runs)
+
+- Changed. Copied the working parts of a public pipeline that delivers 4 alphas a day
+  into the existing program-driven loop (the loop itself is unchanged).
+- Changed. Daily slots: pool, single dataset, multi dataset, plus a spare place; each
+  hypothesis gets a slot that sets its operator and field limits; the slots outside the
+  pool must exceed the pool limits; the multi-dataset slot adds fields of a second dataset.
+  Nothing new opens once 4 alphas are stored in the quota day.
+- Changed. Fix table: each failure maps to one change; decay fixes are applied by the
+  program without an LLM call; LLM children that make another change are rejected.
+- Changed. Local checks: daily-PnL self-correlation against submitted alphas (0.60), a
+  crowded-field list, the 64-operator cap.
+- Changed. A platform-check failure reopens the hypothesis once with the failure and its
+  fix; a production-correlation failure crowds the expression's fields.
+- Changed. Three memory files (rules, daily status, lessons with fixed triggers) next to
+  the database records; rules and recent lessons go to every LLM call.
+- Changed. Submit switch (approve by default, or auto up to 4 a day, with a pause file).
+- Changed. `daily` command (restarts after pauses, stops on a face check) and a launchd
+  job writer, replacing the "runs by hand only" rule.
+- Open. The combined-alpha slot is not built; its place is the spare slot. The local
+  self-correlation reads the account's submitted alphas from the API, not yet run live.
+
 ## 2026-11-12 (v8: hypothesis factory)
 
 - Changed. Rebuilt around hypotheses instead of field x template. The program picks a
