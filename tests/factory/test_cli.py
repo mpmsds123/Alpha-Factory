@@ -158,3 +158,12 @@ def test_schedule_prints_and_writes_a_launchd_job(tmp_path: Path) -> None:
     _invoke("schedule", "--hour", "1", "--write")
     assert (tmp_path / "home" / "Library" / "LaunchAgents" / f"{cli.LAUNCH_LABEL}.plist").exists()
     assert RUNNER.invoke(cli.app, ["schedule", "--hour", "25"]).exit_code != 0
+
+
+def test_daily_stops_before_the_quota_reset(tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+
+    cfg = _config(tmp_path)
+    # 15:00 Pacific (23:00 UTC in winter): the 21:00 reset is 6 hours away, minus 15 min
+    at = datetime(2026, 11, 26, 23, 0, tzinfo=UTC)
+    assert cli._seconds_to_reset(cfg, at) == 6 * 3600 - 900
