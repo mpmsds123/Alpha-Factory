@@ -181,11 +181,52 @@ def dataset_fields(s: Session, d: CatalogORM) -> list[CatalogORM]:
     )
 
 
+def partner_datasets(s: Session, d: CatalogORM, rng: random.Random) -> list[CatalogORM]:
+    """Other datasets of the same region, delay and universe, in random order (the second
+    dataset of a multi-dataset hypothesis)."""
+    rows = list(
+        s.scalars(
+            select(CatalogORM).where(
+                CatalogORM.kind == "dataset",
+                CatalogORM.region == d.region,
+                CatalogORM.delay == d.delay,
+                CatalogORM.universe == d.universe,
+                CatalogORM.dataset_id != d.dataset_id,
+            )
+        )
+    )
+    rng.shuffle(rows)
+    return rows
+
+
+def partner_fields(
+    s: Session, d: CatalogORM, config: FactoryConfig, exclude: set[str], k: int = 3
+) -> list[CatalogORM]:
+    """Up to k eligible fields of a dataset, one per family, least used first."""
+    best: dict[str, CatalogORM] = {}
+    for f in dataset_fields(s, d):
+        if f.field_type not in FIELD_TYPES or f.field_id in exclude or not eligible(f, config):
+            continue
+        fam = family_key(f.field_id)
+        if fam not in best or (f.alpha_count, -f.coverage) < (
+            best[fam].alpha_count,
+            -best[fam].coverage,
+        ):
+            best[fam] = f
+    return sorted(best.values(), key=lambda f: (f.alpha_count, -f.coverage, f.field_id))[:k]
+
+
 def choose_field(
-    s: Session, d: CatalogORM, config: FactoryConfig, rng: random.Random
+    s: Session,
+    d: CatalogORM,
+    config: FactoryConfig,
+    rng: random.Random,
+    exclude: set[str] | None = None,
 ) -> Pick | None:
-    """A field of an unused family, drawn among the least-used eligible ones."""
-    fields = dataset_fields(s, d)
+    """A field of an unused family, drawn among the least-used eligible ones. Fields in
+    `exclude` (the crowded list) are never drawn or offered as helpers."""
+    exclude = exclude or set()
+    fields = [f for f in dataset_fields(s, d) if f.field_id not in exclude]
     used = {
         family_key(h.field_id)
         for h in s.scalars(

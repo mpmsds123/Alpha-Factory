@@ -2,7 +2,9 @@
 
 A research factory for daily cross-sectional equity signals on a simulation platform. An
 LLM proposes economic hypotheses and the expressions that test them; the program owns
-every budget, gate and stop. Nothing is ever submitted automatically.
+every budget, gate and stop. It runs every night on a schedule and aims for four alphas a
+day, one per daily slot. By default each alpha waits for your approval; a switch makes
+submission automatic.
 
 ## The problem
 
@@ -43,6 +45,35 @@ you:     review approve                     the only path that submits
 * **Expressions are trees**: canonical text, structure shape, operator and node counts,
   and the exact change between a child and its parent.
 
+### Daily operation (borrowed from a working public pipeline)
+
+* **Daily slots.** Each day has 4 places: one *pool* alpha (few operators, few fields),
+  one *single-dataset* alpha and one *multi-dataset* alpha (both must exceed the pool
+  limits, or the platform routes them to the pool), and one spare place for any kind.
+  Each new hypothesis works for the emptiest slot; the slot sets its expression limits.
+  When the day's 4 are stored, nothing new opens.
+* **Fix table.** A failing round is not diagnosed freely: its numbers map to one fix
+  (turnover above the claim's band → raise decay, applied by the program with no LLM
+  call; turnover too low → shorter windows; Sharpe below the line → windows, then
+  operator form, then another field). The LLM must make exactly that change.
+* **Local checks before the platform's.** Daily-PnL self-correlation against every
+  submitted alpha (line 0.60, under the platform's 0.7), a crowded-field list that new
+  hypotheses never draw from, and the platform's 64-operator cap per expression.
+* **Retry after a platform failure.** An alpha that passes the train and test gates but
+  fails a platform check (correlation, weight concentration, sub-universe, ladder) is not
+  dropped: its hypothesis reopens once, keeps the claim, and gets the failure and the
+  table's fix. A production-correlation failure puts its fields on the crowded list.
+* **Three memory files** (private folder): `RULES.md` (short, shown to every LLM call),
+  `STATUS.md` (rewritten after every run), `LESSONS.md` (numbered, appended only when a
+  trigger fires: a jump in the round-1 pass rate, wasted batches, a first pass for a slot
+  or region, a quota stop, a new crowded field). The hypothesis records stay in the
+  database.
+* **Submit switch.** `policy.submit_mode: approve` (default) or `auto` (up to 4 a day). A
+  file named `PAUSE_SUBMIT` in the memory folder turns auto off without an edit.
+* **Schedule.** `alpha-factory daily` runs until the slots are filled, restarts after a
+  pause (5 minutes, at most 12 runs), and stops with a desktop notification when the
+  platform asks for a face check, the one step left to a human.
+
 Prior art this borrows from: R&D-Agent(Q) (hypothesis → experiment → feedback that
 separates the idea from its implementation), AlphaAgent (originality against existing
 formulas, hypothesis-expression alignment, complexity limits), FunSearch/AlphaEvolve
@@ -77,14 +108,16 @@ Platform vocabulary never enters the repository. It lives in `~/.alpha_factory/p
 alpha-factory memory import-v7        # once: earlier results become experience records
 alpha-factory priors seed             # once: claims from official documents (capped cost)
 alpha-factory login --then-run        # face check if asked, then a run of up to 12 hours
+alpha-factory daily                   # what the schedule runs (slots, restarts, alerts)
+alpha-factory schedule --hour 1 --write   # write the macOS launchd job for `daily`
 alpha-factory review list             # alphas that passed every gate
 alpha-factory review approve <id>     # submit one (cannot be undone)
 ```
 
 `alpha-factory run`, `status`, `stats`, `priors add`, `review reject` and `recover-batch`
 are also available; each has `--help`. In VS Code, run
-`python -m alpha_orchestrator.factory.cli run` from the integrated terminal. Runs are
-started by hand; there is no scheduler.
+`python -m alpha_orchestrator.factory.cli run` from the integrated terminal. The daily
+run is started by a launchd job (`schedule`); load it with `launchctl load`.
 
 ## Configuration
 
@@ -108,7 +141,8 @@ prompt version, model, cost), `priors`, plus a catalog cache and in-flight batch
 
 ## Safety boundaries and known limits
 
-* Only `review approve` submits; it re-runs the platform checks first.
+* Only `review approve` submits, or the daily run when `submit_mode` is `auto`; both
+  re-run the platform checks first.
 * One writer per database (OS file lock); interrupted batches are re-polled, never resent.
 * The out-of-sample gate is only as honest as its isolation: no prompt may contain a
   test-period value (enforced in the LLM client), and nothing selects on it before the gate.
