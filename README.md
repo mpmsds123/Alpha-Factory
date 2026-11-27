@@ -50,7 +50,10 @@ you:     review approve                     the only path that submits
 * **Daily slots.** Each day has 4 places: one *pool* alpha (few operators, few fields),
   one *single-dataset* alpha and one *multi-dataset* alpha (both must exceed the pool
   limits, or the platform routes them to the pool), and one spare place for any kind.
-  Each new hypothesis works for the emptiest slot; the slot sets its expression limits.
+  The pool slot is filled first each day. A pool alpha is judged by the pool's own tests
+  (pool correlation, a current pool theme, a written Idea / Rationale description), not
+  by the regular production correlation, which it is allowed to fail.
+  After that, each new hypothesis works for the emptiest slot; the slot sets its expression limits.
   When the day's 4 are stored, nothing new opens.
 * **Fix table.** A failing round is not diagnosed freely: its numbers map to one fix
   (turnover above the claim's band → raise decay, applied by the program with no LLM

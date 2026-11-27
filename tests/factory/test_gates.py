@@ -88,7 +88,7 @@ def test_evaluate_runs_the_gate_sequence() -> None:
         weak: "train",
         overfit: "oos",
         crazy: "suspicious",
-        corr: "platform: SELF_CORRELATION",
+        corr: "platform: SELF_CORRELATION,pool: no pool test",
     }
     assert _get(ledger, good).review == Review.PENDING
     assert _get(ledger, pending).checks_pass is None  # retried next time
@@ -112,3 +112,51 @@ def test_approve_is_the_only_submit_path() -> None:
     gates.evaluate(api, ledger, CFG)  # type: ignore[arg-type]
     assert gates.reject(ledger, other, "no") and not gates.reject(ledger, other)
     assert gates.platform_pass([], 0.7) is False
+
+
+POOL_OK = [
+    {"name": "LOW_SHARPE", "result": "PASS"},
+    {"name": "PROD_CORRELATION", "result": "FAIL", "value": 0.95},
+    {"name": "POWER_POOL_CORRELATION", "result": "PASS"},
+    {"name": "MATCHES_THEMES", "result": "PASS", "themes": [{"name": "R1/D1 Power Pool"}]},
+    {"name": "MATCHES_COMPETITION", "result": "WARNING"},
+]
+
+
+def test_pool_route_verdicts() -> None:
+    from alpha_orchestrator.factory import pool
+
+    assert pool.verdict(POOL_OK) == (True, "pure pool (daily pool quota)")
+    off = [*POOL_OK[:3], {**POOL_OK[3], "result": "WARNING"}]
+    assert pool.verdict(off) == (False, "off theme")
+    waiting = [*POOL_OK[:2], {"name": "POWER_POOL_CORRELATION", "result": "PENDING"}]
+    assert pool.verdict(waiting)[0] is None
+    both = [{"name": "LOW_SHARPE", "result": "PASS"}, POOL_OK[2]]
+    assert pool.verdict(both) == (True, "pool and regular")
+    broken = [*POOL_OK, {"name": "CONCENTRATED_WEIGHT", "result": "FAIL"}]
+    assert pool.verdict(broken) == (False, "CONCENTRATED_WEIGHT")
+    assert pool.verdict([]) == (False, "no pool test")
+    text = pool.description("Late filers drift down.", "Filing delay in days.", "", 5)
+    assert text.startswith("Idea: Late filers") and len(text) >= pool.MIN_DESCRIPTION
+    assert "Rationale for data used:" in text and "Rationale for operators used:" in text
+
+
+def test_pool_slot_alpha_is_stored_by_the_pool_route_and_described() -> None:
+    ledger = Ledger("sqlite://")
+    api = FakeAPI()
+    sid = _add(ledger, 0)
+    api.checks["A0"] = POOL_OK
+    assert gates.evaluate(api, ledger, CFG) == ["A0"]  # type: ignore[arg-type]
+    assert _get(ledger, sid).gate_note == "stored: pure pool (daily pool quota)"
+    assert any("Idea:" in str(p.get("description")) for p in api.properties.values())
+    assert gates.approve(api, ledger, sid, CFG)  # type: ignore[arg-type]
+
+
+def test_warning_does_not_block_the_regular_route() -> None:
+    ok = [{"name": "LOW_SHARPE", "result": "PASS"}, {"name": "MATCHES_THEMES", "result": "WARNING"}]
+    ok += [
+        {"name": "SELF_CORRELATION", "result": "PASS", "value": 0.2},
+        {"name": "PROD_CORRELATION", "result": "PASS", "value": 0.3},
+    ]
+    assert gates.platform_pass(ok, 0.7)
+    assert not gates.platform_pass([*ok, {"name": "X", "result": "PENDING"}], 0.7)

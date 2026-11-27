@@ -280,19 +280,24 @@ def test_local_self_correlation_failure_blocks_the_platform_check(tmp_path: Path
 def test_prod_correlation_failure_crowds_fields_and_writes_a_lesson(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     ledger = Ledger("sqlite://")
-    sid = _stored(ledger, "pool", 8, review=Review.NONE)
-    with ledger.session() as s:
-        sim = s.get(SimulationORM, sid)
-        assert sim is not None
-        sim.train_pass = True
-    api = FakeAPI()
-    api.checks["A8"] = [
+    checks = [
         {"name": "LOW_SHARPE", "result": "PASS"},
         {"name": "SELF_CORRELATION", "result": "PASS", "value": 0.3},
         {"name": "PROD_CORRELATION", "result": "FAIL", "value": 0.75},
     ]
+    api = FakeAPI()
+    pool_sid = _stored(ledger, "pool", 7, review=Review.NONE)
+    sid = _stored(ledger, "single_dataset", 8, review=Review.NONE)
+    with ledger.session() as s:
+        for x in (pool_sid, sid):
+            sim = s.get(SimulationORM, x)
+            assert sim is not None
+            sim.train_pass = True
+    api.checks["A7"] = api.checks["A8"] = checks
     gates.evaluate(api, ledger, cfg)  # type: ignore[arg-type]
+    # only the regular-route alpha crowds its fields; the pool route ignores that test
     assert guards.load_crowded(cfg) == {"sig_a"}
+    assert [e["alpha"] for e in ledger.events("crowded_added")] == ["A8"]
     assert any("crowded list" in x for x in notes.recent_lessons(cfg.memory_dir))
 
 
