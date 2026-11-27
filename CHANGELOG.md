@@ -7,6 +7,23 @@ Operational detail that used to live in `docs/` is summarized in the entries bel
 Entry format for new days: **Ran** (what was run, in counts), **Found** (aggregate results
 only), **Changed** (code or design), **Open** (unresolved).
 
+## 2026-11-26 (one login with the scanner, face-check wait, empty-reply retry)
+
+- Ran. The 15:00 daily run stopped at a face check before any simulation; after the
+  login the LLM provider refused calls (account balance), then a 15-minute call came back
+  with no answer and ended the run. 3 simulations in all.
+- Changed. One platform login shared with the template scanner: a still-valid cookie from
+  either program is used before a password login or a face-check stop, and every saved
+  cookie is copied to the other's file, so one face check unlocks both.
+- Changed. `daily` no longer ends the day at a face check: it opens the check page and
+  resumes once the check is done (here or through the scanner's login), up to the day's
+  deadline.
+- Changed. `scanner_runs` is set, which turns on the originality check against the
+  scanner's formulas.
+- Changed. An LLM reply with no choices counts as a bad answer and is retried, instead of
+  being treated as a provider outage that stops the run.
+- Open. The README has no live performance section yet; a weekly report is next.
+
 ## 2026-11-25 (daily slots, fix table, local checks, scheduled runs)
 
 - Changed. Copied the working parts of a public pipeline that delivers 4 alphas a day
