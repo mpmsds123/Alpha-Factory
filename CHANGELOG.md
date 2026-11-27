@@ -22,6 +22,10 @@ only), **Changed** (code or design), **Open** (unresolved).
   scanner's formulas.
 - Changed. An LLM reply with no choices counts as a bad answer and is retried, instead of
   being treated as a provider outage that stops the run.
+- Changed. The pool slot comes first until it has an alpha in the quota day. The
+  evening run gave two of every three hypotheses to the slots that must exceed the pool
+  limits; 240 of the 249 expressions written for them stayed inside those limits and were
+  rejected, so the run spent its LLM budget on 9 simulations.
 - Open. The README has no live performance section yet; a weekly report is next.
 
 ## 2026-11-25 (daily slots, fix table, local checks, scheduled runs)

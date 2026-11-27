@@ -56,7 +56,11 @@ def next_slot(
     """The slot the next hypothesis should work for; None when the day's target is met.
 
     Empty slots first; once each has an alpha, any slot until the daily target (the
-    spare place). Among the candidates, the one with the fewest open hypotheses."""
+    spare place). The pool slot comes before the slots that must exceed the pool limits
+    until it has an alpha today: on 2026-11-26, 240 of 249 expressions written for those
+    slots were rejected for staying inside the pool limits, so opening them before the
+    simpler kind works only spends LLM calls. Then the slot with the fewest open
+    hypotheses."""
     stored = stored_today(s, config, now)
     if sum(stored.values()) >= config.slots.per_day:
         return None
@@ -66,6 +70,9 @@ def next_slot(
     candidates = empty or usable
     if not candidates:
         return None
+    simple = [r for r in candidates if not r.outside_pool and stored.get(r.name, 0) == 0]
+    if simple:
+        candidates = simple
     busy = open_by_slot(s)
     return min(candidates, key=lambda r: (busy.get(r.name, 0), rules.index(r)))
 
