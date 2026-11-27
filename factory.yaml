@@ -20,3 +20,13 @@ budget:
 cost:
   daily_usd_cap: 5.0
   usd_per_pass_max: 1.6
+
+# 2026-11-27: no multi-dataset slot. Mixing datasets loses the single-dataset (ATOM) route and is paid at the
+# lowest pyramid multiplier of the datasets mixed; consultants with high value factors submit single-dataset only.
+slots:
+  rules:
+    - {name: pool}
+    - {name: single_dataset, outside_pool: true, max_operators: 64, max_fields: 6}
+
+checks:
+  local_self_corr_max: 0.40   # was 0.60: keep new alphas apart from submitted ones (value factor ranks the combo)
