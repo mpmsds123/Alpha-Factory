@@ -722,9 +722,7 @@ class Factory:
                 "sign": (
                     "as predicted"
                     if best >= sc.first_gate
-                    else "opposite to prediction"
-                    if worst <= -sc.first_gate
-                    else "no clear signal"
+                    else "opposite to prediction" if worst <= -sc.first_gate else "no clear signal"
                 ),
                 "turnover_in_expected_band": {
                     str(e.id): (band[0] <= (x.train_turnover or 0.0) <= band[1])
