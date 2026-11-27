@@ -26,7 +26,10 @@ only), **Changed** (code or design), **Open** (unresolved).
   evening run gave two of every three hypotheses to the slots that must exceed the pool
   limits; 240 of the 249 expressions written for them stayed inside those limits and were
   rejected, so the run spent its LLM budget on 9 simulations.
-- Open. The README has no live performance section yet; a weekly report is next.
+- Changed. `alpha-factory weekly` writes a Recent performance table (this week, prior
+  week, all time; counts and rates only) into the README and prints the changelog lines.
+- Open. No v8 hypothesis has passed the train gate yet (5 cleared round 1 in 1,261
+  simulations); this is the main problem to work on.
 
 ## 2026-11-25 (daily slots, fix table, local checks, scheduled runs)
 
