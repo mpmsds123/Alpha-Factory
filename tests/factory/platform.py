@@ -29,6 +29,7 @@ class FakeAPI:
         self.client = Client()
         self.batches: dict[str, list[dict[str, Any]]] = {}
         self.alphas: dict[str, dict[str, Any]] = {}
+        self.properties: dict[str, dict[str, Any]] = {}
         self.checks: dict[str, list[dict[str, Any]]] = {}
         self.submitted: list[str] = []
         self.ops = operators or {}
@@ -93,7 +94,7 @@ class FakeAPI:
         return ChildResult(child_id, "COMPLETE" if aid else "ERROR", aid, None if aid else "bad")
 
     def alpha(self, alpha_id: str) -> dict[str, Any]:
-        return self.alphas[alpha_id]
+        return self.alphas.get(alpha_id, {})
 
     def check(self, alpha_id: str) -> list[dict[str, Any]]:
         return self.checks.get(
@@ -110,4 +111,4 @@ class FakeAPI:
         return True
 
     def set_properties(self, alpha_id: str, **kw: Any) -> None:
-        pass
+        self.properties[alpha_id] = kw

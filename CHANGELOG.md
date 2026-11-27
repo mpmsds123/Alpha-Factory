@@ -25,6 +25,20 @@ only), **Changed** (code or design), **Open** (unresolved).
   stopped at the deadline.
 - Open. Share of expressions passing local checks fell from 70.6% to 38.4%.
 
+## 2026-11-27 (pool route for pool-slot alphas)
+
+- Found. After the pool-first fix the evening run produced the first v8 alphas through
+  the train and test-period gates (9 in its first hour, train Sharpe up to 2.9, test
+  Sharpe 2.4 to 2.9). All were rejected at the platform step, mainly on the regular
+  production correlation (0.89 to 0.96), and every WARNING was counted as a failure.
+- Changed. Alphas of the pool slot are judged by the pool route, ported from the
+  template scanner: pool correlation PASS, nothing outside the regular-only tests fails,
+  and a pure pool alpha must match a current pool theme. Before the check the factory
+  writes the Idea / Rationale description the pool tests need, from the hypothesis.
+- Changed. On the regular route a WARNING no longer blocks; FAIL and PENDING still do.
+  A pool-route failure no longer puts the expression's fields on the crowded list.
+- Changed. `review approve` uses the same routes and the same description.
+
 ## 2026-11-26 (one login with the scanner, face-check wait, empty-reply retry)
 
 - Ran. The 15:00 daily run stopped at a face check before any simulation; after the

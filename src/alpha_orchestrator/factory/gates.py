@@ -3,14 +3,15 @@
 train      official submission numbers, applied to the training period only
 oos        the 2-year test period, which nothing upstream has seen
 platform   the platform's own checks on the whole IS (ladder, sub-universe, weight,
-           correlation); empty, pending or failing evidence never passes
+           correlation); empty, pending or failing evidence never passes. An alpha of
+           the pool slot may instead pass by the pool route (pool.py).
 review     stored for you; `review approve` submits it, or `auto_submit` when the
            owner has set submit_mode to "auto"
 
 Before the platform's checks: the local self-correlation check (guards.py). A platform or
 local correlation failure is written on the hypothesis so the loop can retry it once with
 the fix table's instruction, and a production-correlation failure puts the expression's
-fields on the crowded list.
+fields on the crowded list (regular route only: the pool route ignores that test).
 """
 
 import math
@@ -22,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from alpha_orchestrator.brain.api import BrainAPI
-from alpha_orchestrator.factory import guards, notes
+from alpha_orchestrator.factory import guards, notes, pool, slots
 from alpha_orchestrator.factory.config import FactoryConfig, Gates, Search
 from alpha_orchestrator.factory.ledger import Ledger
 from alpha_orchestrator.factory.models import (
@@ -75,8 +76,9 @@ def _value(checks: list[dict[str, Any]], name: str) -> float | None:
 
 
 def platform_pass(checks: list[dict[str, Any]], corr_max: float) -> bool:
-    """Every check PASS and both correlations known and under the line."""
-    if not checks or any(c.get("result") != "PASS" for c in checks):
+    """The regular route: no check FAIL or PENDING, and both correlations known and under
+    the line. A WARNING (e.g. a competition or theme match) does not block a submission."""
+    if not checks or any(c.get("result") in ("FAIL", "PENDING") for c in checks):
         return False
     for name in CORRELATION_CHECKS:
         v = _value(checks, name)
@@ -115,7 +117,7 @@ def mark_train(ledger: Ledger, config: FactoryConfig) -> int:
 
 
 def _failed_names(checks: list[dict[str, Any]], corr_max: float) -> list[str]:
-    out = [str(c.get("name")) for c in checks if c.get("result") != "PASS"]
+    out = [str(c.get("name")) for c in checks if c.get("result") == "FAIL"]
     for name in CORRELATION_CHECKS:
         v = _value(checks, name)
         if v is not None and v > corr_max and name not in out:
@@ -130,9 +132,10 @@ def _record_failure(
     sim: SimulationORM,
     failed: list[str],
     detail: str,
+    crowd: bool = True,
 ) -> None:
     """Write the failure on the hypothesis (for the loop's one retry); crowd the fields of
-    an expression that failed the production correlation."""
+    an expression that failed the production correlation (when `crowd`)."""
     h = s.get(HypothesisORM, sim.hypothesis_id)
     if h is None:
         return
@@ -146,7 +149,7 @@ def _record_failure(
                 "detail": detail[:300],
             },
         }
-    if any("PROD_CORRELATION" in n for n in failed):
+    if crowd and any("PROD_CORRELATION" in n for n in failed):
         e = s.get(ExpressionORM, sim.expression_id)
         fields = list(e.fields) if e is not None else []
         new = guards.add_crowded(config, fields, f"production correlation, alpha {sim.alpha_id}")
@@ -159,6 +162,39 @@ def _record_failure(
                 f"Fields {sorted(new)} failed the production correlation ({detail}); they "
                 "are on the crowded list and are not drawn or offered again.",
             )
+
+
+def is_pool(s: Session, config: FactoryConfig, sim: SimulationORM) -> HypothesisORM | None:
+    """The hypothesis when the simulation was made for a slot inside the pool limits."""
+    h = s.get(HypothesisORM, sim.hypothesis_id)
+    if h is None or config.slots.get(slots.slot_of(h)).outside_pool:
+        return None
+    return h
+
+
+def accepts(
+    checks: list[dict[str, Any]], config: FactoryConfig, pool_slot: bool
+) -> tuple[bool | None, str]:
+    """(True, route) / (False, why) / (None, still computing): the regular route, then the
+    pool route for alphas of the pool slot."""
+    if platform_pass(checks, config.gates.corr_max):
+        return True, "regular"
+    if pool_slot:
+        return pool.verdict(checks)
+    if any(c.get("result") == "PENDING" for c in checks) and not any(
+        c.get("result") == "FAIL" for c in checks
+    ):
+        return None, "pending"
+    return False, ",".join(_failed_names(checks, config.gates.corr_max))
+
+
+def describe(api: BrainAPI, alpha_id: str, h: HypothesisORM) -> None:
+    """Give the alpha the Idea / Rationale description the pool tests need, unless it has one."""
+    current = ((api.alpha(alpha_id) or {}).get("regular") or {}).get("description") or ""
+    if len(current) >= pool.MIN_DESCRIPTION:
+        return
+    text = pool.description(h.claim, h.field_description, h.falsifier, h.holding_days or 5)
+    api.set_properties(alpha_id, description=text, tags=["alpha-factory"])
 
 
 def _first_pass_lesson(s: Session, config: FactoryConfig, sim: SimulationORM) -> None:
@@ -221,6 +257,16 @@ def evaluate(
                     sim.gate_note = f"local self-correlation {value:.2f} with {other}"
                     _record_failure(s, config, ledger, sim, ["SELF_CORRELATION"], sim.gate_note)
                 continue
+        with ledger.session() as s:
+            sim = s.get(SimulationORM, sid)
+            assert sim is not None
+            h = is_pool(s, config, sim)
+            pool_slot = h is not None
+            if h is not None:
+                try:
+                    describe(api, alpha_id, h)
+                except Exception as exc:  # the check still runs; the pool tests may wait
+                    ledger.log("description_skipped", alpha=alpha_id, error=str(exc)[:200])
         checks = api.check(alpha_id)
         with ledger.session() as s:
             sim = s.get(SimulationORM, sid)
@@ -229,20 +275,23 @@ def evaluate(
             if quota_only(checks):
                 ledger.log("platform_check_deferred", alpha=alpha_id, reason="quota")
                 continue
-            if any(c.get("result") == "PENDING" for c in checks) and not any(
-                c.get("result") == "FAIL" for c in checks
-            ):
-                ledger.log("platform_check_deferred", alpha=alpha_id, reason="pending")
+            ok, route = accepts(checks, config, pool_slot)
+            if ok is None:
+                ledger.log("platform_check_deferred", alpha=alpha_id, reason=route)
                 continue
-            sim.checks_pass = platform_pass(checks, config.gates.corr_max)
-            if not sim.checks_pass:
+            sim.checks_pass = ok
+            if not ok:
                 failed = _failed_names(checks, config.gates.corr_max)
+                if pool_slot:
+                    failed = [*failed, f"pool: {route}"]
                 sim.gate_note = "platform: " + ",".join(failed)
                 values = {n: _value(checks, n) for n in CORRELATION_CHECKS}
-                _record_failure(s, config, ledger, sim, failed, f"{failed} {values}")
+                _record_failure(
+                    s, config, ledger, sim, failed, f"{failed} {values}", crowd=not pool_slot
+                )
                 continue
             sim.review = Review.PENDING
-            sim.gate_note = "stored"
+            sim.gate_note = "stored" if route == "regular" else f"stored: {route}"
             _first_pass_lesson(s, config, sim)
         ledger.log("stored_for_review", alpha=alpha_id, simulation=sid)
         stored.append(alpha_id)
@@ -257,9 +306,15 @@ def approve(api: BrainAPI, ledger: Ledger, sim_id: int, config: FactoryConfig) -
             return False
         alpha_id = sim.alpha_id
         h = s.get(HypothesisORM, sim.hypothesis_id)
-        description = h.claim if h else ""
+        pool_slot = is_pool(s, config, sim) is not None
+        description = (
+            pool.description(h.claim, h.field_description, h.falsifier, h.holding_days or 5)
+            if h
+            else ""
+        )
     checks = api.check(alpha_id)
-    if not platform_pass(checks, config.gates.corr_max):
+    ok, _route = accepts(checks, config, pool_slot)
+    if not ok:
         ledger.log("submission_blocked", alpha=alpha_id, checks=checks)
         return False
     if description:
