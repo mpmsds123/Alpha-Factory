@@ -94,6 +94,44 @@ def test_truncated_reply_is_retried() -> None:
     assert answer.label == "x"
 
 
+def test_reply_with_no_choices_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The provider once answered a slow call with no choices; that is a bad answer to
+    retry, not an outage that ends the run."""
+    from types import SimpleNamespace
+
+    import openai
+
+    good = SimpleNamespace(
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop", message=SimpleNamespace(content=json.dumps({"label": "y"}))
+            )
+        ],
+    )
+    replies = [SimpleNamespace(usage=None, choices=None), good]
+
+    class Fake:
+        def __init__(self, **_kw: object) -> None:
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(create=lambda **_k: replies.pop(0))
+            )
+
+        def __enter__(self) -> "Fake":
+            return self
+
+        def __exit__(self, *_a: object) -> None:
+            return None
+
+    monkeypatch.setattr(openai, "OpenAI", Fake)
+    monkeypatch.setattr(
+        "alpha_orchestrator.factory.llm.load_llm_key", lambda _path: "k", raising=False
+    )
+    client = LLMClient(FactoryConfig(), Ledger("sqlite://"))
+    answer, _ = client.ask(PROMPT, Answer, {}, hypothesis_id=None, retrieved={})
+    assert answer.label == "y" and not replies
+
+
 def test_transport_failure_is_logged_and_raised() -> None:
     client, _ = _client(["BOOM"])
     with pytest.raises(LLMUnavailable):
