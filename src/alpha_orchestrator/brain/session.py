@@ -6,6 +6,12 @@ the URL a human opens. `alpha-factory login` is the interactive path that finish
 
 Re-authentication is rationed: at most one password login per `RELOGIN_COOLDOWN_SECONDS`.
 Repeated forced logins have locked this account before.
+
+Shared login: other programs on the same account (the template scanner) can share one
+session. `BRAIN_SHARED_COOKIES` lists their cookie files (os.pathsep-separated, same
+JSON shape). Before a password login or a face-check stop, a still-valid shared cookie is
+adopted; every cookie this session saves is copied to those files. One face check then
+unlocks every program.
 """
 
 import json
@@ -27,6 +33,7 @@ USERNAME_ENV = "ALPHA_LAB_BRAIN_USERNAME"
 PASSWORD_ENV = "ALPHA_LAB_BRAIN_PASSWORD"
 DEFAULT_STATE_DIR = Path("~/.alpha_factory")
 RELOGIN_COOLDOWN_SECONDS = 1800.0
+SHARED_COOKIES_ENV = "BRAIN_SHARED_COOKIES"
 
 
 def platform_url() -> str:
@@ -112,19 +119,24 @@ def _write_private_json(path: Path, payload: Any) -> None:
 class SessionStore:
     """Cookies and login bookkeeping kept outside the repository, readable only by you."""
 
-    def __init__(self, state_dir: Path | None = None) -> None:
+    def __init__(self, state_dir: Path | None = None, shared: list[Path] | None = None) -> None:
         self.dir = (
             state_dir or Path(os.getenv("BRAIN_STATE_DIR", str(DEFAULT_STATE_DIR)))
         ).expanduser()
         self.cookies_path = self.dir / "brain_cookies.json"
         self.meta_path = self.dir / "brain_session.json"
+        if shared is None:
+            raw = os.getenv(SHARED_COOKIES_ENV, "")
+            shared = [Path(p) for p in raw.split(os.pathsep) if p.strip()]
+        self.shared = [p.expanduser() for p in shared]
 
-    def load_cookies(self) -> httpx.Cookies:
-        """Return the saved cookies as a cookie jar (empty if none saved)."""
+    def load_cookies(self, path: Path | None = None) -> httpx.Cookies:
+        """Return the saved cookies (or those in `path`) as a cookie jar (empty if none)."""
         jar = httpx.Cookies()
-        if not self.cookies_path.exists():
+        path = path or self.cookies_path
+        if not path.exists():
             return jar
-        data = json.loads(self.cookies_path.read_text())
+        data = json.loads(path.read_text())
         if isinstance(data, dict):  # older files: {name: value}
             for name, value in data.items():
                 jar.set(str(name), str(value))
@@ -149,6 +161,12 @@ class SessionStore:
             ]
         )
         _write_private_json(self.cookies_path, payload)
+        for other in self.shared:  # best effort: the other program keeps working either way
+            try:
+                if other.parent.is_dir():
+                    _write_private_json(other, payload)
+            except OSError:
+                pass
 
     def meta(self) -> dict[str, Any]:
         """Return the saved session metadata (empty if none saved)."""
@@ -211,18 +229,43 @@ class BrainSession:
         self.store.update_meta(expires_at=self._clock() + expiry)
         return expiry
 
+    def adopt_shared(self, minimum_seconds: float = 600.0) -> bool:
+        """Use another program's still-valid session (see the module note). On success the
+        cookies are saved here and any pending face check is cleared."""
+        own = httpx.Cookies(self.http.cookies)
+        for path in self.store.shared:
+            try:
+                jar = self.store.load_cookies(path)
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            if not len(jar):
+                continue
+            self.http.cookies = jar
+            if self.seconds_remaining() >= minimum_seconds:
+                self.store.save_cookies(self.http.cookies)
+                self.store.update_meta(pending_biometric=None)
+                return True
+        self.http.cookies = own
+        return False
+
     def ensure(self, minimum_seconds: float = 600.0, *, interactive: bool = False) -> float:
         """Return remaining seconds, logging in with the password when needed."""
-        self._require_human_if_pending(interactive)
+        if not (self.store.meta().get("pending_biometric") and self.adopt_shared(minimum_seconds)):
+            self._require_human_if_pending(interactive)
         remaining = self.seconds_remaining()
         if remaining >= minimum_seconds:
             return remaining
+        if self.adopt_shared(minimum_seconds):
+            return self.seconds_remaining()
         self.login(interactive=interactive)
         return self.seconds_remaining()
 
     def login(self, *, interactive: bool = False) -> None:
         """The cooldown guards unattended runs from hammering the password; a person at
-        the keyboard running `alpha-factory login` is not held back by it."""
+        the keyboard running `alpha-factory login` is not held back by it. A valid shared
+        session (another program already logged in) is used instead of a password login."""
+        if not interactive and self.adopt_shared():
+            return
         self._require_human_if_pending(interactive)
         last = float(self.store.meta().get("last_password_login", 0.0))
         if not interactive and self._clock() - last < RELOGIN_COOLDOWN_SECONDS:

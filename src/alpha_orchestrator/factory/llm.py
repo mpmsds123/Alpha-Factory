@@ -144,6 +144,10 @@ class LLMClient:
                 messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
             )
         usage = response.usage
+        if not response.choices:
+            # the provider sometimes answers a slow request with no choices at all (seen
+            # 2026-11-26 after a 15-minute call): a bad answer for the retry, not an outage
+            return "\x00empty", 0, 0
         choice = response.choices[0]
         prompt = getattr(usage, "prompt_tokens", 0) or 0
         completion = getattr(usage, "completion_tokens", 0) or 0
@@ -211,6 +215,8 @@ class LLMClient:
             try:
                 if text.endswith("\x00truncated"):
                     raise ValueError("the answer was cut off; answer more briefly")
+                if text == "\x00empty":
+                    raise ValueError("the reply was empty; answer again")
                 answer = schema.model_validate_json(text)
                 bad = [i for i in answer.cites if i not in allowed]
                 if bad:
