@@ -80,6 +80,31 @@ formulas, hypothesis-expression alignment, complexity limits), FunSearch/AlphaEv
 (a deterministic evaluator outside the LLM, best-so-far shown in the mutation prompt,
 each hypothesis its own island).
 
+## Recent performance
+
+Refreshed every Friday by `alpha-factory weekly --write`, from the run database.
+Gates in order: round 1 (train Sharpe), train, the held-out test period, then the
+platform's own checks; an alpha that clears all of them is stored for review.
+
+<!-- performance:start -->
+Updated 2026-11-26 from the run database. This week: 2026-11-20 to 2026-11-26 (quota days, Pacific). All time: since 2026-11-13.
+
+| Stage | This week | Prior week | All time |
+|---|---:|---:|---:|
+| Hypotheses opened | 247 | 330 | 577 |
+| Expressions proposed | 1,166 | 1,675 | 2,841 |
+| Expressions passing local checks | 589 | 717 | 1,306 |
+| Simulations completed | 580 | 681 | 1,261 |
+| Round-1 gate cleared (hypotheses) | 2 | 3 | 5 |
+| Train gate passed | 0 | 0 | 0 |
+| Test-period gate passed | 0 | 0 | 0 |
+| Platform checks passed | 0 | 0 | 0 |
+| Stored for review | 0 | 0 | 0 |
+| Share of expressions passing local checks | 50.5% | 42.8% | 46.0% |
+| LLM cost (USD) | 3.61 | 3.88 | 7.49 |
+| LLM cost per simulation (USD) | 0.006 | 0.006 | 0.006 |
+<!-- performance:end -->
+
 ## Quick start
 
 ```bash
@@ -112,6 +137,7 @@ alpha-factory daily                   # what the schedule runs (slots, restarts,
 alpha-factory schedule --hour 1 --write   # write the macOS launchd job for `daily`
 alpha-factory review list             # alphas that passed every gate
 alpha-factory review approve <id>     # submit one (cannot be undone)
+alpha-factory weekly --write          # refresh the Recent performance table below
 ```
 
 `alpha-factory run`, `status`, `stats`, `priors add`, `review reject` and `recover-batch`

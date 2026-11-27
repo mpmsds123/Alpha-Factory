@@ -329,6 +329,25 @@ def stats(config: ConfigOpt = DEFAULT_CONFIG) -> None:
 
 
 @app.command()
+def weekly(
+    write: Annotated[bool, typer.Option("--write", help="update README.md in place")] = False,
+    config: ConfigOpt = DEFAULT_CONFIG,
+) -> None:
+    """The weekly performance table (README) and changelog lines, from the database."""
+    from alpha_orchestrator.factory import weekly as wk
+
+    cfg, ledger = _ctx(config)
+    body, lines = wk.report(ledger, cfg)
+    if write:
+        readme = Path(config).resolve().parent / "README.md"
+        changed = wk.write_readme(readme, body)
+        typer.echo(f"{readme}: {'updated' if changed else 'already current'}")
+    else:
+        typer.echo(body)
+    typer.echo("\n" + lines)
+
+
+@app.command()
 def status(config: ConfigOpt = DEFAULT_CONFIG) -> None:
     """Counts at a glance, and whether the cost guard would let a new hypothesis open."""
     cfg, ledger = _ctx(config)
