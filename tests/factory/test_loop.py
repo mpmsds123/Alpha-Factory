@@ -355,14 +355,13 @@ def test_run_end_to_end_stops_when_nothing_is_left() -> None:
         sleep=lambda _: None,
         on_progress=progress.append,
     )
-    # the fake platform has one dataset: pool and single-dataset slots open, the
-    # multi-dataset slot is skipped
+    # no pool alpha is stored, so both hypotheses work for the pool slot
     assert report.opened == 2 and report.stopped_because == "nothing left to do"
     assert progress and report.simulations == 2
     with ledger.session() as s:
         assert sorted(h.state["slot"] for h in s.scalars(select(HypothesisORM))) == [
             "pool",
-            "single_dataset",
+            "pool",
         ]
     with ledger.session() as s:
         assert len(list(s.scalars(select(DecisionORM)))) >= 6
