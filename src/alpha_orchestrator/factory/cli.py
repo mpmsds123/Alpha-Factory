@@ -2,6 +2,7 @@
 run by hand. Nothing is submitted except by `review approve`, unless submit_mode is
 "auto" in factory.yaml."""
 
+import os
 import webbrowser
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,7 +19,12 @@ from alpha_orchestrator.brain.client import (
     SessionExpired,
 )
 from alpha_orchestrator.brain.notify import notify
-from alpha_orchestrator.brain.session import AuthenticationFailed, BrainSession, NeedBiometric
+from alpha_orchestrator.brain.session import (
+    SHARED_COOKIES_ENV,
+    AuthenticationFailed,
+    BrainSession,
+    NeedBiometric,
+)
 from alpha_orchestrator.factory import gates, loop, memory, prompts, report
 from alpha_orchestrator.factory.config import DEFAULT_CONFIG, FactoryConfig, llm_key_available
 from alpha_orchestrator.factory.ledger import Ledger, WorkerAlreadyRunning
@@ -49,9 +55,22 @@ SEED_DOC_CHARS = 6000  # characters of each document shown when extracting prior
 _live_session: BrainSession | None = None
 
 
+SCANNER_SESSION_FILE = "brain_session.json"  # the template scanner's cookie file in its runs folder
+
+
+def _share_login(config: FactoryConfig) -> None:
+    """One login for the factory and the template scanner: when `scanner_runs` is set,
+    the scanner's cookie file becomes a shared one (see brain/session.py)."""
+    if config.scanner_runs and not os.getenv(SHARED_COOKIES_ENV):
+        os.environ[SHARED_COOKIES_ENV] = str(
+            Path(config.scanner_runs).expanduser() / SCANNER_SESSION_FILE
+        )
+
+
 def _ctx(config_path: Path) -> tuple[FactoryConfig, Ledger]:
     try:
         config = FactoryConfig.load(config_path)
+        _share_login(config)
         return config, Ledger.at(Path(config.db_path))
     except WorkerAlreadyRunning as exc:
         typer.echo(f"Safe stop: {exc}")
@@ -139,6 +158,29 @@ def run(
 # day; a login challenge stops everything and calls the human.
 DAILY_RETRY_WAIT_S = 300
 DAILY_MAX_RUNS = 12
+FACE_POLL_S = 30  # while waiting for the owner's face check
+
+
+def _wait_for_face_check(deadline: float) -> bool:
+    """A scheduled run that hits a face check waits for it instead of quitting: it opens
+    the check page once, then every 30 s asks the platform whether it was finished, or
+    whether another program on the account (the scanner) already logged in. False when
+    the day's deadline comes first."""
+    import time
+
+    session = BrainSession()
+    try:
+        url = session.store.meta().get("pending_biometric")
+        if url:
+            webbrowser.open(str(url))
+        notify("Face check needed: the factory resumes by itself once it is done")
+        while time.monotonic() < deadline:
+            if (url and session.complete_biometric(str(url))) or session.adopt_shared():
+                return True
+            time.sleep(FACE_POLL_S)
+        return False
+    finally:
+        session.close()
 
 
 @app.command()
@@ -167,8 +209,11 @@ def daily(
             run(minutes=left, config=config)
             break  # finished normally: budget, deadline or nothing left
         except typer.Exit as stop:
-            if stop.exit_code == 2:  # face check: only the owner can do it
-                raise
+            if stop.exit_code == 2:  # face check: only the owner can do it, so wait for it
+                if attempt == DAILY_MAX_RUNS or not _wait_for_face_check(deadline):
+                    raise
+                typer.echo("Face check done; resuming.")
+                continue
             if stop.exit_code != 3 or attempt == DAILY_MAX_RUNS:
                 raise
             typer.echo(f"Paused; trying again in {DAILY_RETRY_WAIT_S // 60} minutes.")
@@ -246,6 +291,7 @@ def login(
     config: ConfigOpt = DEFAULT_CONFIG,
 ) -> None:
     """Log in (with the face check when asked), then optionally start the run."""
+    _share_login(FactoryConfig.load(config))
     session = BrainSession()
     try:
         remaining = session.ensure(interactive=True)

@@ -339,3 +339,50 @@ def test_pending_persona_prevents_relogin_after_an_authenticated_request_expires
     with pytest.raises(NeedBiometric):
         client.request("GET", "/simulations/existing")
     assert calls == ["GET"]
+
+
+def test_shared_session_replaces_a_face_check_and_a_password_login(tmp_path: Path) -> None:
+    """The scanner already did the face check: the factory uses its cookie, clears the
+    pending check and never sends the password."""
+    shared = tmp_path / "scanner" / "brain_session.json"
+    shared.parent.mkdir()
+    shared.write_text(json.dumps([{"name": "t", "value": "fresh", "domain": "", "path": "/"}]))
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.headers.get("cookie", "")))
+        if request.method == "POST":
+            return httpx.Response(401, headers={"WWW-Authenticate": "persona", "Location": "/p"})
+        if "fresh" in request.headers.get("cookie", ""):
+            return httpx.Response(200, json={"token": {"expiry": 14000}})
+        return httpx.Response(401)
+
+    store = SessionStore(tmp_path / "factory", shared=[shared])
+    session = BrainSession(CREDS, store, transport=httpx.MockTransport(handler))
+    store.update_meta(pending_biometric="https://api.example.test/authentication/persona?x")
+    assert session.ensure() == 14000
+    assert store.meta()["pending_biometric"] is None
+    assert all(method == "GET" for method, _ in calls)
+    assert json.loads(store.cookies_path.read_text())[0]["value"] == "fresh"
+
+
+def test_saved_cookies_are_copied_to_the_shared_file(tmp_path: Path) -> None:
+    shared = tmp_path / "scanner" / "brain_session.json"
+    shared.parent.mkdir()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(201, headers={"set-cookie": "t=abc; Path=/"})
+
+    store = SessionStore(tmp_path / "factory", shared=[shared])
+    session = BrainSession(CREDS, store, transport=httpx.MockTransport(handler))
+    session.login()
+    assert [(c["name"], c["value"]) for c in json.loads(shared.read_text())] == [("t", "abc")]
+    assert oct(shared.stat().st_mode)[-3:] == "600"
+
+
+def test_an_expired_shared_cookie_is_not_adopted(tmp_path: Path) -> None:
+    shared = tmp_path / "brain_session.json"
+    shared.write_text(json.dumps([{"name": "t", "value": "old", "domain": "", "path": "/"}]))
+    session, _ = make(lambda r: httpx.Response(401), tmp_path / "f")
+    session.store.shared = [shared]
+    assert not session.adopt_shared()
