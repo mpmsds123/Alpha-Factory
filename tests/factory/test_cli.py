@@ -147,9 +147,34 @@ def test_daily_retries_pauses_and_stops_on_face_check(
         raise typer.Exit(2)
 
     monkeypatch.setattr(cli, "run", face)
+    monkeypatch.setattr(cli, "_wait_for_face_check", lambda _deadline: False)
     calls.clear()
     assert RUNNER.invoke(cli.app, ["daily", "--config", cfg]).exit_code == 2
-    assert len(calls) == 1  # no retry: the face check needs the owner
+    assert len(calls) == 1  # the owner never did the check before the deadline
+
+    codes = iter([2, 0])
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "_wait_for_face_check", lambda _deadline: True)
+    calls.clear()
+    assert RUNNER.invoke(cli.app, ["daily", "--config", cfg]).exit_code == 0
+    assert len(calls) == 2  # waited for the check, then resumed
+
+
+def test_scanner_runs_turns_on_the_shared_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from alpha_orchestrator.brain.session import SHARED_COOKIES_ENV
+    from alpha_orchestrator.factory.config import FactoryConfig
+
+    monkeypatch.delenv(SHARED_COOKIES_ENV, raising=False)
+    path = _config(tmp_path)
+    cli._share_login(FactoryConfig.load(path))
+    assert SHARED_COOKIES_ENV not in __import__("os").environ
+    path.write_text(path.read_text() + f"scanner_runs: {tmp_path / 'runs'}\n")
+    cli._share_login(FactoryConfig.load(path))
+    assert __import__("os").environ[SHARED_COOKIES_ENV] == str(
+        tmp_path / "runs" / "brain_session.json"
+    )
 
 
 def test_schedule_prints_and_writes_a_launchd_job(tmp_path: Path) -> None:

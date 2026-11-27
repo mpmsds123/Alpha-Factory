@@ -4,7 +4,7 @@
 db_path: ~/.alpha_factory/factory_v8.db   # the factory's one database, outside the repo
 reports_dir: reports                      # progress CSVs (git-ignored)
 private_dir: ~/.alpha_factory/private     # platform vocabulary, never committed
-scanner_runs: ""                          # template scanner runs folder (originality check)
+scanner_runs: ~/Desktop/因子挖掘/scanner/runs   # template scanner runs folder (originality check, shared login)
 v7_db: ~/.alpha_factory/factory.db        # read once by `alpha-factory memory import-v7`
 
 policy:
