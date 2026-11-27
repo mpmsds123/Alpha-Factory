@@ -7,6 +7,24 @@ Operational detail that used to live in `docs/` is summarized in the entries bel
 Entry format for new days: **Ran** (what was run, in counts), **Found** (aggregate results
 only), **Changed** (code or design), **Open** (unresolved).
 
+## 2026-11-26 (weekly)
+
+- Ran. 2026-11-21 to 2026-11-27: 143 hypotheses, 683 expressions proposed (262 passed local checks), 264 simulations, LLM cost $2.57.
+- Found. Round-1 gate cleared by 8 hypotheses; train gate 9, test-period gate 8, platform checks 0; 0 stored for review.
+- Changed. Earlier GitHub history joined to the cleaned local version (a7a7c86).
+- Changed. Daily slots, fix table, local checks, platform retry, memory files, submit switch, daily schedule (#2).
+- Changed. Daily run stops 15 minutes before the quota day resets (#3).
+- Changed. One login shared with the scanner; daily run waits for the face check (#4).
+- Changed. Pool slot first until it has an alpha in the quota day (#5).
+- Changed. Weekly performance table in the README (#6).
+- Open. First train-gate and test-period passes this week (9 and 8), but none cleared the
+  platform checks: 4 retries for production correlation, 1 for concentrated weight.
+- Open. No daily run between 2026-11-21 and 2026-11-25 (the schedule started 2026-11-25).
+  On 2026-11-26 the run stopped at a face check, then twice on the LLM provider (402
+  insufficient balance, then an empty reply); the evening rerun did 150 simulations and
+  stopped at the deadline.
+- Open. Share of expressions passing local checks fell from 70.6% to 38.4%.
+
 ## 2026-11-26 (one login with the scanner, face-check wait, empty-reply retry)
 
 - Ran. The 15:00 daily run stopped at a face check before any simulation; after the
