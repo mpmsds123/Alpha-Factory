@@ -47,9 +47,11 @@ you:     review approve                     the only path that submits
 
 ### Daily operation (borrowed from a working public pipeline)
 
-* **Daily slots.** Each day has 4 places: one *pool* alpha (few operators, few fields),
-  one *single-dataset* alpha and one *multi-dataset* alpha (both must exceed the pool
-  limits, or the platform routes them to the pool), and one spare place for any kind.
+* **Daily slots.** Each day has 4 places: a *pool* alpha (few operators, few fields), a
+  *single-dataset* alpha that must exceed the pool limits (or the platform routes it to
+  the pool), and spare places for either kind. Every alpha uses one dataset: mixing
+  datasets gives up the single-dataset route and is paid at the lowest multiplier of the
+  datasets mixed, so the multi-dataset slot was removed in `factory.yaml` (2026-11-27).
   The pool slot is filled first each day. A pool alpha is judged by the pool's own tests
   (pool correlation, a current pool theme, a written Idea / Rationale description), not
   by the regular production correlation, which it is allowed to fail.

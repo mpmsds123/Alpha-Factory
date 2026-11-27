@@ -25,6 +25,17 @@ only), **Changed** (code or design), **Open** (unresolved).
   stopped at the deadline.
 - Open. Share of expressions passing local checks fell from 70.6% to 38.4%.
 
+## 2026-11-27 (single dataset only, tighter self-correlation)
+
+- Changed. `factory.yaml` drops the multi-dataset slot: an alpha that mixes datasets loses
+  the single-dataset route and is paid at the lowest multiplier of the datasets it mixes.
+  The code default keeps the slot; the configuration turns it off.
+- Changed. The local self-correlation line before the platform check is 0.40 (was 0.60):
+  the value factor ranks the combination of recent submissions, so new alphas must add
+  something the submitted ones do not.
+- Found. None of the 1,475 expressions that passed local checks used a price-volume field
+  outside its own dataset; helper fields already come from the hypothesis's dataset.
+
 ## 2026-11-27 (pool route for pool-slot alphas)
 
 - Found. After the pool-first fix the evening run produced the first v8 alphas through
