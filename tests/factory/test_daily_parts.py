@@ -89,6 +89,17 @@ def test_slots_fill_empty_first_then_spare_then_stop() -> None:
         assert slots.stored_today(s, cfg) == {"pool": 2, "single_dataset": 1, "multi_dataset": 1}
 
 
+def test_pool_slot_comes_first_until_it_has_an_alpha() -> None:
+    cfg = FactoryConfig()
+    ledger = Ledger("sqlite://")
+    with ledger.session() as s:
+        for _ in range(3):  # open pool hypotheses do not hand the turn to the other slots
+            s.add(HypothesisORM(region="R1", dataset_id="d", claim="c", state={"slot": "pool"}))
+        s.flush()
+        nxt = slots.next_slot(s, cfg)
+        assert nxt is not None and nxt.name == "pool"
+
+
 def test_outside_pool_slot_needs_more_operators_or_fields() -> None:
     small = "order(sig_a)"
     kw: dict[str, Any] = {
