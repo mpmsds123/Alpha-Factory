@@ -87,22 +87,22 @@ Gates in order: round 1 (train Sharpe), train, the held-out test period, then th
 platform's own checks; an alpha that clears all of them is stored for review.
 
 <!-- performance:start -->
-Updated 2026-11-26 from the run database. This week: 2026-11-20 to 2026-11-26 (quota days, Pacific). All time: since 2026-11-13.
+Updated 2026-11-27 from the run database. This week: 2026-11-21 to 2026-11-27 (quota days, Pacific). All time: since 2026-11-13.
 
 | Stage | This week | Prior week | All time |
 |---|---:|---:|---:|
-| Hypotheses opened | 247 | 330 | 577 |
-| Expressions proposed | 1,166 | 1,675 | 2,841 |
-| Expressions passing local checks | 589 | 717 | 1,306 |
-| Simulations completed | 580 | 681 | 1,261 |
-| Round-1 gate cleared (hypotheses) | 2 | 3 | 5 |
-| Train gate passed | 0 | 0 | 0 |
-| Test-period gate passed | 0 | 0 | 0 |
+| Hypotheses opened | 143 | 161 | 634 |
+| Expressions proposed | 683 | 703 | 3,061 |
+| Expressions passing local checks | 262 | 496 | 1,475 |
+| Simulations completed | 264 | 466 | 1,411 |
+| Round-1 gate cleared (hypotheses) | 8 | 2 | 13 |
+| Train gate passed | 9 | 0 | 9 |
+| Test-period gate passed | 8 | 0 | 8 |
 | Platform checks passed | 0 | 0 | 0 |
 | Stored for review | 0 | 0 | 0 |
-| Share of expressions passing local checks | 50.5% | 42.8% | 46.0% |
-| LLM cost (USD) | 3.61 | 3.88 | 7.49 |
-| LLM cost per simulation (USD) | 0.006 | 0.006 | 0.006 |
+| Share of expressions passing local checks | 38.4% | 70.6% | 48.2% |
+| LLM cost (USD) | 2.57 | 1.70 | 8.14 |
+| LLM cost per simulation (USD) | 0.010 | 0.004 | 0.006 |
 <!-- performance:end -->
 
 ## Quick start
