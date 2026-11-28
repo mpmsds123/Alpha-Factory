@@ -96,18 +96,18 @@ Updated 2026-11-27 from the run database. This week: 2026-11-21 to 2026-11-27 (q
 
 | Stage | This week | Prior week | All time |
 |---|---:|---:|---:|
-| Hypotheses opened | 143 | 161 | 634 |
-| Expressions proposed | 683 | 703 | 3,061 |
-| Expressions passing local checks | 262 | 496 | 1,475 |
-| Simulations completed | 264 | 466 | 1,411 |
-| Round-1 gate cleared (hypotheses) | 8 | 2 | 13 |
-| Train gate passed | 9 | 0 | 9 |
-| Test-period gate passed | 8 | 0 | 8 |
+| Hypotheses opened | 192 | 161 | 683 |
+| Expressions proposed | 916 | 703 | 3,294 |
+| Expressions passing local checks | 420 | 496 | 1,633 |
+| Simulations completed | 442 | 466 | 1,589 |
+| Round-1 gate cleared (hypotheses) | 36 | 2 | 41 |
+| Train gate passed | 30 | 0 | 30 |
+| Test-period gate passed | 24 | 0 | 24 |
 | Platform checks passed | 0 | 0 | 0 |
 | Stored for review | 0 | 0 | 0 |
-| Share of expressions passing local checks | 38.4% | 70.6% | 48.2% |
-| LLM cost (USD) | 2.57 | 1.70 | 8.14 |
-| LLM cost per simulation (USD) | 0.010 | 0.004 | 0.006 |
+| Share of expressions passing local checks | 45.9% | 70.6% | 49.6% |
+| LLM cost (USD) | 3.09 | 1.70 | 8.66 |
+| LLM cost per simulation (USD) | 0.007 | 0.004 | 0.005 |
 <!-- performance:end -->
 
 ## Quick start

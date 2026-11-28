@@ -7,6 +7,22 @@ Operational detail that used to live in `docs/` is summarized in the entries bel
 Entry format for new days: **Ran** (what was run, in counts), **Found** (aggregate results
 only), **Changed** (code or design), **Open** (unresolved).
 
+## 2026-11-27 (weekly)
+
+- Ran. 2026-11-21 to 2026-11-27: 192 hypotheses, 916 expressions proposed (420 passed local checks), 442 simulations, LLM cost $3.09.
+- Found. Round-1 gate cleared by 36 hypotheses; train gate 30, test-period gate 24, platform checks 0; 0 stored for review.
+- Changed. Pool route for pool-slot alphas; platform warnings no longer block (#7).
+- Changed. Single-dataset slots only; local self-correlation line 0.40 (#8).
+- Changed. #2 to #6 are listed in the 2026-11-26 entry.
+- Open. 24 test-period passes, none cleared the platform checks: 11 retries (6 self-correlation,
+  4 production correlation, 1 concentrated weight); 16 checks deferred because the pool
+  correlation was not computed yet.
+- Open. Both scheduled runs this week (2026-11-26, 2026-11-27) stopped first at a face check.
+- Open. 2026-11-26: LLM provider out of balance (402), then an empty reply after 3 simulations;
+  the evening rerun did 150 simulations and stopped at the deadline. 2026-11-27: 108 simulations,
+  stopped with nothing left to do.
+- Open. Share of expressions passing local checks rose from 38.4% to 45.9%.
+
 ## 2026-11-26 (weekly)
 
 - Ran. 2026-11-21 to 2026-11-27: 143 hypotheses, 683 expressions proposed (262 passed local checks), 264 simulations, LLM cost $2.57.
